@@ -1,6 +1,6 @@
 # ALTRIOS Applied
 
-[This repo](https://github.com/NREL/altrios-applied) is setup for applying ALTRIOS to projects.
+[This repo](https://github.com/NREL/altrios-applied) is setup for applying ALTRIOS to projects in `./applications/`.
 
 ![Altrios Logo](https://raw.githubusercontent.com/NREL/altrios/main/.github/images/ALTRIOS-logo-web.jpg)
 
