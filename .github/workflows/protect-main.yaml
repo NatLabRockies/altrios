@@ -1,0 +1,15 @@
+name: Protect `main`
+
+on:
+  pull_request:
+
+jobs:
+  branch-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check if target branch is main
+        run: |
+          if [[ "${{ github.base_ref }}" == "main" ]]; then
+            echo "Direct merge from into main is blocked"
+            exit 1
+          fi
