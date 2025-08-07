@@ -127,32 +127,49 @@ loco_con_sans_buffers = alt.Consist(
 )
 
 # Instantiate the intermediate `TrainSimBuilder`
+# tsb = alt.TrainSimBuilder(
+#     train_id="0",
+#     origin_id="Minneapolis",
+#     destination_id="Superior",
+#     train_config=train_config,
+#     loco_con=loco_con,
+# )
+
 tsb = alt.TrainSimBuilder(
     train_id="0",
-    origin_id="Minneapolis",
-    destination_id="Superior",
+    origin_id="WichtaFalls",
+    destination_id="FortWorth",
     train_config=train_config,
     loco_con=loco_con,
 )
 
 # Instantiate the intermediate `TrainSimBuilder`
+# tsb_sans_buffers = alt.TrainSimBuilder(
+#     train_id="0",
+#     origin_id="Minneapolis",
+#     destination_id="Superior",
+#     train_config=train_config,
+#     loco_con=loco_con_sans_buffers,
+# )
 tsb_sans_buffers = alt.TrainSimBuilder(
     train_id="0",
-    origin_id="Minneapolis",
-    destination_id="Superior",
+    origin_id="WichtaFalls",
+    destination_id="FortWorth",
     train_config=train_config,
     loco_con=loco_con_sans_buffers,
 )
 
 # Load the network and construct the timed link path through the network.
 print("Loading `Network`")
-network = alt.Network.from_file(
-    alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
-)
+# network = alt.Network.from_file(
+#     alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
+# )
+# location_map = alt.import_locations(
+#     alt.resources_root() / "networks/default_locations.csv"
+# )
 
-location_map = alt.import_locations(
-    alt.resources_root() / "networks/default_locations.csv"
-)
+network = alt.Network.from_file("/Users/qianqiantong/PycharmProjects/RailwayLPF/results/line segment 485.yaml")
+location_map = alt.Network.from_file("/Users/qianqiantong/PycharmProjects/RailwayLPF/results/locations segment 485.csv")
 
 train_sim: alt.SpeedLimitTrainSim = tsb.make_speed_limit_train_sim(
     location_map=location_map,
