@@ -169,7 +169,8 @@ print("Loading `Network`")
 # )
 
 network = alt.Network.from_file("/Users/qianqiantong/PycharmProjects/RailwayLPF/results/line segment 485.yaml")
-location_map = alt.Network.from_file("/Users/qianqiantong/PycharmProjects/RailwayLPF/results/locations segment 485.csv")
+# location_map = alt.Network.from_file("/Users/qianqiantong/PycharmProjects/RailwayLPF/results/locations segment 485.csv")
+location_map = alt.import_locations("/Users/qianqiantong/PycharmProjects/RailwayLPF/results/locations segment 485.csv")
 
 train_sim: alt.SpeedLimitTrainSim = tsb.make_speed_limit_train_sim(
     location_map=location_map,
