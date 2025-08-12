@@ -29,12 +29,16 @@ rail_vehicles = [
     for vehicle_file in Path(alt.resources_root() / "rolling_stock/").glob("*.yaml")
 ]
 
-location_map = alt.import_locations(
-    alt.resources_root() / "networks/default_locations.csv"
-)
-network = alt.Network.from_file(
-    alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
-)
+network = alt.Network.from_file("/Users/qianqiantong/PycharmProjects/RailwayLPF/results/line segment 485.yaml")
+location_map = alt.import_locations("/Users/qianqiantong/PycharmProjects/RailwayLPF/results/locations segment 485.csv")
+
+
+# location_map = alt.import_locations(
+#     alt.resources_root() / "networks/default_locations.csv"
+# )
+# network = alt.Network.from_file(
+#     alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
+# )
 
 t1_import = time.perf_counter()
 print(

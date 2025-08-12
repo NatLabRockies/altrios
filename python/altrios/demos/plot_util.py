@@ -611,73 +611,73 @@ def plot_hel_pwr_and_soc(
     for loco in ts_dict["loco_con"]["loco_vec"]:
         if "HybridLoco" in loco["loco_type"]:
             loco_list.append(loco)
-    hybrid_loco = loco_list[0]
+    # hybrid_loco = loco_list[0]
     fig, ax = plt.subplots(3, 1, sharex=True)
     plt.suptitle("Hybrid Locomotive " + mod_str)
 
     ax_idx = 0
-    ax[ax_idx].plot(
-        ts_dict["history"]["time_seconds"],
-        np.array(hybrid_loco["history"]["pwr_out_watts"]) / 1e3,
-        label="tract. pwr.",
-    )
-    ax[ax_idx].plot(
-        ts_dict["history"]["time_seconds"],
-        np.array(
-            hybrid_loco["loco_type"][hel_type]["res"]["history"]["pwr_disch_max_watts"]
-        )
-        / 1e3,
-        label="batt. max disch. pwr",
-    )
-    ax[ax_idx].plot(
-        ts_dict["history"]["time_seconds"],
-        np.array(
-            hybrid_loco["loco_type"][hel_type]["res"]["history"]["pwr_charge_max_watts"]
-        )
-        / 1e3,
-        label="batt. max chrg. pwr",
-    )
-    ax[ax_idx].plot(
-        ts_dict["history"]["time_seconds"],
-        np.array(
-            hybrid_loco["loco_type"][hel_type]["res"]["history"][
-                "pwr_out_electrical_watts"
-            ]
-        )
-        / 1e3,
-        label="batt. elec. pwr.",
-    )
-    pwr_gen_elect_out = np.array(
-        hybrid_loco["loco_type"][hel_type]["gen"]["history"]["pwr_elec_prop_out_watts"]
-    ) + np.array(
-        hybrid_loco["loco_type"][hel_type]["gen"]["history"]["pwr_elec_aux_watts"]
-    )
-    ax[ax_idx].plot(
-        ts_dict["history"]["time_seconds"],
-        pwr_gen_elect_out / 1e3,
-        label="gen. elec. pwr.",
-    )
-    y_max = ax[ax_idx].get_ylim()[1]
-    ax[ax_idx].set_ylim([-y_max, y_max])
-    ax[ax_idx].set_ylabel("Power [kW]")
-    ax[ax_idx].legend()
-
-    ax_idx += 1
-    ax[ax_idx].plot(
-        ts_dict["history"]["time_seconds"],
-        hybrid_loco["loco_type"][hel_type]["res"]["history"]["soc"],
-        label="soc",
-    )
-    ax[ax_idx].plot(
-        ts_dict["history"]["time_seconds"][1:],
-        hybrid_loco["loco_type"][hel_type]["res"]["history"]["soc_chrg_buffer"][1:],
-        label="chrg buff",
-    )
-    ax[ax_idx].plot(
-        ts_dict["history"]["time_seconds"][1:],
-        hybrid_loco["loco_type"][hel_type]["res"]["history"]["soc_disch_buffer"][1:],
-        label="disch buff",
-    )
+    # ax[ax_idx].plot(
+    #     ts_dict["history"]["time_seconds"],
+    #     np.array(hybrid_loco["history"]["pwr_out_watts"]) / 1e3,
+    #     label="tract. pwr.",
+    # )
+    # ax[ax_idx].plot(
+    #     ts_dict["history"]["time_seconds"],
+    #     np.array(
+    #         hybrid_loco["loco_type"][hel_type]["res"]["history"]["pwr_disch_max_watts"]
+    #     )
+    #     / 1e3,
+    #     label="batt. max disch. pwr",
+    # )
+    # ax[ax_idx].plot(
+    #     ts_dict["history"]["time_seconds"],
+    #     np.array(
+    #         hybrid_loco["loco_type"][hel_type]["res"]["history"]["pwr_charge_max_watts"]
+    #     )
+    #     / 1e3,
+    #     label="batt. max chrg. pwr",
+    # )
+    # ax[ax_idx].plot(
+    #     ts_dict["history"]["time_seconds"],
+    #     np.array(
+    #         hybrid_loco["loco_type"][hel_type]["res"]["history"][
+    #             "pwr_out_electrical_watts"
+    #         ]
+    #     )
+    #     / 1e3,
+    #     label="batt. elec. pwr.",
+    # )
+    # pwr_gen_elect_out = np.array(
+    #     hybrid_loco["loco_type"][hel_type]["gen"]["history"]["pwr_elec_prop_out_watts"]
+    # ) + np.array(
+    #     hybrid_loco["loco_type"][hel_type]["gen"]["history"]["pwr_elec_aux_watts"]
+    # )
+    # ax[ax_idx].plot(
+    #     ts_dict["history"]["time_seconds"],
+    #     pwr_gen_elect_out / 1e3,
+    #     label="gen. elec. pwr.",
+    # )
+    # y_max = ax[ax_idx].get_ylim()[1]
+    # ax[ax_idx].set_ylim([-y_max, y_max])
+    # ax[ax_idx].set_ylabel("Power [kW]")
+    # ax[ax_idx].legend()
+    #
+    # ax_idx += 1
+    # ax[ax_idx].plot(
+    #     ts_dict["history"]["time_seconds"],
+    #     hybrid_loco["loco_type"][hel_type]["res"]["history"]["soc"],
+    #     label="soc",
+    # )
+    # ax[ax_idx].plot(
+    #     ts_dict["history"]["time_seconds"][1:],
+    #     hybrid_loco["loco_type"][hel_type]["res"]["history"]["soc_chrg_buffer"][1:],
+    #     label="chrg buff",
+    # )
+    # ax[ax_idx].plot(
+    #     ts_dict["history"]["time_seconds"][1:],
+    #     hybrid_loco["loco_type"][hel_type]["res"]["history"]["soc_disch_buffer"][1:],
+    #     label="disch buff",
+    # )
     # TODO: add static min and max soc bounds to plots
     # TODO: make a plot util for any type of locomotive that will plot all the stuff
     ax[ax_idx].set_ylabel("[-]")

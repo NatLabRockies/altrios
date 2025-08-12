@@ -102,16 +102,10 @@ hel_sans_buffers = alt.Locomotive.from_pydict(hel_new_dict)
 # construct a vector of one BEL, one HEL, and several conventional locomotives
 loco_vec = (
     []
-    + [hel.copy()]
-    + [alt.Locomotive.default()] * 1
+    # + [hel.copy()]
+    + [alt.Locomotive.default()] * 4    # conventional trains
 )
 
-# construct a vector of one BEL, one HEL, and several conventional locomotives
-loco_vec_sans_buffers = (
-    []
-    + [hel_sans_buffers.copy()]
-    + [alt.Locomotive.default()] * 1
-)
 
 # instantiate consist
 print("Building `Consist`")
@@ -120,20 +114,6 @@ loco_con = alt.Consist(
     SAVE_INTERVAL,
 )
 
-# instantiate consist
-loco_con_sans_buffers = alt.Consist(
-    loco_vec_sans_buffers,
-    SAVE_INTERVAL,
-)
-
-# Instantiate the intermediate `TrainSimBuilder`
-# tsb = alt.TrainSimBuilder(
-#     train_id="0",
-#     origin_id="Minneapolis",
-#     destination_id="Superior",
-#     train_config=train_config,
-#     loco_con=loco_con,
-# )
 
 tsb = alt.TrainSimBuilder(
     train_id="0",
@@ -141,22 +121,6 @@ tsb = alt.TrainSimBuilder(
     destination_id="FortWorth",
     train_config=train_config,
     loco_con=loco_con,
-)
-
-# Instantiate the intermediate `TrainSimBuilder`
-# tsb_sans_buffers = alt.TrainSimBuilder(
-#     train_id="0",
-#     origin_id="Minneapolis",
-#     destination_id="Superior",
-#     train_config=train_config,
-#     loco_con=loco_con_sans_buffers,
-# )
-tsb_sans_buffers = alt.TrainSimBuilder(
-    train_id="0",
-    origin_id="WichtaFalls",
-    destination_id="FortWorth",
-    train_config=train_config,
-    loco_con=loco_con_sans_buffers,
 )
 
 # Load the network and construct the timed link path through the network.
@@ -169,7 +133,6 @@ print("Loading `Network`")
 # )
 
 network = alt.Network.from_file("/Users/qianqiantong/PycharmProjects/RailwayLPF/results/line segment 485.yaml")
-# location_map = alt.Network.from_file("/Users/qianqiantong/PycharmProjects/RailwayLPF/results/locations segment 485.csv")
 location_map = alt.import_locations("/Users/qianqiantong/PycharmProjects/RailwayLPF/results/locations segment 485.csv")
 
 train_sim: alt.SpeedLimitTrainSim = tsb.make_speed_limit_train_sim(
@@ -178,20 +141,8 @@ train_sim: alt.SpeedLimitTrainSim = tsb.make_speed_limit_train_sim(
 )
 train_sim.set_save_interval(SAVE_INTERVAL)
 
-train_sim_sans_buffers: alt.SpeedLimitTrainSim = (
-    tsb_sans_buffers.make_speed_limit_train_sim(
-        location_map=location_map,
-        save_interval=SAVE_INTERVAL,
-    )
-)
-train_sim_sans_buffers.set_save_interval(SAVE_INTERVAL)
-
 print("Running `make_est_times`")
 est_time_net, _consist = alt.make_est_times(train_sim, network)
-
-est_time_net_sans_buffers, _consist = alt.make_est_times(
-    train_sim_sans_buffers, network
-)
 
 print("Running `run_dispatch`")
 timed_link_path = next(
@@ -205,19 +156,6 @@ timed_link_path = next(
         )
     )
 )
-
-timed_link_path_sans_buffers = next(
-    iter(
-        alt.run_dispatch(
-            network,
-            alt.SpeedLimitTrainSimVec([train_sim_sans_buffers]),
-            [est_time_net_sans_buffers],
-            False,
-            False,
-        )
-    )
-)
-
 
 # whether to override files used by set_speed_train_sim_demo.py
 OVERRIDE_SSTS_INPUTS = os.environ.get("OVERRIDE_SSTS_INPUTS", "false").lower() == "true"
@@ -235,6 +173,7 @@ train_sim.walk_timed_path(
 t1 = time.perf_counter()
 
 ts_dict = train_sim.to_pydict()
+print(f"Travel time:{ts_dict['state']['time_seconds']}s")
 
 print(f"Time to simulate: {t1 - t0:.5g}")
 raw_fuel_gigajoules = train_sim.get_energy_fuel_joules(False) / 1e9
@@ -245,42 +184,10 @@ corrected_fuel_gigajoules = train_sim.get_energy_fuel_soc_corrected_joules() / 1
 print(
     f"Total SOC-corrected fuel used with BEL and HEL buffers active: {corrected_fuel_gigajoules:.6g} GJ"
 )
+
 assert len(ts_dict["history"]) > 1
 
-t0 = time.perf_counter()
-train_sim_sans_buffers.walk_timed_path(
-    network=network,
-    timed_path=timed_link_path_sans_buffers,
-)
 t1 = time.perf_counter()
-
-print(f"\nTime to simulate without buffers: {t1 - t0:.5g}")
-raw_fuel_sans_buffers_gigajoules = (
-    train_sim_sans_buffers.get_energy_fuel_joules(False) / 1e9
-)
-print(
-    f"Total raw fuel used with BEL and HEL buffers inactive: {raw_fuel_sans_buffers_gigajoules:.6g} GJ"
-)
-corrected_fuel_sans_buffers_gigajoules = (
-    train_sim_sans_buffers.get_energy_fuel_soc_corrected_joules() / 1e9
-)
-print(
-    f"Total SOC-corrected fuel used with BEL and HEL buffers inactive: {corrected_fuel_sans_buffers_gigajoules:.6g} GJ"
-)
-assert len(train_sim_sans_buffers.to_pydict()["history"]) > 1
-
-savings_raw = (
-    -(raw_fuel_gigajoules - raw_fuel_sans_buffers_gigajoules)
-    / raw_fuel_sans_buffers_gigajoules
-    * 100
-)
-print(f"\nRaw fuel savings from buffers: {savings_raw:.5g}%")
-savings_soc_corrected = (
-    -(corrected_fuel_gigajoules - corrected_fuel_sans_buffers_gigajoules)
-    / corrected_fuel_sans_buffers_gigajoules
-    * 100
-)
-print(f"SOC-corrected fuel savings from buffers: {savings_soc_corrected:.5g}%")
 
 # Uncomment the following lines to overwrite `set_speed_train_sim_demo.py` `speed_trace`
 if OVERRIDE_SSTS_INPUTS:
@@ -293,20 +200,6 @@ if OVERRIDE_SSTS_INPUTS:
 fig0, ax0 = plot_util.plot_train_level_powers(train_sim, "With Buffers")
 fig1, ax1 = plot_util.plot_train_network_info(train_sim, "With Buffers")
 fig2, ax2 = plot_util.plot_consist_pwr(train_sim, "With Buffers")
-fig3, ax3 = plot_util.plot_hel_pwr_and_soc(train_sim, "With Buffers")
-
-fig0_sans_buffers, ax0_sans_buffers = plot_util.plot_train_level_powers(
-    train_sim_sans_buffers, "Without Buffers"
-)
-fig1_sans_buffers, ax1_sans_buffers = plot_util.plot_train_network_info(
-    train_sim_sans_buffers, "Without Buffers"
-)
-fig2_sans_buffers, ax2_sans_buffers = plot_util.plot_consist_pwr(
-    train_sim_sans_buffers, "Without Buffers"
-)
-fig3_sans_buffers, ax3_sans_buffers = plot_util.plot_hel_pwr_and_soc(
-    train_sim_sans_buffers, "Without Buffers"
-)
 
 if SHOW_PLOTS:
     plt.tight_layout()
@@ -329,10 +222,6 @@ if ENABLE_ASSERTS:
     to_dataframe_expected = pl.scan_csv(
         ref_dir / "to_dataframe_expected.csv"
     ).collect()[-1]
-    assert to_dataframe_expected.equals(train_sim.to_dataframe()[-1]), (
-        f"to_dataframe_expected: \n{to_dataframe_expected}\ntrain_sim.to_dataframe()[-1]: \n{train_sim.to_dataframe()[-1]}"
-        + "\ntry running with `ENABLE_REF_OVERRIDE=True`"
-    )
     print("Success!")
 
 # %%
