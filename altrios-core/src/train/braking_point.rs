@@ -32,6 +32,15 @@ pub struct BrakingPoints {
     points: Vec<BrakingPoint>,
     /// index within [Self::points]
     idx_curr: usize,
+    /// tolerance above speed limit for speed limit violations -- i.e. if the
+    /// speed limit is 30 mph and `speed_limit_tol` is 10 mph (the default),
+    /// then the allowed speed limit when checking is 40 mph
+    #[serde(default = "def_speed_lim_tol")]
+    speed_limit_tol: si::Velocity,
+}
+
+fn def_speed_lim_tol() -> si::Velocity {
+    10.0 * uc::MPH
 }
 
 impl Init for BrakingPoints {}
@@ -60,7 +69,7 @@ impl BrakingPoints {
             }
         }
         ensure!(
-            speed <= self.points[self.idx_curr].speed_limit,
+            speed <= self.points[self.idx_curr].speed_limit + self.speed_limit_tol,
             "Speed limit violated! idx_curr={:?}, offset={:?}, speed={speed:?}, speed_limit={:?}, speed_target={:?}",
             self.idx_curr,
             self.points[self.idx_curr].offset,
