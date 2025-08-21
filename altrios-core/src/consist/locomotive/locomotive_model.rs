@@ -9,14 +9,6 @@ pub enum PowertrainType {
     DummyLoco(DummyLoco),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, From, IsVariant, TryInto)]
-pub enum LocoOperatingMode {
-    Off,
-    Run,
-    Isolate,
-    DBOnly,
-}
-
 impl Init for PowertrainType {
     fn init(&mut self) -> Result<(), Error> {
         match self {
@@ -420,8 +412,6 @@ pub struct Locomotive {
     pub pwr_aux_traction_coeff: si::Ratio,
     /// maximum tractive force
     force_max: si::Force,
-    /// locomotive operating mode (Off, Run, Isolate, DB Only)
-    pub loco_op_mode: LocoOperatingMode,
 }
 
 #[pyo3_api]
@@ -659,7 +649,6 @@ impl Default for Locomotive {
             history: Default::default(),
             assert_limits: true,
             mu: Default::default(),
-            loco_op_mode: LocoOperatingMode::Run,
         };
         loco.init().unwrap();
         loco.set_save_interval(Some(1));
@@ -768,22 +757,7 @@ impl Locomotive {
         force_max: si::Force,
         side_effect: ForceMaxSideEffect,
     ) -> anyhow::Result<()> {
-        //setting max force based on the mode that the locomotive is currently operating
-        match self.loco_op_mode {
-            LocoOperatingMode::Run => {
-                self.force_max = force_max;
-            }
-            LocoOperatingMode::DBOnly => {
-                self.force_max = force_max; //This should probably be one sided, but I'll place that in solve energy maybe?
-            }
-            LocoOperatingMode::Isolate => {
-                self.force_max = 0.0 * uc::N;
-            }
-            LocoOperatingMode::Off => {
-                self.force_max = 0.0 * uc::N;
-            }
-        }
-
+        self.force_max = force_max;
         match side_effect {
             ForceMaxSideEffect::Mass => self
                 .set_mass(
@@ -853,7 +827,6 @@ impl Locomotive {
             history: Default::default(),
             save_interval: Some(1),
             assert_limits: true,
-            loco_op_mode: LocoOperatingMode::Run,
         };
         loco.init().unwrap();
         loco.set_save_interval(Some(1));
