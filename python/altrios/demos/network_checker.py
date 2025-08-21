@@ -10,8 +10,25 @@ import glob
 import altrios as alt
 from altrios.demos import plot_util
 import re
+from pathlib import Path
+import sys
 
 sns.set_theme()
+
+env_folder_path = os.path.dirname(sys.executable)
+if Path(env_folder_path + "/Library/share/gdal").exists():
+    os.environ["GDAL_DATA"] = env_folder_path + "/Library/share/gdal"
+    os.environ["GDAL_DRIVER_PATH"] = env_folder_path + "/Library/lib/gdalplugins"
+    os.environ["GEOTIFF_CSV"] = env_folder_path + "/Library/share/epsg_csv"
+    os.environ["PROJ_LIB"] = env_folder_path + "/Library/share/proj"
+    os.environ["PROJ_NETWORK"] = "OFF"
+else:
+
+    import pyproj
+
+    pyproj.datadir.set_data_dir(os.path.dirname(env_folder_path) + "/share/proj")
+
+
 import geopandas as gpd
 
 SHOW_PLOTS = alt.utils.show_plots()
@@ -188,13 +205,15 @@ for network_path in networks:
                         "success {}, {}, {}".format(network_path[-25:-1], origin, dest)
                     )
                     network.to_file(network_path + "/Network.msgpack")
+
             except Exception as e:
                 # print(e)
                 e_str = str(e)
                 split_errors = e_str.split("\\n")
-                geopackage = "C:/Software Development/altrios-public/python/altrios/Network Builder Test Small/SmallNetworkBuild.gpkg"
+                geopackage = "../Network Builder Test Small/SmallNetworkBuild.gpkg"
                 layer = gpd.read_file(
-                    geopackage, layer=network_path.split("\\")[-1] + "_linked"
+                    geopackage,
+                    layer=network_path.split("\\")[-1].split("/")[-1] + "_linked",
                 )
                 error_points = []
                 for error_str in split_errors:
@@ -213,13 +232,17 @@ for network_path in networks:
 
                 unique_points = pd.Series(error_points).value_counts()
                 with open(network_path + "/missing_switches.txt", "w") as file:
-                    # file.write(
-                    #     "--------------------------------------------------------\\n"
-                    # )
+                    file.writelines([e_str])
+                    file.write(
+                        "--------------------------------------------------------\n"
+                    )
                     for point in unique_points.index:
                         file.write(
                             "https://www.openstreetmap.org/edit#map={}/{}/{}\n".format(
                                 20, point[1], point[0]
                             )
                         )
+
                 print("failure: {}, {}, {}".format(network_path[-25:-1], origin, dest))
+
+# %%

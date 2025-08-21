@@ -404,13 +404,13 @@ class NetworkBuilder:
         # This may be a bit unnecessary, but this structure let's us use several different
         # file input types that may be proprietary.
         for idx, row in regions_gdf.iterrows():
-            if row.region_name == "Amarillo_FortWorth":
-                single_region_gdf = gpd.GeoDataFrame(
-                    [{"region_name": row.region_name}],
-                    geometry=[row.geometry],
-                    crs="EPSG:4326",
-                )
-                self.delete_and_create_layer(row.region_name, single_region_gdf)
+            # if row.region_name == "Amarillo_FortWorth":
+            single_region_gdf = gpd.GeoDataFrame(
+                [{"region_name": row.region_name}],
+                geometry=[row.geometry],
+                crs="EPSG:4326",
+            )
+            self.delete_and_create_layer(row.region_name, single_region_gdf)
 
     def download_elevation(self):
         """
