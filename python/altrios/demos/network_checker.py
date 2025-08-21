@@ -213,9 +213,9 @@ for network_path in networks:
 
                 unique_points = pd.Series(error_points).value_counts()
                 with open(network_path + "/missing_switches.txt", "w") as file:
-                    file.write(
-                        "--------------------------------------------------------"
-                    )
+                    # file.write(
+                    #     "--------------------------------------------------------\\n"
+                    # )
                     for point in unique_points.index:
                         file.write(
                             "https://www.openstreetmap.org/edit#map={}/{}/{}\n".format(
