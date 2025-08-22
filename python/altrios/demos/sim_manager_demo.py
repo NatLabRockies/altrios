@@ -2,12 +2,13 @@
 from altrios import sim_manager
 from altrios import utilities, defaults
 import altrios as alt
-from altrios.train_planner import planner_config
 import numpy as np
 import matplotlib.pyplot as plt
 import time
 import seaborn as sns
+import polars as pl
 from pathlib import Path
+from altrios.train_planner import planner_config, manual_dispatch_demand
 
 sns.set_theme()
 
@@ -17,7 +18,7 @@ SHOW_PLOTS = alt.utils.show_plots()
 plot_dir = Path() / "plots"
 # make the dir if it doesn't exist
 plot_dir.mkdir(exist_ok=True)
-
+print("alt.resources_root()",alt.resources_root())
 
 # %%
 
@@ -29,10 +30,6 @@ rail_vehicles = [
     for vehicle_file in Path(alt.resources_root() / "rolling_stock/").glob("*.yaml")
 ]
 
-network = alt.Network.from_file("/Users/qianqiantong/PycharmProjects/RailwayLPF/results/line segment 485.yaml")
-location_map = alt.import_locations("/Users/qianqiantong/PycharmProjects/RailwayLPF/results/locations segment 485.csv")
-
-
 # location_map = alt.import_locations(
 #     alt.resources_root() / "networks/default_locations.csv"
 # )
@@ -40,16 +37,26 @@ location_map = alt.import_locations("/Users/qianqiantong/PycharmProjects/Railway
 #     alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
 # )
 
-t1_import = time.perf_counter()
-print(
-    f"Elapsed time to import rail vehicles, locations, and network: {t1_import - t0_import:.3g} s"
+location_map = alt.import_locations(
+    alt.resources_root() / "double_sidings/locations segment 485.csv"
 )
+network = alt.Network.from_file(
+    alt.resources_root() / "double_sidings/line segment 485.yaml"
+)
+
+t1_import = time.perf_counter()
+print(f"Elapsed time to import rail vehicles, locations, and network: {t1_import - t0_import:.3g} s")
+
+# manual_dispatch_schedule_path = alt.resources_root() / "dispatch_schedule.csv"
+manual_dispatch_schedule_path = alt.resources_root() / "double_sidings/dispatch_schedule_texas.csv"
+dispatch_scheduler = manual_dispatch_demand.manual_dispatch_demand(manual_dispatch_schedule_path)
 
 train_planner_config = planner_config.TrainPlannerConfig(
             cars_per_locomotive={"Default": 50},
             target_cars_per_train={"Default": 90},
             loco_type_shares={'BEL': 0.5, 'Diesel_Large': 0.5},
-            require_diesel=True)
+            require_diesel=True,
+            dispatch_scheduler = dispatch_scheduler)
 
 t0_main = time.perf_counter()
 
@@ -76,6 +83,8 @@ print(f"Elapsed time to run `sim_manager.main()`: {t1_main - t0_main:.3g} s")
 # %%
 t0_train_sims = time.perf_counter()
 speed_limit_train_sims.set_save_interval(100)
+
+
 (sims, refuel_sessions) = alt.run_speed_limit_train_sims(
     speed_limit_train_sims=speed_limit_train_sims,
     network=network,
@@ -102,9 +111,7 @@ speed_limit_train_sims.set_save_interval(None)
     timed_paths=[alt.TimedLinkPath.from_pydict(tp) for tp in timed_paths],
 )
 t1_summary_sims = time.perf_counter()
-print(
-    f"Elapsed time to build and run summary sims: {t1_summary_sims - t0_summary_sims:.3g} s"
-)
+print(f"Elapsed time to build and run summary sims: {t1_summary_sims - t0_summary_sims:.3g} s")
 
 # %%
 t0_tolist = time.perf_counter()
