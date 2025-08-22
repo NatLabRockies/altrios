@@ -4,7 +4,7 @@ from altrios.train_planner import (
     data_prep,
     schedulers,
     planner_config,
-    train_demand_generators,
+    train_demand_generators
 )
 import numpy as np
 import polars as pl
@@ -603,20 +603,24 @@ def run_train_planner(
 
     # Handle single train mode (simple scheduling)
     if config.single_train_mode:
-        # Generate demand trains without returns or rebalancing
-        demand = train_demand_generators.generate_demand_trains(
-            demand,
-            demand_returns=pl.DataFrame(),
-            demand_rebalancing=pl.DataFrame(),
-            rail_vehicles=rail_vehicles,
-            config=config,
-        )
-        # Create a simple dispatch schedule with one train per day
-        dispatch_schedule = (
-            demand.with_row_index(name="index")
-            .with_columns(pl.col("index").mul(24.0).alias("Hour"))  # 24-hour intervals
-            .drop("index")
-        )
+        if config.dispatch_scheduler is None:
+            # Generate demand trains without returns or rebalancing
+            demand = train_demand_generators.generate_demand_trains(
+                demand,
+                demand_returns=pl.DataFrame(),
+                demand_rebalancing=pl.DataFrame(),
+                rail_vehicles=rail_vehicles,
+                config=config,
+            )
+            # Create a simple dispatch schedule with one train per day
+            dispatch_schedule = (
+                demand.with_row_index(name="index")
+                .with_columns(pl.col("index").mul(24.0).alias("Hour"))  # 24-hour intervals
+                .drop("index")
+            )
+        else:
+            # use manual dispatch schedule to create demand file and node list
+            dispatch_schedule, demand, node_list = config.dispatch_scheduler.demand_from_dispatch()
     else:
         # Initialize empty dataframes for return and rebalancing demand
         demand_returns = pl.DataFrame()
@@ -678,10 +682,13 @@ def run_train_planner(
             # Set default scheduler
             dispatch_scheduler = schedulers.dispatch_uniform_demand_uniform_departure
 
-        # Create dispatch schedule using configured scheduler
-        dispatch_schedule = dispatch_scheduler(demand, rail_vehicles, freight_type_to_car_type, config)
-        # Uncomment to add random jitter to departure times
-        # dispatch_schedule = dispatch_schedule.with_columns(pl.col("Hour").add(pl.random.rand()))
+            # Create dispatch schedule using configured scheduler
+            dispatch_schedule = dispatch_scheduler(demand, rail_vehicles, freight_type_to_car_type, config)
+            # Uncomment to add random jitter to departure times
+            # dispatch_schedule = dispatch_schedule.with_columns(pl.col("Hour").add(pl.random.rand()))
+        else:
+            # use manual dispatch schedule to create demand file and node list
+            dispatch_schedule, demand, node_list = config.dispatch_scheduler.demand_from_dispatch()
 
     # Create locomotive pool if not provided
     if loco_pool is None:
