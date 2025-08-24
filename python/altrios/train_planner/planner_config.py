@@ -39,14 +39,14 @@ class TrainPlannerConfig:
         "Default": 60
     })
     target_cars_per_train: Dict = field(default_factory = lambda: {
-        "Default": 180
+        "Default": 90 # 180
     })
     cars_per_locomotive: Dict = field(default_factory = lambda: {
-        "Default": 70
+        "Default": 50 # 70
     })
     cars_per_locomotive_fixed: bool = False
     refuelers_per_incoming_corridor: int = 4
-    containers_per_car: int = 2
+    containers_per_car: int = 1 # 2
     require_diesel: bool = False
     manifest_empty_return_ratio: float = 0.6
     loco_pool_safety_factor: float = 1.1

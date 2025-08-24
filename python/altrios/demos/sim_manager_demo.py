@@ -18,7 +18,7 @@ SHOW_PLOTS = alt.utils.show_plots()
 plot_dir = Path() / "plots"
 # make the dir if it doesn't exist
 plot_dir.mkdir(exist_ok=True)
-print("alt.resources_root()",alt.resources_root())
+# print("alt.resources_root()",alt.resources_root())
 
 # %%
 
@@ -37,24 +37,20 @@ rail_vehicles = [
 #     alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
 # )
 
-location_map = alt.import_locations(
-    alt.resources_root() / "double_sidings/locations segment 485.csv"
-)
-network = alt.Network.from_file(
-    alt.resources_root() / "double_sidings/line segment 485.yaml"
-)
+location_map = alt.import_locations(alt.resources_root() / "double_sidings/FW-A/locations segment 485.csv")
+network = alt.Network.from_file(alt.resources_root() / "double_sidings/FW-A/line segment 485.yaml")
+manual_dispatch_demand_file = "dispatch_schedule_daily_throughput_2200.csv" # dispatch_schedule_freeflow.csv
 
 t1_import = time.perf_counter()
 print(f"Elapsed time to import rail vehicles, locations, and network: {t1_import - t0_import:.3g} s")
 
-# manual_dispatch_schedule_path = alt.resources_root() / "dispatch_schedule.csv"
-manual_dispatch_schedule_path = alt.resources_root() / "double_sidings/dispatch_schedule_texas.csv"
+manual_dispatch_schedule_path = alt.resources_root() / "double_sidings" / "timetable" / manual_dispatch_demand_file
 dispatch_scheduler = manual_dispatch_demand.manual_dispatch_demand(manual_dispatch_schedule_path)
 
 train_planner_config = planner_config.TrainPlannerConfig(
             cars_per_locomotive={"Default": 50},
             target_cars_per_train={"Default": 90},
-            loco_type_shares={'BEL': 0.5, 'Diesel_Large': 0.5},
+            loco_type_shares={'BEL': 0, 'Diesel_Large': 1},
             require_diesel=True,
             dispatch_scheduler = dispatch_scheduler)
 
@@ -96,8 +92,20 @@ speed_limit_train_sims.set_save_interval(100)
 t1_train_sims = time.perf_counter()
 print(f"Elapsed time to run train sims: {t1_train_sims - t0_train_sims:.3g} s")
 
+# travel time
+import pandas as pd
+records = [(sim['train_id'], sim['state']['time_seconds']) for sim in sims.to_pydict()]
+df = pd.DataFrame(records, columns=["train_id", "travel_time"])
+multiple_siding_results = "travel_time_" + manual_dispatch_demand_file
+multiple_siding_results_path = alt.resources_root() / "double_sidings" / "results" / multiple_siding_results
+df.to_csv(multiple_siding_results_path, index=False)
+print("travel time obtained！")
+
+
 t_train_time = sum([sim["state"]["time_seconds"] for sim in sims.to_pydict()])
 print(f"Total train-seconds simulated: {t_train_time} s")
+
+
 
 # %%
 t0_summary_sims = time.perf_counter()

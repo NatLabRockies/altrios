@@ -117,8 +117,8 @@ loco_con = alt.Consist(
 
 tsb = alt.TrainSimBuilder(
     train_id="0",
-    origin_id="WichtaFalls",
-    destination_id="FortWorth",
+    origin_id="FortWorth",
+    destination_id="Amarillo",
     train_config=train_config,
     loco_con=loco_con,
 )
@@ -132,8 +132,12 @@ print("Loading `Network`")
 #     alt.resources_root() / "networks/default_locations.csv"
 # )
 
-network = alt.Network.from_file("/Users/qianqiantong/PycharmProjects/RailwayLPF/results/multiple siding/line segment 485.yaml")
-location_map = alt.import_locations("/Users/qianqiantong/PycharmProjects/RailwayLPF/results/locations segment 485.csv")
+location_map = alt.import_locations(
+    alt.resources_root() / "double_sidings/FW-A/locations segment 485.csv"
+)
+network = alt.Network.from_file(
+    alt.resources_root() / "double_sidings/FW-A/line segment 485.yaml"
+)
 
 train_sim: alt.SpeedLimitTrainSim = tsb.make_speed_limit_train_sim(
     location_map=location_map,
@@ -173,7 +177,7 @@ train_sim.walk_timed_path(
 t1 = time.perf_counter()
 
 ts_dict = train_sim.to_pydict()
-print(f"Travel time:{ts_dict['state']['time_seconds']}s")
+print(f"Travel time: {ts_dict['state']['time_seconds']}s")
 
 print(f"Time to simulate: {t1 - t0:.5g}")
 raw_fuel_gigajoules = train_sim.get_energy_fuel_joules(False) / 1e9

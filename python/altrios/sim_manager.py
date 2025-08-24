@@ -115,6 +115,8 @@ def main(
         est_time_nets,
         False,
         False,
+        # True,
+        # True,
     )
     timed_paths: List[List[alt.LinkIdxTime]] = [  # type: ignore[no-redef]
         tp.to_pydict() for tp in timed_paths
@@ -156,12 +158,12 @@ def main(
         train_times, on=["Train_ID", "Origin_ID", "Destination_ID"], how="left"
     )
     train_consist_plan_untrimmed = train_consist_plan.clone()
-    if train_planner_config.single_train_mode is False:
-        train_consist_plan = train_consist_plan.filter(
-            pl.col("Departure_Time_Planned_Hr") >= pl.lit(24 * warm_start_days),
-            pl.col("Departure_Time_Planned_Hr")
-            < pl.lit(24 * (simulation_days + warm_start_days)),
-        )
+    # if train_planner_config.single_train_mode is False:
+    #     train_consist_plan = train_consist_plan.filter(
+    #         pl.col("Departure_Time_Planned_Hr") >= pl.lit(24 * warm_start_days),
+    #         pl.col("Departure_Time_Planned_Hr")
+    #         < pl.lit(24 * (simulation_days + warm_start_days)),
+    #     )
     train_consist_plan = train_consist_plan.with_columns(
         (pl.col("Train_ID").rank("dense") - 1).alias("TrainSimVec_Index")
     )
