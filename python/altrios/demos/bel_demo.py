@@ -4,11 +4,13 @@
 # + [1x BEL](https://www.wabteccorp.com/media/466/download?inline)
 
 
-import altrios as alt
-import numpy as np
-import matplotlib.pyplot as plt
 import time
+
+import matplotlib.pyplot as plt
+import numpy as np
 import seaborn as sns
+
+import altrios as alt
 
 sns.set_theme()
 
@@ -22,7 +24,7 @@ pt = alt.PowerTrace.default()
 
 res = alt.ReversibleEnergyStorage.from_file(
     alt.resources_root()
-    / "powertrains/reversible_energy_storages/Kokam_NMC_75Ah_flx_drive.yaml"
+    / "powertrains/reversible_energy_storages/Kokam_NMC_75Ah_flx_drive.yaml",
 )
 # instantiate electric drivetrain (motors and any gearboxes)
 edrv = alt.ElectricDrivetrain(
@@ -38,14 +40,14 @@ bel: alt.Locomotive = alt.Locomotive.from_pydict(
             "BatteryElectricLoco": {
                 "res": res.to_pydict(),
                 "edrv": edrv.to_pydict(),
-            }
+            },
         },
         "pwr_aux_offset_watts": 8.55e3,
         "pwr_aux_traction_coeff": 540.0e-6,
         "force_max_newtons": 667.2e3,
         "mass_kilograms": alt.LocoParams.default().to_pydict()["mass_kilograms"],
         "save_interval": SAVE_INTERVAL,
-    }
+    },
 )
 
 # instantiate battery model
@@ -76,7 +78,7 @@ ax[i].plot(
     np.array(
         bel_rslt["loco_type"]["BatteryElectricLoco"]["res"]["history"][
             "pwr_out_chemical_watts"
-        ]
+        ],
     )
     * 1e-6,
     label="pwr_out_chem",

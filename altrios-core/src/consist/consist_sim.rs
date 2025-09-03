@@ -83,10 +83,6 @@ impl ConsistSimulation {
             .state
             .pwr_cat_lim
             .mark_fresh(|| format_dbg!())?;
-        // self.loco_con.set_cat_power_limit(
-        //     &self.path_tpc,
-        //     *self.state.offset.get_fresh(|| format_dbg!())?,
-        // )?;
         self.loco_con
             .set_pwr_aux(Some(true))
             .with_context(|| format_dbg!())?;
@@ -136,6 +132,10 @@ impl ConsistSimulation {
         train_speed: Option<si::Velocity>,
         dt: si::Time,
     ) -> anyhow::Result<()> {
+        // TODO:
+        // - this function needs to be modified to accept catenary power limit(s) and/or the PathTPC instance
+        // - figure out an algorith for apportioning catenary power among the locomotives in the consist
+        // - make sure catenary power gets applied to charging
         self.loco_con.solve_energy_consumption(
             pwr_out_req,
             train_mass,

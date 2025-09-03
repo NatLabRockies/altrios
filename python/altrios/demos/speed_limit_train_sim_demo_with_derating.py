@@ -1,14 +1,15 @@
 # %%
+import os
 import time
+from copy import copy
+
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 import seaborn as sns
-import os
-from copy import copy
-from altrios.demos import plot_util
 
 import altrios as alt
+from altrios.demos import plot_util
 
 sns.set_theme()
 
@@ -19,10 +20,10 @@ SAVE_INTERVAL = 1
 
 # Build the train config
 rail_vehicle_loaded = alt.RailVehicle.from_file(
-    alt.resources_root() / "rolling_stock/Manifest_Loaded.yaml"
+    alt.resources_root() / "rolling_stock/Manifest_Loaded.yaml",
 )
 rail_vehicle_empty = alt.RailVehicle.from_file(
-    alt.resources_root() / "rolling_stock/Manifest_Empty.yaml"
+    alt.resources_root() / "rolling_stock/Manifest_Empty.yaml",
 )
 
 # https://docs.rs/altrios-core/latest/altrios_core/train/struct.TrainConfig.html
@@ -95,11 +96,11 @@ tsb_with_derating = alt.TrainSimBuilder(
 
 # Load the network and construct the timed link path through the network.
 network = alt.Network.from_file(
-    alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
+    alt.resources_root() / "networks/Taconite-NoBalloon.yaml",
 )
 
 location_map = alt.import_locations(
-    alt.resources_root() / "networks/default_locations.csv"
+    alt.resources_root() / "networks/default_locations.csv",
 )
 
 train_sim: alt.SpeedLimitTrainSim = tsb.make_speed_limit_train_sim(
@@ -115,7 +116,7 @@ temp_trace = alt.TemperatureTrace.from_pydict(
         "temp_at_sea_level_kelvin": (
             np.array([22.0, 45.0]) + CELSIUS_TO_KELVIN
         ).tolist(),
-    }
+    },
 )
 train_sim_with_derating: alt.SpeedLimitTrainSim = (
     tsb_with_derating.make_speed_limit_train_sim(
@@ -129,7 +130,7 @@ train_sim_with_derating.set_save_interval(SAVE_INTERVAL)
 est_time_net, _consist = alt.make_est_times(train_sim, network)
 
 est_time_net_with_derating, _consist = alt.make_est_times(
-    train_sim_with_derating, network
+    train_sim_with_derating, network,
 )
 
 timed_link_path = next(
@@ -140,8 +141,8 @@ timed_link_path = next(
             [est_time_net],
             False,
             False,
-        )
-    )
+        ),
+    ),
 )
 
 timed_link_path_with_derating = next(
@@ -152,8 +153,8 @@ timed_link_path_with_derating = next(
             [est_time_net_with_derating],
             False,
             False,
-        )
-    )
+        ),
+    ),
 )
 
 
@@ -174,11 +175,11 @@ t1 = time.perf_counter()
 print(f"Time to simulate without derating: {t1 - t0:.5g}")
 raw_fuel_gigajoules = train_sim.get_energy_fuel_joules(False) / 1e9
 print(
-    f"Total raw fuel used without engine derating in BEL and HEL: {raw_fuel_gigajoules:.6g} GJ"
+    f"Total raw fuel used without engine derating in BEL and HEL: {raw_fuel_gigajoules:.6g} GJ",
 )
 corrected_fuel_gigajoules = train_sim.get_energy_fuel_soc_corrected_joules() / 1e9
 print(
-    f"Total SOC-corrected fuel used without engine derating in BEL and HEL: {corrected_fuel_gigajoules:.6g} GJ"
+    f"Total SOC-corrected fuel used without engine derating in BEL and HEL: {corrected_fuel_gigajoules:.6g} GJ",
 )
 
 ts_dict = train_sim.to_pydict()
@@ -192,19 +193,19 @@ train_sim_with_derating.walk_timed_path(
 t1 = time.perf_counter()
 
 print(
-    f"\nTime to simulate with altitude and temperature derating of engine: {t1 - t0:.5g}"
+    f"\nTime to simulate with altitude and temperature derating of engine: {t1 - t0:.5g}",
 )
 raw_fuel_with_derating_gigajoules = (
     train_sim_with_derating.get_energy_fuel_joules(False) / 1e9
 )
 print(
-    f"Total raw fuel used with altitude and temperature derating in BEL and HEL: {raw_fuel_with_derating_gigajoules:.6g} GJ"
+    f"Total raw fuel used with altitude and temperature derating in BEL and HEL: {raw_fuel_with_derating_gigajoules:.6g} GJ",
 )
 corrected_fuel_with_derating_gigajoules = (
     train_sim_with_derating.get_energy_fuel_soc_corrected_joules() / 1e9
 )
 print(
-    f"Total SOC-corrected fuel used with altitude and temperature derating in BEL and HEL: {corrected_fuel_with_derating_gigajoules:.6g} GJ"
+    f"Total SOC-corrected fuel used with altitude and temperature derating in BEL and HEL: {corrected_fuel_with_derating_gigajoules:.6g} GJ",
 )
 
 ts_with_derating_dict = train_sim_with_derating.to_pydict()
@@ -222,7 +223,7 @@ fuel_increase_soc_corrected = (
     * 100
 )
 print(
-    f"SOC-corrected fuel increase due to derating: {fuel_increase_soc_corrected:.5g}%"
+    f"SOC-corrected fuel increase due to derating: {fuel_increase_soc_corrected:.5g}%",
 )
 
 df_no_derate = train_sim.to_dataframe()
@@ -241,7 +242,7 @@ ax[0].plot(
     label="with derate",
 )
 ax[0].legend()
-ax[0].set_ylabel("Cumulative Fuel [GJ]")
+ax[0].set_ylabel("Cumu. Fuel [GJ]")
 
 ax[1].plot(
     df_no_derate["history.time_seconds"],
@@ -254,7 +255,7 @@ ax[1].plot(
     label="with derate pwr max",
 )
 ax[1].legend()
-ax[1].set_ylabel("Engine Power [MW]")
+ax[1].set_ylabel("Eng. Pwr. [MW]")
 
 ax[2].plot(
     df_no_derate["history.time_seconds"],
@@ -277,16 +278,16 @@ fig2, ax2 = plot_util.plot_consist_pwr(train_sim, "No Derating")
 fig3, ax3 = plot_util.plot_hel_pwr_and_soc(train_sim, "No Derating")
 
 fig0_sans_buffers, ax0_sans_buffers = plot_util.plot_train_level_powers(
-    train_sim_with_derating, "With Altitude and Temperature Derating"
+    train_sim_with_derating, "With Altitude and Temperature Derating",
 )
 fig1_sans_buffers, ax1_sans_buffers = plot_util.plot_train_network_info(
-    train_sim_with_derating, "With Altitude and Temperature Derating"
+    train_sim_with_derating, "With Altitude and Temperature Derating",
 )
 fig2_sans_buffers, ax2_sans_buffers = plot_util.plot_consist_pwr(
-    train_sim_with_derating, "With Altitude and Temperature Derating"
+    train_sim_with_derating, "With Altitude and Temperature Derating",
 )
 fig3_sans_buffers, ax3_sans_buffers = plot_util.plot_hel_pwr_and_soc(
-    train_sim_with_derating, "With Altitude and Temperature Derating"
+    train_sim_with_derating, "With Altitude and Temperature Derating",
 )
 
 if SHOW_PLOTS:
@@ -308,7 +309,7 @@ if ENABLE_REF_OVERRIDE:
 if ENABLE_ASSERTS:
     print("Checking output of `to_dataframe`")
     to_dataframe_expected = pl.scan_csv(
-        ref_dir / "to_dataframe_expected.csv"
+        ref_dir / "to_dataframe_expected.csv",
     ).collect()[-1]
     assert to_dataframe_expected.equals(train_sim.to_dataframe()[-1]), (
         f"to_dataframe_expected: \n{to_dataframe_expected}\ntrain_sim.to_dataframe()[-1]: \n{train_sim.to_dataframe()[-1]}"

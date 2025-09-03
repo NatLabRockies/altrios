@@ -3,11 +3,13 @@
 # Consist comprises [Tier 4](https://www.wabteccorp.com/media/3641/download?inline)
 
 
-import altrios as alt
-import numpy as np
-import matplotlib.pyplot as plt
 import time
+
+import matplotlib.pyplot as plt
+import numpy as np
 import seaborn as sns
+
+import altrios as alt
 
 sns.set_theme()
 
@@ -67,7 +69,7 @@ i = 0
 ax[i].plot(
     t_s,
     np.array(
-        conv_rslt["loco_type"]["ConventionalLoco"]["fc"]["history"]["pwr_fuel_watts"]
+        conv_rslt["loco_type"]["ConventionalLoco"]["fc"]["history"]["pwr_fuel_watts"],
     )
     * 1e-6,
     label="fc pwr_out_fuel",
@@ -75,7 +77,7 @@ ax[i].plot(
 ax[i].plot(
     t_s,
     np.array(
-        conv_rslt["loco_type"]["ConventionalLoco"]["fc"]["history"]["pwr_out_max_watts"]
+        conv_rslt["loco_type"]["ConventionalLoco"]["fc"]["history"]["pwr_out_max_watts"],
     )
     * 1e-6,
     label="fc pwr_out_max",

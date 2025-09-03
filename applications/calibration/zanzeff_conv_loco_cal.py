@@ -1,43 +1,39 @@
-#%%
+"""
+Script for calibrating models for non-lead locomotives from Zanzeff data or,
+if it's not available, from reasonably contrived data (aspirationally, TODO:
+make this happen)
+"""
 # Notes from discussion with Garrett
 # do the model deviations w.r.t. locomotive position occur at idle or under load?
 # How much does aux load impact discrepancies?
 
-import pandas as pd
-import numpy as np
+import pprint
 from pathlib import Path
-from unittest import TestCase
-from typing import Tuple, Optional, List, Dict, Any
-import argparse
-import matplotlib.pyplot as plt
-import time
-import pickle
-import re
 
-
-from altrios.optimization import cal_and_val as cval
-from altrios.optimization.cal_and_val import StarmapParallelization
-import altrios as alt
-from altrios import LocomotiveSimulation
+import numpy as np
+import numpy.typing as npt
+import pandas as pd
 import utils
-import hashlib
-import os
+
+import altrios as alt
+from altrios import LocomotiveSimulation, pymoo_api
+from altrios.pymoo_api import StarmapParallelization
 
 CUR_FUEL_LHV_J__KG = 43e6
 
+# loco = alt.Locomotive.from_file(
+#     Path(__file__).parent / "resources/powertrains/fuel_converters/wabtec_tier4.yaml")
+veh = alt.Locomotive.default()
+veh_dict = veh.to_pydict()
+
 
 def get_conv_trip_mods(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Given single trip data frame, return dataframe for non-lead locomotive
-    """
-    df = df.drop_duplicates('PacificTime').copy()
-    df['timestamp'] = pd.to_datetime(
-        df['PacificTime']).dt.to_pydatetime()
-    df['time [s]'] = cval.get_delta_seconds(df['timestamp']).cumsum()
+    """Given single trip data frame, return dataframe for non-lead locomotive"""
+    df = df.drop_duplicates("PacificTime").copy()
+    df["timestamp"] = pd.to_datetime(df["PacificTime"]).dt.to_pydatetime()
+    df["time [s]"] = pymoo_api.get_delta_seconds(df["timestamp"]).cumsum()
 
-  
-
-    df39xx = df[['timestamp', 'time [s]']].copy()
+    df39xx = df[["timestamp", "time [s]"]].copy()
 
     lead_loc = None
     for lead_loc_possible in df["Lead Locomotive"].unique():
@@ -47,328 +43,330 @@ def get_conv_trip_mods(df: pd.DataFrame) -> pd.DataFrame:
             else:
                 lead_loc = int(lead_loc_possible)
 
-        except:
+        except Exception:
             pass
 
     if lead_loc == 3940:
         trailing_loc = 3965
-        
+
     elif lead_loc == 3965:
         trailing_loc = 3940
-       
+
     else:
         raise ValueError(f"Invalid lead locomotive: {lead_loc}")
 
-    df39xx['Tractive Power [W]'] = (
-        df["Tractive Effort Feedback BNSF " + str(trailing_loc)] * alt.utils.N_PER_LB *
-        df["Locomotive Speed GECX 3000"] * alt.utils.MPS_PER_MPH).fillna(0.0)
+    df39xx["Tractive Power [W]"] = (
+        df["Tractive Effort Feedback BNSF " + str(trailing_loc)]
+        * alt.utils.N_PER_LB
+        * df["Locomotive Speed GECX 3000"]
+        * alt.utils.MPS_PER_MPH
+    ).fillna(0.0)
 
-    df39xx["Fuel Power [W]"] = df[
-        "Fuel Rate " + str(trailing_loc) + " [lbs/hr]"].fillna(0.0) * alt.utils.KG_PER_LB \
-        / 3600 * CUR_FUEL_LHV_J__KG
-    df39xx["Fuel Energy [J]"] = (df39xx["Fuel Power [W]"] *
-                                    cval.get_delta_seconds(
-                                        df39xx['timestamp'])
-                                    ).cumsum().copy()
-    df39xx["engine_on"] = df['Engine Speed (RPM) BNSF ' + str(trailing_loc)] > 100
+    df39xx["Fuel Power [W]"] = (
+        df["Fuel Rate " + str(trailing_loc) + " [lbs/hr]"].fillna(0.0)
+        * alt.utils.KG_PER_LB
+        / 3600
+        * CUR_FUEL_LHV_J__KG
+    )
+    df39xx["Fuel Energy [J]"] = (
+        (df39xx["Fuel Power [W]"] * pymoo_api.get_delta_seconds(df39xx["timestamp"]))
+        .cumsum()
+        .copy()
+    )
+    df39xx["engine_on"] = df["Engine Speed (RPM) BNSF " + str(trailing_loc)] > 100
     return df39xx
 
-def get_loco_sim(df39xx: pd.DataFrame) -> bytes:
-    powertrace = alt.PowerTrace(
-        df39xx['time [s]'].to_numpy(),
-        df39xx['Tractive Power [W]'].to_numpy(),
-        df39xx.engine_on,  # This is 39XX engine state (on/off)
+
+def get_loco_sim(df39xx: pd.DataFrame) -> LocomotiveSimulation:
+    df39xx = df39xx.drop_duplicates("PacificTime").copy()
+    df39xx["timestamp"] = pd.to_datetime(df39xx["PacificTime"]).dt.to_pydatetime()
+    df39xx["time [s]"] = pymoo_api.get_delta_seconds(df39xx["timestamp"]).cumsum()
+    trailing_loc = 3965
+    df39xx["Tractive Power [W]"] = (
+        df39xx["Tractive Effort Feedback BNSF " + str(trailing_loc)]
+        * alt.utils.N_PER_LB
+        * df39xx["Locomotive Speed GECX 3000"]
+        * alt.utils.MPS_PER_MPH
+    ).fillna(0.0)
+
+    df39xx["Fuel Power [W]"] = (
+        df39xx["Fuel Rate " + str(trailing_loc) + " [lbs/hr]"].fillna(0.0)
+        * alt.utils.KG_PER_LB
+        / 3600
+        * CUR_FUEL_LHV_J__KG
+    )
+    df39xx["Fuel Energy [J]"] = (
+        (df39xx["Fuel Power [W]"] * pymoo_api.get_delta_seconds(df39xx["timestamp"]))
+        .cumsum()
+        .copy()
+    )
+    df39xx["engine_on"] = df39xx["Engine Speed (RPM) BNSF " + str(trailing_loc)] > 100
+    alt.PowerTrace.from_pydict(
+        {"time_seconds": [5.0, 5.0], "pwr_watts": [5.0, 5.0], "engine_on": [False, False]},
+    )
+    powertrace = alt.PowerTrace.from_pydict(
+        {
+            "time_seconds": df39xx["time [s]"].to_list(),
+            "pwr_watts": df39xx["Tractive Power [W]"].to_list(),
+            "engine_on": df39xx.engine_on.to_list(),  # This is 39XX engine state (on/off)
+        },
     )
     loco_unit = alt.Locomotive.default()
 
-    alt.set_param_from_path(loco_unit, "pwr_aux_offset_watts", 10e3)
-    alt.set_param_from_path(loco_unit, "fc.pwr_ramp_lag_seconds", 0.0000000000000001)
-    alt.set_param_from_path(loco_unit, "fc.pwr_out_max_watts", 3255000.0*2)
-    alt.set_param_from_path(loco_unit, "edrv.pwr_out_max_watts", 3255000.0*2)
-    alt.set_param_from_path(loco_unit, "gen.pwr_out_max_watts", 3255000.0*2)
+    loco_dict = loco_unit.to_pydict()
 
+    # loco_dict["pwr_aux_offset_watts"] = 10e3
+    # loco_dict["fc"]["pwr_ramp_lag_seconds"] = 0.0000000000000001
+    # loco_dict["fc"]["pwr_out_max_watts"] = 3255000.0 * 2
+    # loco_dict["edrv"]["pwr_out_max_watts"] = 3255000.0 * 2
+    # loco_dict["gen"]["pwr_out_max_watts"] = 3255000.0 * 2
 
-    loco_sim = LocomotiveSimulation(loco_unit=loco_unit,
-                                    power_trace=powertrace,
-                                    save_interval=1,
-                                    )
-    loco_sim_bincode = loco_sim.to_bincode()
-    return loco_sim_bincode
-
-
-class ModelError(cval.ModelError):
-    def update_params(
-        self, xs: List[float]
-    ) -> Dict[str, LocomotiveSimulation]:
-        """
-        conv loco specific override of cval.ModelError.update_params
-        """
-        assert (len(xs) == len(self.params))
-
-        t0 = time.perf_counter()
-
-        return_model_dict = {}
-
-        for key, value in self.bincode_model_dict.items():
-            return_model_dict[key] = LocomotiveSimulation.from_bincode(value)
-
-        for key in return_model_dict.keys():
-            for path, x in zip(self.params, xs):
-            
-                return_model_dict[key] = alt.set_param_from_path(
-                    return_model_dict[key],
-                    path,
-                    x
-                )
-            # # override to set gen and edrv to have same peak efficiency
-            # alt.set_param_from_path(
-            #     return_model_dict[key],
-            #     'loco_unit.edrv.eta_max',
-            #     return_model_dict[key].loco_unit.gen.eta_max,
-            # )
-            # # make sure eta_interp is all same value to be consistent
-            # alt.set_param_from_path(
-            #     return_model_dict[key],
-            #     'loco_unit.edrv.eta_range',
-            #     0.0,
-            # )
-
-        t1 = time.perf_counter()
-        if self.verbose:
-            print(f"Time to update params: {t1 - t0:.3g} s")
-
-        return return_model_dict
-
-
-def get_mod_err(
-    df_and_sim_dict: Dict[str, Tuple[pd.DataFrame, alt.LocomotiveSimulation]],
-    model_objectives: List[Tuple[str, str]],
-    model_params: Tuple[str],
-    debug: Optional[bool] = False,
-) -> ModelError:
-
-    mod_err = ModelError(
-        bincode_model_dict={
-            key: df_sim_tup[1] for key,
-            df_sim_tup in df_and_sim_dict.items()
-        },
-        dfs={
-            key: df_sim_tup[0] for key, df_sim_tup in df_and_sim_dict.items()
-        },
-        objectives=model_objectives,
-        params=model_params,
-        model_type='LocomotiveSimulation',
-        verbose=False,
-        debug=debug,
+    loco_sim = LocomotiveSimulation(
+        loco_unit=alt.Locomotive.from_pydict(loco_dict),
+        power_trace=powertrace,
+        save_interval=1,
     )
+    return loco_sim
 
-    return mod_err
+
+df_path = "ZANZEFF Data- Corrected GPS Plus Train Build ALTRIOS Confidential v2/"
+# df_files = []
+# for file in df_path.iterdir():
+#     if file.suffix == ".csv":
+#         df_files.append(file.name, pd.read_csv(file))
+# PATH TO simulation csvs.iterdir(txt file only)
+save_path = Path(__file__).parents[1] / "train_sim_cal"
+if not save_path.exists():
+    save_path.mkdir(parents=True)
+# parser = pymoo_api.get_parser()
+# args = parser.parse_args()
+cal_files, val_files = utils.select_cal_and_val_trips(
+    save_path=save_path,
+    # force_rerun=args.repartition,
+)
+# val=30% cal=70%
 
 
+dfs_for_cal: dict[str, pd.DataFrame] = {cal_file: pd.read_csv(cal_file) for cal_file in cal_files}
 def_save_path = Path("conv_loco_cal")
-cal_plot_save_path = def_save_path / "plots/cal"
-cal_plot_save_path.mkdir(exist_ok=True, parents=True)
-val_plot_save_path = def_save_path / "plots/val"
-val_plot_save_path.mkdir(exist_ok=True, parents=True)
 
-if __name__ == '__main__':
-    from utils import get_parser
-    parser = get_parser(
-        description='ALTRIOS Conventional Locomotive Calibration')
 
-    parser.add_argument(
-        "--save-path", type=str, default=str(def_save_path),
-        help="Path to folder for saving results.  Creates folder if needed."
-    )
-    parser.add_argument(
-        "--plotly", action="store_true",
-        help="If passed, generates and saves plotly plots."
-    )
-    parser.add_argument(
-        "--pyplot", action="store_true",
-        help="If passed, generates and saves pyplot plots."
-    )
-    parser.add_argument(
-        "--show-pyplot", action="store_true",
-        help="If passed, shows any generated pyplot plots."
-    )
-    parser.add_argument(
-        "--debug", action="store_true",
-        help="If passed, runs in debug mode."
-    )
-    parser.add_argument(
-        "--seed", type=int, default=42,
-        help="Seed for randomized trip selection process."
+# model pydict
+# sims_for_cal: dict[str, alt.loco_sim] = {}
+# populate `sims_for_cal`
+# for loco_name, loco in train_sim["loco_con"]["loco_vec"].items():
+#     loco_name: str
+#     loco: alt.Locomotive
+#     # NOTE: maybe change `save_interval` to 5
+#     sims_for_cal[loco_name] = alt.loco_sim(
+#         loco_unit, power_trace, save_interval).to_pydict()
+
+
+def get_loco_sims(dfs: dict[str, pd.DataFrame]):
+    loco_sims = {}
+    for trip_name, df in dfs.items():
+        loco_sims[trip_name] = get_loco_sim(df).to_pydict()
+    return loco_sims
+
+
+# Objective Functions -- `obj_fns`
+def get_mod_fuel_energy(sim_dict: dict) -> npt.NDArray:
+    return np.array(
+        sim_dict["loco_unit"]["loco_type"]["ConventionalLoco"]["fc"]["history"][
+            "energy_fuel_joules"
+        ],
     )
 
-    args = parser.parse_args()
-    # else:
-    #     seed = time.time()
-    n_proc = args.n_proc
-    n_max_gen = args.n_max_gen
-    pop_size = args.pop_size
-    save_path = Path(args.save_path)
-    file_info_path = Path(args.save_path)
-    file_info_path.mkdir(exist_ok=True)
-    pyplot = args.pyplot
-    plotly = args.plotly
-    show_pyplot = args.show_pyplot
-    debug = args.debug
-    seed = args.seed
 
-    params_and_bounds = (
-        # ("loco_unit.fc.eta_max", (0.35, 0.5)),
-        # ("loco_unit.fc.eta_range",g (0.3, 0.48)),
-        ("loco_unit.fc.pwr_idle_fuel_watts", (0, 20e3)),
-        ("loco_unit.gen.eta_max", (0.88, 0.98)),
-        # ("loco_unit.gen.eta_range", (0, 0.1)),
-        ("loco_unit.pwr_aux_offset_watts", (0.0, 1_000_000)),
-        ("loco_unit.pwr_aux_traction_coeff", (0.0, 0.1)),
-        ("loco_unit.edrv.eta_max", (0.85, 0.99)),
-        # ("loco_unit.edrv.eta_range", (0, 0.1)),
-    )
-    params = [pb[0] for pb in params_and_bounds]
-    params_bounds = [pb[1] for pb in params_and_bounds]
+def get_exp_fuel_energy(df: pd.DataFrame) -> pd.DataFrame:
+    return df["Fuel Energy [J]"]
 
-    objectives = [
-        (
-            "Fuel Energy [J]",
-            "loco_unit.fc.history.energy_fuel_joules"
-        )
+
+# Parameter Functions -- `param_fns_and_bounds`
+def new_pwr_idle_fuel_watts(sim_dict: dict, new_val: float) -> dict:
+    """Set `pwr_idle_fuel_watts` in `FuelConverter`"""
+    sim_dict["loco_unit"]["loco_type"]["ConventionalLoco"]["fc"]["pwr_idle_fuel_watts"] = new_val
+    return sim_dict
+
+
+def new_gen_eta_max(sim_dict: dict, new_val: float) -> dict:
+    """Set `eta_max` in `Generator`"""
+    sim_dict["loco_unit"]["loco_type"]["ConventionalLoco"]["gen"]["eta_max"] = new_val
+    return sim_dict
+
+
+def new_pwr_aux_offset_watts(sim_dict: dict, new_val: float) -> dict:
+    """Set `pwr_aux_offset_watts` in `ConventionalLocomotive`"""
+    sim_dict["loco_unit"]["loco_type"]["ConventionalLoco"]["pwr_aux_offset_watts"] = new_val
+    return sim_dict
+
+
+def new_pwr_aux_traction_coeff(sim_dict: dict, new_val: float) -> dict:
+    """Set `pwr_aux_traction_coeff` in `ConventionalLocomotive`"""
+    sim_dict["loco_unit"]["loco_type"]["ConventionalLoco"]["pwr_aux_traction_coeff"] = new_val
+    return sim_dict
+
+
+def new_edrv_eta_max(sim_dict: dict, new_val: float) -> dict:
+    """Set `eta_max` in `ElectricDrivetrain`"""
+    sim_dict["loco_unit"]["loco_type"]["ConventionalLoco"]["edrv"]["eta_max"] = new_val
+    return sim_dict
+
+
+(("loco_unit.fc.pwr_idle_fuel_watts", (0, 20e3)),)
+(("loco_unit.gen.eta_max", (0.88, 0.98)),)
+(("loco_unit.pwr_aux_offset_watts", (0.0, 1_000_000)),)
+(("loco_unit.pwr_aux_traction_coeff", (0.0, 0.1)),)
+(("loco_unit.edrv.eta_max", (0.85, 0.99)),)
+
+# Model Objectives
+cal_mod_obj = pymoo_api.ModelObjectives(
+    models=get_loco_sims(dfs_for_cal),
+    dfs=dfs_for_cal,
+    obj_fns=((get_mod_fuel_energy, get_exp_fuel_energy),),
+    param_fns_and_bounds=(
+        (new_pwr_idle_fuel_watts, (0, 20e3)),
+        (new_gen_eta_max, (0.88, 0.98)),
+        (new_pwr_aux_offset_watts, (0.0, 100_000)),
+        (new_pwr_aux_traction_coeff, (0.0, 0.1)),
+        (new_edrv_eta_max, (0.85, 0.99)),
+    ),
+    sim_type=alt.LocomotiveSimulation,
+    constr_fns=(),
+    verbose=False,
+)
+
+
+def perturb_params(pos_perturb_dec: float = 0.05, neg_perturb_dec: float = 0.1):
+    """
+    # Arguments:
+    # - `pos_perturb_doc`: perturbation percentage added to all params.  Can be overridden invididually
+    # - `neg_perturb_doc`: perturbation percentage subtracted from all params.  Can be overridden invididually
+    """
+    loco = alt.Locomotive.default()
+    loco_dict = loco.to_pydict()
+    baseline_params_and_bounds = [
+        (loco_dict["loco_type"]["ConventionalLoco"]["fc"]["pwr_idle_fuel_watts"], None),
+        (loco_dict["loco_type"]["ConventionalLoco"]["gen"]["eta_interp"][1], None),
+        (loco_dict["pwr_aux_offset_watts"], None),
+        (loco_dict["pwr_aux_traction_coeff"], None),
+        (loco_dict["loco_type"]["ConventionalLoco"]["edrv"]["eta_interp"][1], None),
     ]
 
-    artifact_dir = Path("conv_loco_cal")
-    artifact_dir.mkdir(exist_ok=True)
+    baseline_params = [bpb[0] for bpb in baseline_params_and_bounds]
 
-
-    cal_mod_files, val_mod_files = utils.select_cal_and_val_trips(
-        save_path=save_path,
-        force_rerun=args.repartition,
+    print(
+        "Verifying that model responds to input parameter changes by individually perturbing parameters",
     )
+    baseline_errors = cal_mod_obj.get_errors(
+        cal_mod_obj.update_params([param for param in baseline_params]),
+    )[0]
 
-    # Dict[str, str] keys: reject file key, values: reason for rejecton
-    rejects = {}
+    for i, param_and_bounds in enumerate(baseline_params_and_bounds):
+        param = param_and_bounds[0]
+        bounds = param_and_bounds[1]
+        # +5%
+        if bounds is not None:
+            param_pos_perturb_dec = bounds[0]
+            param_neg_perturb_dec = bounds[1]
+        else:
+            param_pos_perturb_dec = pos_perturb_dec
+            param_neg_perturb_dec = neg_perturb_dec
 
-    cal_mod_raw_dfs = {}
-    cal_mod_dfs = {}
-    cal_df_and_sims = {}  # Dict[str, (df, sim)]
-    for (i, file) in enumerate(cal_mod_files):
-        if debug and (i > 5):
-            break
-        file = Path(file)
-        print(f"Processing: {file.name}")
-        raw_df = pd.read_csv(
-            file, low_memory=False)
-        if len(raw_df) < 1:
-            rejects[file.name] = "len < 1"
-            continue
-        cal_mod_raw_dfs[file.stem] = raw_df
-        cal_mod_dfs[file.stem] = get_conv_trip_mods(
-            cal_mod_raw_dfs[file.stem])
-        cal_df_and_sims[file.stem] = (
-            cal_mod_dfs[file.stem],
-            get_loco_sim(cal_mod_dfs[file.stem])
-        )
+        assert param_pos_perturb_dec >= 0
+        assert param_neg_perturb_dec >= 0
 
-    cal_mod_err = get_mod_err(
-        cal_df_and_sims,
-        objectives,
-        params,
-    )
+        perturbed_params = baseline_params.copy()
+        perturbed_params[i] = param * (1 + param_pos_perturb_dec)
+        perturbed_errors = cal_mod_obj.get_errors(cal_mod_obj.update_params(perturbed_params))
+        if np.all(perturbed_errors == baseline_errors):
+            print("\nperturbed_errros:")
+            pprint.pp(perturbed_errors)
+            print("baseline_errors")
+            pprint.pp(baseline_errors)
+            print("")
+            raise Exception(
+                f"+{100 * param_pos_perturb_dec}% perturbation failed for param {cal_mod_obj.param_fns[i].__name__}",
+            )
 
-    val_mod_raw_dfs = {}
-    val_mod_dfs = {}
-    val_df_and_sims = {}
-    for (i, file) in enumerate(val_mod_files):
-        if debug and (i > 5):
-            break
-        file = Path(file)
-        print(f"Processing: {file.name}")
-        val_mod_raw_dfs[file.stem] = pd.read_csv(
-            file, low_memory=False)
-        val_mod_dfs[file.stem] = get_conv_trip_mods(
-            val_mod_raw_dfs[file.stem])
-        val_df_and_sims[file.stem] = (
-            val_mod_dfs[file.stem],
-            get_loco_sim(val_mod_dfs[file.stem])
-        )
+        # -5%
+        perturbed_params = baseline_params.copy()
+        perturbed_params[i] = param * (1 - param_neg_perturb_dec)
+        perturbed_errors = cal_mod_obj.get_errors(cal_mod_obj.update_params(perturbed_params))
+        if np.all(perturbed_errors == baseline_errors):
+            print("\nperturbed_errros:")
+            pprint.pp(perturbed_errors)
+            print("baseline_errors")
+            pprint.pp(baseline_errors)
+            print("")
+            raise Exception(
+                f"-{100 * param_neg_perturb_dec}% perturbation failed for param {cal_mod_obj.param_fns[i].__name__}",
+            )
 
-    val_mod_err = get_mod_err(
-        val_df_and_sims,
-        objectives,
-        params,
-    )
+    print("Success!")
 
-    with open(artifact_dir / "cal_mod_err.pickle", "wb") as f:
-        pickle.dump(cal_mod_err, f)
-    with open(artifact_dir / "val_mod_err.pickle", "wb") as f:
-        pickle.dump(val_mod_err, f)
 
-    algorithm = cval.NSGA3(
-        ref_dirs=cval.get_reference_directions(
-            "energy",
-            # must be at least cal_objectives.n_obj
-            n_dim=cal_mod_err.n_obj,
-            n_points=pop_size,  # must be at least pop_size
-        ),
-        sampling=cval.LHS(),
+if __name__ == "__main__":
+    print("Params and bounds:")
+    pprint.pp(cal_mod_obj.param_fns_and_bounds)
+    print("")
+    perturb_params()
+    parser = pymoo_api.get_parser()
+    args = parser.parse_args()
+
+    n_processes = args.processes
+    n_max_gen = args.n_max_gen
+    # should be at least as big as n_processes
+    pop_size = args.pop_size
+    run_minimize = not (args.skip_minimize)
+
+    print(f"Starting calibration with: {args}.")
+    algorithm = pymoo_api.NSGA2(
+        # size of each population
         pop_size=pop_size,
+        # LatinHyperCube sampling seems to be more effective than the default
+        # random sampling
+        sampling=pymoo_api.LHS(),
     )
-    termination = cval.DMOT(n_max_gen=n_max_gen, period=5)
+    termination = pymoo_api.DMOT(
+        # max number of generations, default of 10 is very small
+        n_max_gen=n_max_gen,
+        # evaluate tolerance over this interval of generations every
+        period=5,
+        # parameter variation tolerance
+        xtol=args.xtol,
+        # objective variation tolerance
+        ftol=args.ftol,
+    )
 
-    t0 = time.perf_counter()
-    if n_proc == 1:
-        problem = cval.CalibrationProblem(
-            mod_err=cal_mod_err,
-            n_constr=1,
-            params_bounds=params_bounds,
+    if n_processes == 1:
+        print("Running serial evaluation.")
+        # series evaluation
+        # Setup calibration problem
+        cal_prob = pymoo_api.CalibrationProblem(
+            mod_obj=cal_mod_obj,
         )
-        res, res_df = cval.run_minimize(
-            problem=problem,
+
+        res, res_df = pymoo_api.run_minimize(
+            problem=cal_prob,
             algorithm=algorithm,
             termination=termination,
-            save_path=file_info_path,
+            save_path=save_path,
         )
     else:
-        assert n_proc > 1
+        print(f"Running parallel evaluation with n_processes: {n_processes}.")
+        assert n_processes > 1
+        # parallel evaluation
         import multiprocessing
-        with multiprocessing.Pool(n_proc) as pool:
-            problem = cval.CalibrationProblem(
-                mod_err=cal_mod_err,
-                n_constr=1,
-                params_bounds=params_bounds,
+
+        with multiprocessing.Pool(n_processes) as pool:
+            problem = pymoo_api.CalibrationProblem(
+                mod_obj=cal_mod_obj,
                 elementwise_runner=StarmapParallelization(pool.starmap),
             )
-            res, res_df = cval.run_minimize(
+            res, res_df = pymoo_api.run_minimize(
                 problem=problem,
                 algorithm=algorithm,
                 termination=termination,
-                save_path=file_info_path,
+                save_path=save_path,
             )
-
-    t1 = time.perf_counter()
-    print(
-        f"Number of processes: {n_proc}, Simulation time: {t1 - t0:.5f} seconds")
-
-    optimal_params = cval.min_error_selection(
-        res_df, param_num=len(cal_mod_err.params)
-    )
-
-    calibration_model_dict = cal_mod_err.update_params(optimal_params)
-    cal_err = cal_mod_err.get_errors(
-        calibration_model_dict,
-        pyplot=pyplot,
-        plotly=plotly,
-        show_pyplot=show_pyplot,
-        plot_save_dir=cal_plot_save_path,
-    )
-
-    validation_model_dict = val_mod_err.update_params(
-        optimal_params)
-    val_err = val_mod_err.get_errors(
-        validation_model_dict,
-        pyplot=pyplot,
-        plotly=plotly,
-        show_pyplot=show_pyplot,
-        plot_save_dir=val_plot_save_path,
-    )
