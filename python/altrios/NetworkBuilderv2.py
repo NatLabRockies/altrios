@@ -24,6 +24,7 @@ else:
     import pyproj
 
     pyproj.datadir.set_data_dir(os.path.dirname(env_folder_path) + "/share/proj")
+    os.environ["PROJ_LIB"] = os.path.dirname(env_folder_path) + "/share/proj"
 # %%
 # https://pyproj4.github.io/pyproj/stable/api/network.html
 # this is a copy from my base conda environment to see if pixi can be made to work.
@@ -460,6 +461,7 @@ class NetworkBuilder:
                 LayerTiffDir = Path(self.data_folder / "Elevation Data" / layername)
                 LayerTiffDir.mkdir(parents=True, exist_ok=True)
                 # Download DEM
+                print("***************************{}**************".format(bounds))
                 tiff_files = s3dep.get_dem(bounds, LayerTiffDir)
 
         print("Elevation download complete")
@@ -1521,7 +1523,12 @@ class NetworkBuilder:
                 long_links["length"] = long_links.length
                 osm_id_mapping = {}
 
-                self.delete_and_create_layer(layername.replace("_linked", "_locations"), locations[locations.Location.isin(long_links.Location.unique())].to_crs(epsg=4326))
+                self.delete_and_create_layer(
+                    layername.replace("_linked", "_locations"),
+                    locations[
+                        locations.Location.isin(long_links.Location.unique())
+                    ].to_crs(epsg=4326),
+                )
 
                 for Loc in long_links.Location.unique():
                     loc_links = long_links[long_links.Location == Loc].sort_values(
