@@ -134,7 +134,7 @@ impl ConsistSimulation {
     ) -> anyhow::Result<()> {
         // TODO:
         // - this function needs to be modified to accept catenary power limit(s) and/or the PathTPC instance
-        // - figure out an algorith for apportioning catenary power among the locomotives in the consist
+        // - figure out an algorithm for apportioning catenary power among the locomotives in the consist
         // - make sure catenary power gets applied to charging
         self.loco_con.solve_energy_consumption(
             pwr_out_req,

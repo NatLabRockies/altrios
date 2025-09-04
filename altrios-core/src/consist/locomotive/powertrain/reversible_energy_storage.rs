@@ -568,8 +568,14 @@ impl ReversibleEnergyStorage {
             || format_dbg!(),
         )?;
 
-        // TODO: remove this when implementing catenary
+        // TODO: this when implementing catenary
         self.state.pwr_cat_max.mark_fresh(|| format_dbg!());
+
+        // self.state.pwr_cat_max.update(TODO: figure out what goes here, || format_dbg!());
+        // I'm actually not sure that `pwr_cat_max` can be known
+        // before knowing the power demanded so this should probably be handled in
+        // `solve_energy_consumption` AFTER the demanded power and available regen braking
+        // power are known
 
         Ok(())
     }
@@ -580,6 +586,8 @@ impl ReversibleEnergyStorage {
         pwr_aux_req: si::Power,
         dt: si::Time,
     ) -> anyhow::Result<()> {
+        // TODO: somehow, actual used catenary power needs to be piped in here,
+        // subject to `ReversibleEnergyStorageState::pwr_cat_max`
         let state = &mut self.state;
 
         ensure!(

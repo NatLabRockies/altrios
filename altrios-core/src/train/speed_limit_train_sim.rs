@@ -545,6 +545,9 @@ impl SpeedLimitTrainSim {
 
         timer!(self
             .loco_con
+            // TODO: account for catenary in here, making sure that generator and
+            // battery electric power output are the total demanded power minus whatever is
+            // available from catenary
             .solve_energy_consumption(
                 *self.state.pwr_whl_out.get_fresh(|| format_dbg!())?,
                 Some(self.state.mass_compound().with_context(|| format_dbg!())?),

@@ -378,6 +378,18 @@ impl Consist {
             || format_dbg!(),
         )?;
 
+        // TODO: make sure this handles catenary correctly -- e.g. if train
+        // is already at target speed, has excess propulsive power limits, and batteries have
+        // capacity to absorb charge, then the values in the `pwr_out_vec` should be
+        // negative (indicating charging -- disclaimer: Chad could have sign convention
+        // backwards!) for the RES-equipped locos such that any catenary power
+        // availability beyond what is needed for propulsion goes into charging
+
+        // the approach for catenary described in the various TODO comments
+        // should extrapolate to a conventional locomotive with a pantograph or even a
+        // locomotive without any engine, battery, or generator at all!
+
+        // propulsion power demanded to/from (charging/discharging) each locomotive
         let pwr_out_vec: Vec<si::Power> = if pwr_out_req > si::Power::ZERO {
             // positive tractive power `pwr_out_vec`
             self.pdct.solve_positive_traction(
@@ -441,7 +453,6 @@ impl Consist {
         }
 
         // maybe put logic for toggling `engine_on` here
-
         for (i, (loco, pwr_out)) in self.loco_vec.iter_mut().zip(pwr_out_vec.iter()).enumerate() {
             loco.solve_energy_consumption(*pwr_out, dt, engine_on, train_mass, train_speed)
                 .with_context(|| {

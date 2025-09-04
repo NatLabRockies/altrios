@@ -52,8 +52,9 @@ impl Init for Pyo3VecLocoWrapper {
 }
 impl SerdeAPI for Pyo3VecLocoWrapper {}
 
+/// Algorithm for apportioning power distribution among locomotives
 pub trait SolvePower {
-    /// Returns vector of locomotive tractive powers during positive traction events
+    /// Returns vector of locomotive tractive powers during positive traction conditions
     fn solve_positive_traction(
         &mut self,
         loco_vec: &[Locomotive],
@@ -61,6 +62,7 @@ pub trait SolvePower {
         train_mass: Option<si::Mass>,
         train_speed: Option<si::Velocity>,
     ) -> anyhow::Result<Vec<si::Power>>;
+    /// Returns vector of locomotive tractive powers during positive traction conditions
     fn solve_negative_traction(
         &mut self,
         loco_vec: &[Locomotive],
@@ -73,7 +75,7 @@ pub trait SolvePower {
 #[derive(PartialEq, Eq, Clone, Deserialize, Serialize, Debug)]
 /// Similar to [self::Proportional], but positive traction conditions use locomotives with
 /// ReversibleEnergyStorage preferentially, within their power limits.  Recharge is same as
-/// `Proportional` variant.
+/// [self::Proportional] variant.
 pub struct RESGreedy;
 impl SolvePower for RESGreedy {
     fn solve_positive_traction(
@@ -208,6 +210,12 @@ fn solve_negative_traction(
     {
         get_pwr_regen_vec(loco_vec, regen_frac)?
     } else {
+        // TODO: account for catenary in here
+        // each locomotive's catenary supply should *probably* be the total available
+        // catenary power * each locomotive's `pwr_cat_max` (which probably need to
+        // be updated right above this line) divided by the sum of all locomotives'
+        // pwr_cat_max
+
         // In this block, we know that all of the regen capability will be used so the goal is to spread
         // dynamic braking effort among the non-RES-equipped and then all locomotives up until they're doing
         // the same dynmamic braking effort
