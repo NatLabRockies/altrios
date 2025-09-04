@@ -519,6 +519,14 @@ impl SpeedLimitTrainSim {
 
         self.state.dt.mark_fresh(|| format_dbg!())?;
 
+        // TODO: uncomment and make this work and then copy elsewhere
+        // self.loco_con.set_cat_power_limit(
+        //     &self.path_tpc,
+        //     *self.state.offset.get_fresh(|| format_dbg!())?,
+        // )?;
+
+        // TODO: modify `set_curr_pwr_max_out` to receive cat power limits or PathTPC
+        // make sure that catenary adds to generator and/or battery max power input to the electric drivetrain (motor)
         // set the maximum power out based on dt.
         timer!(self
             .loco_con
@@ -673,11 +681,14 @@ impl SpeedLimitTrainSim {
         // this figures out when to start braking in advance of a speed limit
         // drop.  Takes into account air brake dynamics. I have not reviewed
         // this code, but that is my understanding.
-        let (speed_limit, speed_target) = self.braking_points.calc_speeds(
-            *self.state.offset.get_stale(|| format_dbg!())?,
-            *self.state.speed.get_stale(|| format_dbg!())?,
-            self.fric_brake.ramp_up_time * self.fric_brake.ramp_up_coeff,
-        );
+        let (speed_limit, speed_target) = self
+            .braking_points
+            .calc_speeds(
+                *self.state.offset.get_stale(|| format_dbg!())?,
+                *self.state.speed.get_stale(|| format_dbg!())?,
+                self.fric_brake.ramp_up_time * self.fric_brake.ramp_up_coeff,
+            )
+            .with_context(|| format_dbg!())?;
         self.state
             .speed_limit
             .update(speed_limit, || format_dbg!())?;
@@ -1055,12 +1066,14 @@ impl SpeedLimitTrainSim {
     }
 
     fn recalc_braking_points(&mut self) -> anyhow::Result<()> {
-        self.braking_points.recalc(
-            &self.state,
-            &self.fric_brake,
-            &self.train_res,
-            &self.path_tpc,
-        )
+        self.braking_points
+            .recalc(
+                &self.state,
+                &self.fric_brake,
+                &self.train_res,
+                &self.path_tpc,
+            )
+            .with_context(|| format_dbg!())
     }
 }
 

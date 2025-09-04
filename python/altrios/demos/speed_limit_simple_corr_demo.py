@@ -4,11 +4,12 @@ SetSpeedTrainSim over a simple, hypothetical corridor
 """
 
 import time
+
 import matplotlib.pyplot as plt
 import seaborn as sns
-from altrios.demos import plot_util
 
 import altrios as alt
+from altrios.demos import plot_util
 
 sns.set_theme()
 
@@ -17,10 +18,10 @@ SAVE_INTERVAL = 1
 
 # Build the train config
 rail_vehicle_loaded = alt.RailVehicle.from_file(
-    alt.resources_root() / "rolling_stock/Manifest_Loaded.yaml"
+    alt.resources_root() / "rolling_stock/Manifest_Loaded.yaml",
 )
 rail_vehicle_empty = alt.RailVehicle.from_file(
-    alt.resources_root() / "rolling_stock/Manifest_Empty.yaml"
+    alt.resources_root() / "rolling_stock/Manifest_Empty.yaml",
 )
 
 # https://docs.rs/altrios-core/latest/altrios_core/train/struct.TrainConfig.html
@@ -39,7 +40,7 @@ train_config = alt.TrainConfig(
 # https://docs.rs/altrios-core/latest/altrios_core/consist/locomotive/powertrain/reversible_energy_storage/struct.ReversibleEnergyStorage.html#
 res = alt.ReversibleEnergyStorage.from_file(
     alt.resources_root()
-    / "powertrains/reversible_energy_storages/Kokam_NMC_75Ah_flx_drive.yaml"
+    / "powertrains/reversible_energy_storages/Kokam_NMC_75Ah_flx_drive.yaml",
 )
 
 edrv = alt.ElectricDrivetrain(
@@ -55,14 +56,14 @@ bel: alt.Locomotive = alt.Locomotive.from_pydict(
             "BatteryElectricLoco": {
                 "res": res.to_pydict(),
                 "edrv": edrv.to_pydict(),
-            }
+            },
         },
         "pwr_aux_offset_watts": 8.55e3,
         "pwr_aux_traction_coeff": 540.0e-6,
         "force_max_newtons": 667.2e3,
         "mass_kilograms": alt.LocoParams.default().to_pydict()["mass_kilograms"],
         "save_interval": SAVE_INTERVAL,
-    }
+    },
 )
 
 hel: alt.Locomotive = alt.Locomotive.default_hybrid_electric_loco()
@@ -84,11 +85,11 @@ tsb = alt.TrainSimBuilder(
 
 # Load the network and construct the timed link path through the network.
 network = alt.Network.from_file(
-    alt.resources_root() / "networks/simple_corridor_network.yaml"
+    alt.resources_root() / "networks/simple_corridor_network.yaml",
 )
 
 location_map = alt.import_locations(
-    alt.resources_root() / "networks/simple_corridor_locations.csv"
+    alt.resources_root() / "networks/simple_corridor_locations.csv",
 )
 train_sim: alt.SetSpeedTrainSim = tsb.make_speed_limit_train_sim(
     location_map=location_map,

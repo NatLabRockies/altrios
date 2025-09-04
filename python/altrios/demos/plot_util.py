@@ -1,7 +1,8 @@
-import altrios as alt
+
 import matplotlib.pyplot as plt
 import numpy as np
-from typing import Tuple
+
+import altrios as alt
 
 
 def extract_bel_from_train_sim(ts: alt.SetSpeedTrainSim) -> list:
@@ -114,7 +115,7 @@ def plot_locos_from_ts(ts: alt.SetSpeedTrainSim, x: str, show_plots: bool = Fals
         ax[2].plot(
             x_axis,
             np.array(
-                first_bel["loco_type"]["BatteryElectricLoco"]["res"]["history"]["soc"]
+                first_bel["loco_type"]["BatteryElectricLoco"]["res"]["history"]["soc"],
             ),
         )
         ax[2].set_ylabel("SOC")
@@ -437,7 +438,7 @@ def plot_locos_from_ts(ts: alt.SetSpeedTrainSim, x: str, show_plots: bool = Fals
             np.array(
                 first_hel["loco_type"]["HybridLoco"]["res"]["history"][
                     "pwr_out_electrical_watts"
-                ]
+                ],
             )
             / 1e3,
             label="hybrid batt. elec. pwr.",
@@ -474,8 +475,8 @@ def plot_locos_from_ts(ts: alt.SetSpeedTrainSim, x: str, show_plots: bool = Fals
 
 
 def plot_train_level_powers(
-    ts: alt.SpeedLimitTrainSim, mod_str: str
-) -> Tuple[plt.Figure, plt.Axes]:
+    ts: alt.SpeedLimitTrainSim, mod_str: str,
+) -> tuple[plt.Figure, plt.Axes]:
     ts_dict = ts.to_pydict()
     fig, ax = plt.subplots(3, 1, sharex=True)
     plt.suptitle("Train Power " + mod_str)
@@ -533,8 +534,8 @@ def plot_train_level_powers(
 
 
 def plot_train_network_info(
-    ts: alt.SpeedLimitTrainSim, mod_str: str
-) -> Tuple[plt.Figure, plt.Axes]:
+    ts: alt.SpeedLimitTrainSim, mod_str: str,
+) -> tuple[plt.Figure, plt.Axes]:
     ts_dict = ts.to_pydict()
 
     fig, ax = plt.subplots(3, 1, sharex=True)
@@ -573,8 +574,8 @@ def plot_train_network_info(
 
 
 def plot_consist_pwr(
-    ts: alt.SpeedLimitTrainSim, mod_str: str
-) -> Tuple[plt.Figure, plt.Axes]:
+    ts: alt.SpeedLimitTrainSim, mod_str: str,
+) -> tuple[plt.Figure, plt.Axes]:
     ts_dict = ts.to_pydict()
 
     fig, ax = plt.subplots(3, 1, sharex=True)
@@ -604,8 +605,8 @@ def plot_consist_pwr(
 
 
 def plot_hel_pwr_and_soc(
-    ts: alt.SpeedLimitTrainSim, mod_str: str, hel_type = "HybridLoco"
-) -> Tuple[plt.Figure, plt.Axes]:
+    ts: alt.SpeedLimitTrainSim, mod_str: str, hel_type="HybridLoco",
+) -> tuple[plt.Figure, plt.Axes]:
     ts_dict = ts.to_pydict()
     loco_list = []
     for loco in ts_dict["loco_con"]["loco_vec"]:
@@ -624,7 +625,7 @@ def plot_hel_pwr_and_soc(
     ax[ax_idx].plot(
         ts_dict["history"]["time_seconds"],
         np.array(
-            hybrid_loco["loco_type"][hel_type]["res"]["history"]["pwr_disch_max_watts"]
+            hybrid_loco["loco_type"][hel_type]["res"]["history"]["pwr_disch_max_watts"],
         )
         / 1e3,
         label="batt. max disch. pwr",
@@ -632,7 +633,7 @@ def plot_hel_pwr_and_soc(
     ax[ax_idx].plot(
         ts_dict["history"]["time_seconds"],
         np.array(
-            hybrid_loco["loco_type"][hel_type]["res"]["history"]["pwr_charge_max_watts"]
+            hybrid_loco["loco_type"][hel_type]["res"]["history"]["pwr_charge_max_watts"],
         )
         / 1e3,
         label="batt. max chrg. pwr",
@@ -642,15 +643,15 @@ def plot_hel_pwr_and_soc(
         np.array(
             hybrid_loco["loco_type"][hel_type]["res"]["history"][
                 "pwr_out_electrical_watts"
-            ]
+            ],
         )
         / 1e3,
         label="batt. elec. pwr.",
     )
     pwr_gen_elect_out = np.array(
-        hybrid_loco["loco_type"][hel_type]["gen"]["history"]["pwr_elec_prop_out_watts"]
+        hybrid_loco["loco_type"][hel_type]["gen"]["history"]["pwr_elec_prop_out_watts"],
     ) + np.array(
-        hybrid_loco["loco_type"][hel_type]["gen"]["history"]["pwr_elec_aux_watts"]
+        hybrid_loco["loco_type"][hel_type]["gen"]["history"]["pwr_elec_aux_watts"],
     )
     ax[ax_idx].plot(
         ts_dict["history"]["time_seconds"],
@@ -696,8 +697,8 @@ def plot_hel_pwr_and_soc(
 
 
 def plot_bel_pwr_and_soc(
-    ts: alt.SpeedLimitTrainSim, mod_str: str, bel_type = "BatteryElectricLoco"
-) -> Tuple[plt.Figure, plt.Axes]:
+    ts: alt.SpeedLimitTrainSim, mod_str: str, bel_type="BatteryElectricLoco",
+) -> tuple[plt.Figure, plt.Axes]:
     ts_dict = ts.to_pydict()
     batt_loco = ts_dict["loco_con"]["loco_vec"][0]
     fig, ax = plt.subplots(3, 1, sharex=True)
@@ -712,7 +713,7 @@ def plot_bel_pwr_and_soc(
     ax[ax_idx].plot(
         ts_dict["history"]["time_seconds"],
         np.array(
-            batt_loco["loco_type"][bel_type]["res"]["history"]["pwr_disch_max_watts"]
+            batt_loco["loco_type"][bel_type]["res"]["history"]["pwr_disch_max_watts"],
         )
         / 1e3,
         label="batt. max disch. pwr",
@@ -720,7 +721,7 @@ def plot_bel_pwr_and_soc(
     ax[ax_idx].plot(
         ts_dict["history"]["time_seconds"],
         np.array(
-            batt_loco["loco_type"][bel_type]["res"]["history"]["pwr_charge_max_watts"]
+            batt_loco["loco_type"][bel_type]["res"]["history"]["pwr_charge_max_watts"],
         )
         / 1e3,
         label="batt. max chrg. pwr",
@@ -730,7 +731,7 @@ def plot_bel_pwr_and_soc(
         np.array(
             batt_loco["loco_type"][bel_type]["res"]["history"][
                 "pwr_out_electrical_watts"
-            ]
+            ],
         )
         / 1e3,
         label="batt. elec. pwr.",

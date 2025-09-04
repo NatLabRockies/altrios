@@ -142,6 +142,7 @@ loco_con_sans_buffers = alt.Consist(
 networks = glob.glob("../Network Builder Test Small/Generated Networks/*")
 
 # %%
+Results = []
 for network_path in networks:
     print(network_path)
 
@@ -205,8 +206,23 @@ for network_path in networks:
                         "success {}, {}, {}".format(network_path[-25:-1], origin, dest)
                     )
                     network.to_file(network_path + "/Network.msgpack")
-
+                    Results.append(
+                        {
+                            "network": network_path,
+                            "origin": origin,
+                            "destination": dest,
+                            "Success?": 1,
+                        }
+                    )
             except Exception as e:
+                Results.append(
+                    {
+                        "network": network_path,
+                        "origin": origin,
+                        "destination": dest,
+                        "Success?": 0,
+                    }
+                )
                 # print(e)
                 e_str = str(e)
                 split_errors = e_str.split("\\n")
@@ -245,4 +261,7 @@ for network_path in networks:
 
                 print("failure: {}, {}, {}".format(network_path[-25:-1], origin, dest))
 
+
+Results = pd.DataFrame(Results)
+Results.to_csv("network_check_results.csv")
 # %%

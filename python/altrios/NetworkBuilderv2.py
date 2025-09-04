@@ -24,6 +24,7 @@ else:
     import pyproj
 
     pyproj.datadir.set_data_dir(os.path.dirname(env_folder_path) + "/share/proj")
+    os.environ["PROJ_LIB"] = os.path.dirname(env_folder_path) + "/share/proj"
 # %%
 # https://pyproj4.github.io/pyproj/stable/api/network.html
 # this is a copy from my base conda environment to see if pixi can be made to work.
@@ -50,8 +51,23 @@ import momepy
 import numpy as np
 from scipy.signal import savgol_filter
 
+from tenacity import retry, stop_after_attempt, wait_fixed
+
+
+import rasterio.mask
+
 
 # import altrios as alt
+
+
+# retry 10 times and wait 3 minutes between attempts if it errors out
+@retry(stop=stop_after_attempt(10), wait=wait_fixed(180_000))
+def call_osm(LayerQuery):
+    # this is just a wrapper around overpass so that I can use tenacity to retry things with the server is too busy
+    print("calling osm server....")
+    api = overpy.Overpass()
+    api.default_max_retry_count = 5
+    return api.query(LayerQuery)
 
 
 def point_from_coord(coord):
@@ -445,6 +461,7 @@ class NetworkBuilder:
                 LayerTiffDir = Path(self.data_folder / "Elevation Data" / layername)
                 LayerTiffDir.mkdir(parents=True, exist_ok=True)
                 # Download DEM
+                print("***************************{}**************".format(bounds))
                 tiff_files = s3dep.get_dem(bounds, LayerTiffDir)
 
         print("Elevation download complete")
@@ -470,8 +487,8 @@ class NetworkBuilder:
                         (._;>;);
                         out body;"""
 
-        api = overpy.Overpass()
-        api.default_max_retry_count = 5
+        # api = overpy.Overpass()
+        # api.default_max_retry_count = 5
 
         for layername in fiona.listlayers(self.geopackage_path):
             # purge previous osm layers
@@ -496,7 +513,7 @@ class NetworkBuilder:
             # geopandas and overpass api use different order for bounding boxes
             bounds = tuple(geolayer.total_bounds)
             LayerQuery = BaseQuery.format(bounds[1], bounds[0], bounds[3], bounds[2])
-            result = api.query(LayerQuery)
+            result = call_osm(LayerQuery)
             TrackData = result.ways
 
             if "FEC" in layername:
@@ -538,8 +555,8 @@ class NetworkBuilder:
                     "railway" in Node_.tags.keys()
                     or "railway:switch" in Node_.tags.keys()
                 ):
-                    if "railway:switch" in Node_.tags.keys():
-                        print(Node_.tags.keys())
+                    # if "railway:switch" in Node_.tags.keys():
+                    # print(Node_.tags.keys())
                     if (
                         Node_.tags["railway"] == "junction"
                         or "railway:switch" in Node_.tags.keys()
@@ -1477,7 +1494,7 @@ class NetworkBuilder:
         """
         min_link_length = 1000  # this is the minimum link length for the location
         # maximum distance in meters link can be from coordinate specified for location
-        max_link_distance_from_coord = 15000
+        max_link_distance_from_coord = 1500
 
         locations = gpd.read_file(
             self.input_geopackage, layer=self.input_locations_layer_name
@@ -1505,6 +1522,14 @@ class NetworkBuilder:
 
                 long_links["length"] = long_links.length
                 osm_id_mapping = {}
+
+                self.delete_and_create_layer(
+                    layername.replace("_linked", "_locations"),
+                    locations[
+                        locations.Location.isin(long_links.Location.unique())
+                    ].to_crs(epsg=4326),
+                )
+
                 for Loc in long_links.Location.unique():
                     loc_links = long_links[long_links.Location == Loc].sort_values(
                         "match dist [m]"  # "length"
@@ -1598,7 +1623,7 @@ if __name__ == "__main__":
         "SmallNetworkBuild",
     )
 
-    MyBuilder.build_network()
+    # MyBuilder.build_network()
     # print(fiona.listlayers(MyBuilder.geopackage_path))
     # MyBuilder.input_geopackage_parsing()
 
@@ -1606,14 +1631,8 @@ if __name__ == "__main__":
     # MyBuilder.add_speed_limits()
     # MyBuilder.verify_grade_elev()
 
-    # MyBuilder.indentify_links()
+    MyBuilder.indentify_links()
     # MyBuilder.convert_to_yaml()
     # MyBuilder.build_links()
     # MyBuilder.download_elevation()
     # MyBuilder.create_virtual_raster()
-
-    import numpy as np
-    import shapely
-    import geopandas as gpd
-    import rasterio
-    import rasterio.mask
