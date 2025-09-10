@@ -13,10 +13,10 @@ class manual_dispatch_demand:
                     "HP_Required_Per_Ton_Loaded": 2,
                     "HP_Required_Per_Ton_Empty": 2}},
                 {"Car_Type": "Intermodal", "details": {
-                    "Tons_Per_Car_Loaded": 146.60723,
-                    "Tons_Per_Car_Empty": 34.722765,
-                    "HP_Required_Per_Ton_Loaded": 4,
-                    "HP_Required_Per_Ton_Empty": 4}},
+                    "Tons_Per_Car_Loaded": 49.3, # 146.60723,
+                    "Tons_Per_Car_Empty": 31.0, # 34.722765,
+                    "HP_Required_Per_Ton_Loaded": 3, #4,
+                    "HP_Required_Per_Ton_Empty": 3}},#4}},
                 {"Car_Type": "Manifest", "details": {
                     "Tons_Per_Car_Loaded": 146.60723,
                     "Tons_Per_Car_Empty": 34.722765,

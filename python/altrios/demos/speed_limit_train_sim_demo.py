@@ -18,10 +18,10 @@ SAVE_INTERVAL = 1
 # Build the train config
 print("Loading rail vehicles")
 rail_vehicle_loaded = alt.RailVehicle.from_file(
-    alt.resources_root() / "rolling_stock/Manifest_Loaded.yaml"
+    alt.resources_root() / "rolling_stock/Intermodal_Loaded.yaml"
 )
 rail_vehicle_empty = alt.RailVehicle.from_file(
-    alt.resources_root() / "rolling_stock/Manifest_Empty.yaml"
+    alt.resources_root() / "rolling_stock/Intermodal_Empty.yaml"
 )
 
 # https://docs.rs/altrios-core/latest/altrios_core/train/struct.TrainConfig.html
@@ -29,8 +29,8 @@ print("Loading `TrainConfig`")
 train_config = alt.TrainConfig(
     rail_vehicles=[rail_vehicle_loaded, rail_vehicle_empty],
     n_cars_by_type={
-        "Manifest_Loaded": 50,
-        "Manifest_Empty": 50,
+        "Intermodal_Loaded": 100,
+        "Intermodal_Empty": 0,
     },
     train_length_meters=None,
     train_mass_kilograms=None,
