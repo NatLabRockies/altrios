@@ -154,6 +154,16 @@ def main(
         }
     )
 
+    travel_time = [
+        {
+            "Train_ID": str(sim["train_id"]),
+            "Departure_Time_Actual_Hr": round(tp[0]["time_seconds"] / 3600, 4),
+            "Arrival_Time_Actual_Hr": round(tp[-1]["time_seconds"] / 3600, 4),
+            "Travel_Time_Hr": round((tp[-1]["time_seconds"] - tp[0]["time_seconds"]) / 3600, 4),
+        }
+        for sim, tp in zip(slts_dicts, timed_paths)
+    ]
+
     train_consist_plan = train_consist_plan.join(
         train_times, on=["Train_ID", "Origin_ID", "Destination_ID"], how="left"
     )
@@ -167,6 +177,34 @@ def main(
     train_consist_plan = train_consist_plan.with_columns(
         (pl.col("Train_ID").rank("dense") - 1).alias("TrainSimVec_Index")
     )
+
+    # # train_consist_plan -> DataFrame -> dictionary
+    # df = train_consist_plan.select([
+    #     "Train_ID",
+    #     "Destination_ID"
+    #     "Arrival_Time_Actual_Hr",
+    #     "Cars_Empty",
+    #     "Cars_Loaded",
+    # ])
+    #
+    # df = df.with_columns(
+    #     df["Arrival_Time_Actual_Hr"].shift(-1).alias("departure_time")    # departure_time = next train arrival_time
+    # )
+    #
+    # lifts_timetable = [
+    #     {
+    #         "train_id": int(row["Train_ID"]),
+    #         "terminal_id": str(row["Destination_ID"]),
+    #         "arrival_time": round(float(row["Arrival_Time_Actual_Hr"]), 4) if row["Arrival_Time_Actual_Hr"] is not None else None,
+    #         "departure_time": round(float(row["departure_time"]), 4) if row["departure_time"] is not None else None,
+    #         "empty_cars": int(row["Cars_Empty"]),
+    #         "full_cars": int(row["Cars_Loaded"]),
+    #         "oc_number": int(row["Cars_Loaded"]),
+    #         "truck_number": int(row["Cars_Loaded"]),
+    #     }
+    #     for row in df.to_dicts()
+    # ]
+
     # speed_limit_train_sims is 0-indexed but Train_ID starts at 1
     to_keep = train_consist_plan.unique(subset=["Train_ID"]).to_series().sort()
     for i, sim in enumerate(speed_limit_train_sims):
@@ -188,4 +226,6 @@ def main(
         train_sims,
         timed_paths,
         train_consist_plan_untrimmed,
+        travel_time,
+        # lifts_timetable,
     )

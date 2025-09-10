@@ -30,16 +30,9 @@ rail_vehicles = [
     for vehicle_file in Path(alt.resources_root() / "rolling_stock/").glob("*.yaml")
 ]
 
-# location_map = alt.import_locations(
-#     alt.resources_root() / "networks/default_locations.csv"
-# )
-# network = alt.Network.from_file(
-#     alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
-# )
-
 location_map = alt.import_locations(alt.resources_root() / "double_sidings/FW-A/locations segment 485.csv")
 network = alt.Network.from_file(alt.resources_root() / "double_sidings/FW-A/line segment 485.yaml")
-manual_dispatch_demand_file = "dispatch_schedule_daily_throughput_2200.csv" # dispatch_schedule_freeflow.csv
+manual_dispatch_demand_file =   "dispatch_schedule_daily_throughput_2400.csv"    # "dispatch_schedule_freeflow.csv"
 
 t1_import = time.perf_counter()
 print(f"Elapsed time to import rail vehicles, locations, and network: {t1_import - t0_import:.3g} s")
@@ -65,6 +58,8 @@ t0_main = time.perf_counter()
     speed_limit_train_sims,
     timed_paths,
     train_consist_plan_untrimmed,
+    travel_time,
+    # lifts_timetable,
 ) = sim_manager.main(
     network=network,
     rail_vehicles=rail_vehicles,
@@ -75,6 +70,8 @@ t0_main = time.perf_counter()
 
 t1_main = time.perf_counter()
 print(f"Elapsed time to run `sim_manager.main()`: {t1_main - t0_main:.3g} s")
+
+# print(f"Timetable for lifts is: {lifts_timetable}")
 
 # %%
 t0_train_sims = time.perf_counter()
@@ -92,19 +89,16 @@ speed_limit_train_sims.set_save_interval(100)
 t1_train_sims = time.perf_counter()
 print(f"Elapsed time to run train sims: {t1_train_sims - t0_train_sims:.3g} s")
 
-# travel time
-import pandas as pd
-records = [(sim['train_id'], sim['state']['time_seconds']) for sim in sims.to_pydict()]
-df = pd.DataFrame(records, columns=["train_id", "travel_time"])
+# # travel time record
+train_times = pl.DataFrame(travel_time)
 multiple_siding_results = "travel_time_" + manual_dispatch_demand_file
 multiple_siding_results_path = alt.resources_root() / "double_sidings" / "results" / multiple_siding_results
-df.to_csv(multiple_siding_results_path, index=False)
+train_times.write_csv(multiple_siding_results_path)
 print("travel time obtained！")
 
 
 t_train_time = sum([sim["state"]["time_seconds"] for sim in sims.to_pydict()])
 print(f"Total train-seconds simulated: {t_train_time} s")
-
 
 
 # %%
