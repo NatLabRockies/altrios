@@ -55,7 +55,7 @@ from rasterio.plot import show  # noqa: E402
 
 
 # retry 10 times and wait 3 minutes between attempts if it errors out
-@retry(stop=stop_after_attempt(10), wait=wait_fixed(180_000))
+@retry(stop=stop_after_attempt(10), wait=wait_fixed(180))
 def call_osm(layer_query):
     """
     Query the OpenStreetMap (OSM) Overpass API with the provided query string,
