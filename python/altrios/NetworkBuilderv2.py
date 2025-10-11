@@ -604,6 +604,8 @@ class NetworkBuilder:
 
             TrackGDF = TrackGDF[TrackGDF.building != "train_station"]
 
+            TrackGDF = TrackGDF[TrackGDF.barrier != "fence"]
+
             if "Note" in TrackGDF.columns.values:
                 TrackGDF = TrackGDF.drop("Note", axis=1)
 
@@ -716,10 +718,11 @@ class NetworkBuilder:
 
                     # doing this allow savitsky golay filtering to be turned off to understand
                     # impact in filtering approach
-                    number_of_segments = np.ceil(length / resample_length)
+
                     if apply_savgol:
                         offsets = ast.literal_eval(row.offsets)
                         length = offsets[-1]
+                        number_of_segments = np.ceil(length / resample_length)
                         num_of_elev_segs.append(int(number_of_segments))
                         segment_fraction = 1 / number_of_segments
                         resample_fractions = np.arange(0, 1.00001, segment_fraction)
@@ -740,7 +743,7 @@ class NetworkBuilder:
                         )
                         line_elevations_raw.append(list(map(float, elevs)))
                     else:
-
+                        num_of_elev_segs.append(-1)
                         line_elevations_raw.append(list(map(float, elevs)))
                         line_elevations.append(list(map(float, elevs)))
 
@@ -1651,8 +1654,8 @@ if __name__ == "__main__":
         # alt.resources_root() / "networks/NetworkInput_small.gpkg",
         # "resources/networks/NetworkInput_small.gpkg",
         "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small.gpkg",
-        "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput - No Savgol",
-        "SmallNetworkBuild_NoSavGol",
+        "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput",  # - No Savgol",
+        "SmallNetworkBuild",  # _NoSavGol",
     )
 
     # MyBuilder.build_network()
@@ -1662,8 +1665,8 @@ if __name__ == "__main__":
     MyBuilder.clean_geometry()
     MyBuilder.create_reverse_links()
     MyBuilder.calc_offsets_headings()
-    MyBuilder.download_elevation()
-    MyBuilder.drape_geometry(apply_savgol=False)
+    # MyBuilder.download_elevation()
+    MyBuilder.drape_geometry(apply_savgol=True)
     MyBuilder.build_links()
     MyBuilder.indentify_links()
     MyBuilder.convert_to_yaml()  # speed_limit_mph=70)
