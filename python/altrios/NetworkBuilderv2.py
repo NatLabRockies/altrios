@@ -61,7 +61,7 @@ import rasterio.mask
 
 
 # retry 10 times and wait 3 minutes between attempts if it errors out
-@retry(stop=stop_after_attempt(10), wait=wait_fixed(180_000))
+@retry(stop=stop_after_attempt(10), wait=wait_fixed(180))
 def call_osm(LayerQuery):
     # this is just a wrapper around overpass so that I can use tenacity to retry things with the server is too busy
     print("calling osm server....")
@@ -657,7 +657,9 @@ class NetworkBuilder:
             gdal.BuildVRT(str(VRTName), tiff_strs)
             # have not added filtering yet.
 
-    def drape_geometry(self, resample_length=10, circle_buffer_m=250, buffer=2):
+    def drape_geometry(
+        self, resample_length=10, circle_buffer_m=250, buffer=2, apply_savgol=True
+    ):
         """
         Parallelized draping operation.
         """
@@ -711,28 +713,36 @@ class NetworkBuilder:
                 line_elevations_raw = []
                 num_of_elev_segs = []
                 for idx, row in track_data.iterrows():
-                    offsets = ast.literal_eval(row.offsets)
-                    length = offsets[-1]
+
+                    # doing this allow savitsky golay filtering to be turned off to understand
+                    # impact in filtering approach
                     number_of_segments = np.ceil(length / resample_length)
-                    num_of_elev_segs.append(int(number_of_segments))
-                    segment_fraction = 1 / number_of_segments
-                    resample_fractions = np.arange(0, 1.00001, segment_fraction)
-                    elevs = results[idx]
-                    line_elevations.append(
-                        list(
-                            map(
-                                float,
-                                smooth_link_data(
-                                    offsets,
-                                    elevs,
-                                    window_length=200,
-                                    interp_offsets=resample_fractions * length,
-                                    interp_values=elevs,
+                    if apply_savgol:
+                        offsets = ast.literal_eval(row.offsets)
+                        length = offsets[-1]
+                        num_of_elev_segs.append(int(number_of_segments))
+                        segment_fraction = 1 / number_of_segments
+                        resample_fractions = np.arange(0, 1.00001, segment_fraction)
+                        elevs = results[idx]
+                        line_elevations.append(
+                            list(
+                                map(
+                                    float,
+                                    smooth_link_data(
+                                        offsets,
+                                        elevs,
+                                        window_length=200,
+                                        interp_offsets=resample_fractions * length,
+                                        interp_values=elevs,
+                                    ),
                                 ),
-                            ),
+                            )
                         )
-                    )
-                    line_elevations_raw.append(list(map(float, elevs)))
+                        line_elevations_raw.append(list(map(float, elevs)))
+                    else:
+
+                        line_elevations_raw.append(list(map(float, elevs)))
+                        line_elevations.append(list(map(float, elevs)))
 
                 trackdata["elevations"] = line_elevations
                 trackdata["elevations raw"] = line_elevations_raw
@@ -1616,12 +1626,12 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    MyBuilder = NetworkBuilder(
-        # alt.resources_root() / "networks/NetworkInput_small.gpkg",
-        "resources/networks/NetworkInput_small.gpkg",
-        "Network Builder Test Small",
-        "SmallNetworkBuild",
-    )
+    # MyBuilder = NetworkBuilder(
+    #     # alt.resources_root() / "networks/NetworkInput_small.gpkg",
+    #     "resources/networks/NetworkInput_small.gpkg",
+    #     "Network Builder Test Small",
+    #     "SmallNetworkBuild",
+    # )
 
     # MyBuilder.build_network()
     # print(fiona.listlayers(MyBuilder.geopackage_path))
@@ -1631,8 +1641,29 @@ if __name__ == "__main__":
     # MyBuilder.add_speed_limits()
     # MyBuilder.verify_grade_elev()
 
-    MyBuilder.indentify_links()
+    # MyBuilder.indentify_links()
     # MyBuilder.convert_to_yaml()
     # MyBuilder.build_links()
     # MyBuilder.download_elevation()
     # MyBuilder.create_virtual_raster()
+
+    MyBuilder = NetworkBuilder(
+        # alt.resources_root() / "networks/NetworkInput_small.gpkg",
+        # "resources/networks/NetworkInput_small.gpkg",
+        "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small.gpkg",
+        "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput - No Savgol",
+        "SmallNetworkBuild_NoSavGol",
+    )
+
+    # MyBuilder.build_network()
+
+    MyBuilder.input_geopackage_parsing()
+    MyBuilder.download_osm_data()
+    MyBuilder.clean_geometry()
+    MyBuilder.create_reverse_links()
+    MyBuilder.calc_offsets_headings()
+    MyBuilder.download_elevation()
+    MyBuilder.drape_geometry(apply_savgol=False)
+    MyBuilder.build_links()
+    MyBuilder.indentify_links()
+    MyBuilder.convert_to_yaml()  # speed_limit_mph=70)
