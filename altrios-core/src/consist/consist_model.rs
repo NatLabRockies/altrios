@@ -336,9 +336,7 @@ impl Consist {
         dt: si::Time,
         engine_on: Option<bool>,
     ) -> anyhow::Result<()> {
-        // TODO: account for catenary in here, making sure that generator and
-        // battery electric power output are the total demanded power minus whatever is
-        // available from catenary
+        // TODO: account for catenary in here
         if self.assert_limits {
             ensure!(
                 -pwr_out_req <= *self.state.pwr_dyn_brake_max.get_fresh(|| format_dbg!())?,
@@ -576,7 +574,7 @@ impl LocoTrait for Consist {
         dt: si::Time,
     ) -> anyhow::Result<()> {
         // TODO: this will need to account for catenary power
-        // TODO: need to be able to configure regen to go to catenary (i.e. back on the grid) or not
+        // TODO: need to be able to configure regen to go to catenary or not
         // TODO: make sure that self.state includes catenary effects so that `solve_energy_consumption`
         // is operating with the same catenary power availability at the train position for which this
         // method is called
