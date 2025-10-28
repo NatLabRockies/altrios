@@ -1,28 +1,18 @@
+# -*- coding: utf-8 -*-
+
 """
 Created on Wed Apr  2 10:19:07 2025
 
 @author: ganderson
 """
-
 # %%
 # set gdal variables before the import
-import ast
-import concurrent.futures
-import contextlib
-import os
-import pickle
 import sys
-import uuid
+import os
 from pathlib import Path
-
-# from typing import list
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-import yaml
-from scipy import interpolate
-from scipy.signal import savgol_filter
-from tenacity import retry, stop_after_attempt, wait_fixed
+import concurrent.futures
+import requests
+from diskcache import Cache
 
 env_folder_path = os.path.dirname(sys.executable)
 if Path(env_folder_path + "/Library/share/gdal").exists():
@@ -32,60 +22,58 @@ if Path(env_folder_path + "/Library/share/gdal").exists():
     os.environ["PROJ_LIB"] = env_folder_path + "/Library/share/proj"
     os.environ["PROJ_NETWORK"] = "OFF"
 else:
-    os.environ["PROJ_LIB"] = os.path.dirname(env_folder_path) + "/share/proj"
-    os.environ["PROJ_DATA"] = os.path.dirname(env_folder_path) + "/share/proj"
+
     import pyproj
 
     pyproj.datadir.set_data_dir(os.path.dirname(env_folder_path) + "/share/proj")
+    os.environ["PROJ_LIB"] = os.path.dirname(env_folder_path) + "/share/proj"
+# %%
+# https://pyproj4.github.io/pyproj/stable/api/network.html
+# this is a copy from my base conda environment to see if pixi can be made to work.
 
-# disabled E402 on geospatial libraries because some paths need to be setup prior to loading them.
+
+import pandas as pd
+import geopandas as gpd
+import fiona
+from pathlib import Path
+import rasterio.mask
+import seamless_3dep as s3dep
+import overpy
+import shapely
+from osgeo import gdal
+import rasterio
+from geographiclib.geodesic import Geodesic
+import ast
+import yaml
+import pickle
+from typing import List
+from scipy import interpolate
+import uuid
+import momepy
+import numpy as np
+from scipy.signal import savgol_filter
+from tenacity import retry, stop_after_attempt, wait_fixed
 
 
-import fiona  # noqa: E402
-import geopandas as gpd  # noqa: E402
-import momepy  # noqa: E402
-import overpy  # noqa: E402
-import rasterio  # noqa: E402
-import rasterio.mask  # noqa: E402
-import seamless_3dep as s3dep  # noqa: E402
-import shapely  # noqa: E402
-from geographiclib.geodesic import Geodesic  # noqa: E402
-from osgeo import gdal  # noqa: E402
-from rasterio.plot import show  # noqa: E402
+import rasterio.mask
+
+cache = Cache("./network_builder_cache")
+# import altrios as alt
 
 
 # retry 10 times and wait 3 minutes between attempts if it errors out
 @retry(stop=stop_after_attempt(10), wait=wait_fixed(180))
-def call_osm(layer_query):
-    """
-    Query the OpenStreetMap (OSM) Overpass API with the provided query string,
-    using automatic retries if the server is busy.
-
-    This function wraps the Overpass API call to allow for retry logic (e.g., with tenacity)
-    when the OSM server is overloaded or temporarily unavailable.
-
-    Args:
-        LayerQuery (str): The Overpass QL query string to send to the OSM server.
-
-    Returns
-    -------
-        overpy.Result: The result of the Overpass API query.
-
-    Raises
-    ------
-        overpy.exception.OverpassException: If the query fails after the maximum number of retries.
-    """
-    # this is just a wrapper around overpass so that I can use tenacity to retry things with
-    # the server is too busy
+def call_osm(LayerQuery):
+    # this is just a wrapper around overpass so that I can use tenacity to retry things with the server is too busy
     print("calling osm server....")
     api = overpy.Overpass()
     api.default_max_retry_count = 5
-    return api.query(layer_query)
+    return api.query(LayerQuery)
 
 
 def point_from_coord(coord):
     """
-    Take the coordinate from a point in a linestring and returns
+    This function takes the coordinate from a point in a linestring and returns
     a shapeply.Point.  This was needed for error handling where there were a
     couple nans.
 
@@ -98,6 +86,7 @@ def point_from_coord(coord):
     point : the coordinate returned as a shapely.Point
 
     """
+
     try:
         point = shapely.to_wkt(shapely.Point(coord[0], coord[1]))
     except:
@@ -108,7 +97,7 @@ def point_from_coord(coord):
 
 def heading_difference(heading_a: np.float64, heading_b: np.float64):
     """
-    Calculate the absolute difference in angle between two
+    This function calculates the absolute difference in angle between two
     headings.  This function assumes units of degrees.
 
     Parameters
@@ -124,6 +113,7 @@ def heading_difference(heading_a: np.float64, heading_b: np.float64):
         absolute difference between two headings in degrees.
 
     """
+
     heading_a = np.mod(heading_a, 360.0)
     heading_b = np.mod(heading_b, 360.0)
     absolute_difference = np.abs(heading_a - heading_b)
@@ -134,12 +124,11 @@ def heading_difference(heading_a: np.float64, heading_b: np.float64):
 def located_point_value_on_line(
     point_gdf: gpd.GeoDataFrame,
     link_line: shapely.LineString,
-    cols: list[str],
+    cols: List[str],
     buffer_width: np.float64 = 25.0,
-    local_crs: str = "ESRI:102009",
 ):
     """
-    Locate points in a GeoDataFrame along a linestring that are within a
+    locates points in a GeoDataFrame along a linestring that are within a
     specified distance of the line.  returns a list that contains the fractional
     offset location of the point along the line with the values in specified columns.
 
@@ -169,31 +158,28 @@ def located_point_value_on_line(
         values that were lcoated on the line.
 
     """
+
     line_gdf = gpd.GeoDataFrame(
-        [],
-        geometry=[link_line],
-        crs="EPSG:4326",
+        [], geometry=[link_line], crs="EPSG:4326"
     )  # doing this to ensure a crs is associated to line
-    line_gdf_buffer = line_gdf.to_crs(local_crs)  # reproject to get meters
+    line_gdf_buffer = line_gdf.to_crs("ESRI:102009")  # reproject to get meters
     line_gdf_buffer.geometry = line_gdf_buffer.buffer(
-        buffer_width,
+        buffer_width
         # create 25 m buffer around track.  Line ends flat so only points next to line not past end.
     )
     line_gdf_buffer = line_gdf_buffer.to_crs(
-        "EPSG:4326",
+        "EPSG:4326"
     )  # got back to wgs 84 to get back to a common crs
 
     # get all points that fall within the buffer
     points_of_interest = point_gdf.sjoin(
-        line_gdf_buffer,
-        how="inner",
-        predicate="intersects",
+        line_gdf_buffer, how="inner", predicate="intersects"
     )
 
     # calculate fraction of the distance along the line the point is.  Using fract here so that
     # the length can be found by using the ellipsoidal length calculated in a prior step.
     points_of_interest["line offset"] = points_of_interest.geometry.apply(
-        lambda x: shapely.line_locate_point(line_gdf.geometry, x, normalized=True),
+        lambda x: shapely.line_locate_point(line_gdf.geometry, x, normalized=True)
     )
     # selct all to points within 25 m of track, we will then project them onto
     # line using line_locate_point, these values will then go into speed_sets and
@@ -217,37 +203,9 @@ def smooth_link_data(
     unwrap_heading=False,
     interp_offsets=[],
     interp_values=[],
+    apply_savgol=True,
 ):
-    """
-    Smooth the input values along specified offsets using a Savitzky-Golay filter,
-    optionally unwrapping headings and interpolating to evenly spaced segments.
-
-    Parameters
-    ----------
-    offsets : array-like
-        The positions along the line (e.g., distances) corresponding to the values.
-    values : array-like
-        The data values to be smoothed (e.g., elevations or headings).
-    window_length : int, optional
-        The length of the filter window (number of coefficients). Default is 100.
-    order : int, optional
-        The order of the polynomial used to fit the samples. Default is 3.
-    segment_length : int, optional
-        The length of each segment for interpolation. Default is 2.
-    unwrap_heading : bool, optional
-        Whether to unwrap heading values before smoothing. Default is False.
-    interp_offsets : array-like, optional
-        Offsets to use for interpolation. If empty, will be generated.
-    interp_values : array-like, optional
-        Values to use for interpolation. If empty, will be generated.
-
-    Returns
-    -------
-    list
-        The smoothed values corresponding to the input offsets.
-    """
-    # this is going to fit a spline to the elations with the ends constrained to
-    # smooth everything out.
+    # this is going to fit a spline to the elations with the ends constrained to smooth everything out.
 
     if unwrap_heading:
         values = np.unwrap(values, period=360)
@@ -279,9 +237,17 @@ def smooth_link_data(
     smooth_values[-1] = values[-1]
 
     # this catches a few short links that were returning nan values
-    if np.isnan(smooth_values).any():
-        print("WARNING: smoothing did not work for a link.")
-        smooth_values = values
+    if np.isnan(smooth_values).any() or not apply_savgol:
+        print("WARNING: smoothing did not work for a link or savgol not applied.")
+
+        f2 = interpolate.interp1d(
+            interp_offsets,
+            values,
+            bounds_error=False,
+            fill_value="extrapolate",
+        )
+
+        smooth_values = f2(offsets)
 
     return list(smooth_values)
 
@@ -297,83 +263,45 @@ def _drape_row(args):
         circle_buffer_m,
         vrt_path_wstr,
         track_buffer_wkb,
-        local_crs,
-        dem_crs,  # dem crs = EPSG:4269
-        apply_median,
     ) = args
     elevs = []
     try:
         with rasterio.open(vrt_path_wstr) as src:
             resampled_line = shapely.LineString(
                 shapely.line_interpolate_point(
-                    row.geometry,
-                    resample_fractions,
-                    normalized=True,
-                ),
+                    row.geometry, resample_fractions, normalized=True
+                )
             )
             # reconstruct track_buffer from WKB
             track_buffer = shapely.from_wkb(track_buffer_wkb)
             for coord in resampled_line.coords:
-                if apply_median:
-                    circle_buffer = (
-                        gpd.GeoSeries([shapely.Point(coord)], crs=dem_crs)
-                        .to_crs(local_crs)
-                        .buffer(circle_buffer_m)
-                        .to_crs(dem_crs)
-                    )
-                    track_circle_intersect = circle_buffer.intersection(track_buffer)[0]
-                    if type(track_circle_intersect) is shapely.Polygon:
-                        track_circle_intersect = [track_circle_intersect]
-                    else:
-                        track_circle_intersect = track_circle_intersect.geoms
-                    masked_elevation, transform = rasterio.mask.mask(
-                        src,
-                        gpd.GeoSeries(track_circle_intersect, crs=dem_crs),
-                        crop=True,
-                        all_touched=True,
-                        nodata=np.nan,
-                    )
-                    elevs.append(np.nanmedian(masked_elevation))
-                else:
-                    elevs.append(src.sample(shapely.Point(coord)))
-
-            if np.nanmedian(masked_elevation) == 0.0:
-                fig, ax = plt.subplots(figsize=(10, 10))
-                # show(src, ax=ax, transform=src.transform)
-                show(masked_elevation, ax=ax, transform=transform)
-                gpd.GeoSeries(track_circle_intersect, crs=dem_crs).plot(
-                    ax=ax,
-                    facecolor="none",
-                    edgecolor="red",
-                    linewidth=1.5,
+                circle_buffer = (
+                    gpd.GeoSeries([shapely.Point(coord)], crs="EPSG:4269")
+                    .to_crs("ESRI:102009")
+                    .buffer(circle_buffer_m)
+                    .to_crs("EPSG:4269")
                 )
-                plt.savefig(f"draping debug {idx}.png")
-                plt.close()
-                with open(f"draping debug {idx}.txt", "w") as file:
-                    file.write(str(masked_elevation) + "\n")
-                    file.write("-------------------------\n")
-                    file.write(str(np.nanmedian(masked_elevation)) + "\n")
-
-    except Exception:
+                track_circle_intersect = circle_buffer.intersection(track_buffer)[0]
+                if type(track_circle_intersect) is shapely.Polygon:
+                    track_circle_intersect = [track_circle_intersect]
+                else:
+                    track_circle_intersect = track_circle_intersect.geoms
+                masked_elevation, transform = rasterio.mask.mask(
+                    src,
+                    gpd.GeoSeries(track_circle_intersect, crs="EPSG:4269"),
+                    crop=True,
+                    all_touched=True,
+                    nodata=np.nan,
+                )
+                elevs.append(np.nanmedian(masked_elevation))
+    except Exception as e:
         elevs = [np.nan] * len(resample_fractions)
-
+        print("VRT Did not load!!!!!!!!!!!!!!!!!")
     return idx, elevs
 
 
 def parse_to_stats(link_series):
-    """
-    Parse the 'TO stats' field from a link series and return a DataFrame of statistics.
 
-    Parameters
-    ----------
-    link_series : pd.Series
-        A pandas Series containing a 'TO stats' field and an 'offsets' field.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame containing the parsed statistics with offsets scaled appropriately.
-    """
     to_stat_list = ast.literal_eval(link_series["TO stats"].replace(": nan", ": ''"))
 
     if len(to_stat_list) > 0:
@@ -381,8 +309,7 @@ def parse_to_stats(link_series):
         to_stat_df = pd.DataFrame(to_stat_list)
         to_stat_df.offset = (
             to_stat_df.offset * max_offset
-        )  # need to multiply by the length here because the function that places the TO point on
-        # the line gives a fraction of the distance along the line.
+        )  # need to multiply by the length here because the function that places the TO point on the line gives a fraction of the distance along the line.
         to_stat_df = to_stat_df.sort_values(by=["offset"])
     else:
         to_stat_df = pd.DataFrame()
@@ -391,85 +318,25 @@ def parse_to_stats(link_series):
 
 
 class NoAliasDumper(yaml.SafeDumper):
-    """
-    A custom YAML dumper that disables YAML anchors and aliases for cleaner output.
-
-    This class is used for formatting YAML output without anchors and aliases,
-    which can be useful for configuration files or outputs where readability is preferred.
-    """
-
     # used for formatting yaml output.
     # https://ttl255.com/yaml-anchors-and-aliases-and-how-to-disable-them/
-    def ignore_aliases(self, data):  # noqa: D102
+    def ignore_aliases(self, data):
         return True
 
 
 class NetworkBuilder:
-    """
-    NetworkBuilder is responsible for constructing railway network data from geospatial sources,
-    including parsing input geopackages, downloading and processing OSM and elevation data,
-    cleaning and linking geometries, and exporting the resulting network in various formats.
-
-    Attributes
-    ----------
-    input_geopackage : Path
-        Path to the input geopackage defining regions and locations.
-    data_folder : Path
-        Directory for output data, intermediate files, and downloads.
-    builder_name : str
-        Name used for the output geopackage and network files.
-    geopackage_path : Path
-        Path to the output geopackage.
-    local_crs : str
-        Local coordinate reference system used for spatial operations.
-    geod : Geodesic
-        Geodesic object for distance and heading calculations.
-
-    Methods
-    -------
-    delete_and_create_layer(layername, gdf)
-        Deletes and recreates a layer in the geopackage.
-    input_geopackage_parsing()
-        Parses the input geopackage and creates region layers.
-    download_elevation()
-        Downloads elevation data for each region.
-    download_osm_data()
-        Downloads OSM railway data for each region.
-    create_virtual_raster()
-        Combines elevation data into virtual rasters.
-    drape_geometry(...)
-        Applies elevation data to track geometries.
-    clean_geometry()
-        Cleans and splits OSM track data at switches.
-    create_reverse_links()
-        Generates reverse-direction links for each track.
-    distance_heading_calc(linkdata)
-        Calculates distances and headings for a linestring.
-    calc_offsets_headings()
-        Calculates offsets and headings for all links.
-    build_links()
-        Links track segments based on spatial and heading criteria.
-    convert_to_yaml(...)
-        Exports the network to YAML and pickle formats.
-    build_network(...)
-        Runs the full network build process.
-    indentify_links()
-        Associates network links with specified locations.
-    apply_speed_restrictions(link_yaml_idx, trackdata, speed_limit_mph)
-        Applies speed restrictions to a link.
-    """
-
     def __init__(
         self,
         input_geopackage_path: Path | str,
         data_folder: Path | str,
         builder_name,
+        milepost_layer_name: str,
+        speed_restriction_path: dict,
         input_regions_layer_name="network_regions",
         input_locations_layer_name="network_locations",
-        local_crs="ESRI:102009",
     ):
         """
-        Initialize network builder object.
+        Initializes network builder object.
 
         Parameters
         ----------
@@ -495,10 +362,12 @@ class NetworkBuilder:
         None.
 
         """
+
         self.input_geopackage = Path(input_geopackage_path)
         self.input_regions_layer_name = input_regions_layer_name
         self.input_locations_layer_name = input_locations_layer_name
-
+        self.milepost_layer_name = milepost_layer_name
+        self.restriction_table_paths = speed_restriction_path  # this is a dict where the key is the route name, and the value is the path to the csv with speed restriction data.
         self.data_folder = Path(data_folder)
         self.data_folder.mkdir(parents=False, exist_ok=True)
 
@@ -508,11 +377,10 @@ class NetworkBuilder:
         self.track_files = []
         self.switchresult = []
         self.geod = Geodesic.WGS84
-        self.local_crs = local_crs
 
     def delete_and_create_layer(self, layername: str, gdf: gpd.GeoDataFrame):
         """
-        Delete layer from geopackage before saving.  GeoPandas only
+        Used to delete layer from geopackage before saving.  GeoPandas only
         allows replacing the entire geopackage or appending to the existing
         layer if it exists.  This uses the geopackage_path that is a property
         of the NetworkBuilder.
@@ -540,7 +408,7 @@ class NetworkBuilder:
 
     def input_geopackage_parsing(self):
         """
-        Read input geopackage that defines regions and locations.  A
+        This will read in input geopackage that defines regions and locations.  A
         layer for each region will be created that will then be used for the later steps
         in the network generation process.
 
@@ -549,6 +417,7 @@ class NetworkBuilder:
         None.
 
         """
+
         # check if output geopackage exists.  If it does, we will delete existing
         # layers that need to be replaced
         if self.geopackage_path.exists():
@@ -556,14 +425,13 @@ class NetworkBuilder:
                 for layername in fiona.listlayers(self.geopackage_path.resolve()):
                     # purge previous all layers
                     fiona.remove(self.geopackage_path, layer=layername)
-                    print(f"deleted: {layername}")
+                    print("deleted: {}".format(layername))
             except:
                 pass
 
         # read the input geopackage region layer
         regions_gdf = gpd.read_file(
-            self.input_geopackage,
-            layer=self.input_regions_layer_name,
+            self.input_geopackage, layer=self.input_regions_layer_name
         )
 
         # iterate through region layer to make individual region layers in the output geopackage.
@@ -580,7 +448,7 @@ class NetworkBuilder:
 
     def download_elevation(self):
         """
-        Download all relevant GeoTiffs from the USGS that are
+        This function will download all relevant GeoTiffs from the USGS that are
         part of the 3DEP dataset.  They are saved to the folder specified by the
         data_folder property.
 
@@ -590,8 +458,7 @@ class NetworkBuilder:
         None.
 
         """
-        # TODO this needs to happen before the osm data is downloaded or filter out
-        # all the other layers
+        # TODO this needs to happen before the osm data is downloaded or filter out all the other layers
         for layername in fiona.listlayers(self.geopackage_path):
             if not (
                 "_osm" in layername
@@ -605,21 +472,21 @@ class NetworkBuilder:
                 or "_TOjoined" in layername
                 or "_TOPoint" in layername
             ):
-                print(f"downloading layer data for layer: {layername}")
+                print("downloading layer data for layer: {}".format(layername))
                 geolayer = gpd.read_file(self.geopackage_path, layer=layername)
                 # get the bounding box for the layer and add a bit to it.
                 bounds = tuple(geolayer.buffer(0.5).total_bounds)
-                layer_tiff_dir = Path(self.data_folder / "Elevation Data" / layername)
-                layer_tiff_dir.mkdir(parents=True, exist_ok=True)
+                LayerTiffDir = Path(self.data_folder / "Elevation Data" / layername)
+                LayerTiffDir.mkdir(parents=True, exist_ok=True)
                 # Download DEM
-                print(f"***************************{bounds}**************")
-                s3dep.get_dem(bounds, layer_tiff_dir)
+                print("***************************{}**************".format(bounds))
+                tiff_files = s3dep.get_dem(bounds, LayerTiffDir)
 
         print("Elevation download complete")
 
     def download_osm_data(self):
         """
-        Download all rail dail from OpenStreetMap based on the
+        This function downloads all rail dail from OpenStreetMap based on the
         extent of the TO track file.  It will delete previously created layers
         if they exist.  All track and switch data is parsed and converted to
         GeoDataFrames that are saved to the geopackage with _osm and _switches
@@ -631,7 +498,7 @@ class NetworkBuilder:
         None.
 
         """
-        base_query = """[out:xml] [timeout:999];
+        BaseQuery = """[out:xml] [timeout:999];
                         (
                             nwr[railway]({},{},{},{});
                         );
@@ -656,121 +523,115 @@ class NetworkBuilder:
                 or "_TOPoint" in layername
             ):
                 fiona.remove(self.geopackage_path, layer=layername)
-                print(f"deleted: {layername}")
+                print("deleted: {}".format(layername))
 
         for layername in fiona.listlayers(self.geopackage_path):
-            print(f"download osm data for {layername}")
+            print("download osm data for {}".format(layername))
             geolayer = gpd.read_file(self.geopackage_path, layer=layername)
             # geopandas and overpass api use different order for bounding boxes
             bounds = tuple(geolayer.total_bounds)
-            layer_query = base_query.format(bounds[1], bounds[0], bounds[3], bounds[2])
-            result = call_osm(layer_query)
-            track_data = result.ways
+            LayerQuery = BaseQuery.format(bounds[1], bounds[0], bounds[3], bounds[2])
+            result = call_osm(LayerQuery)
+            TrackData = result.ways
 
-            track_gdf = []
+            if "FEC" in layername:
+                x = 1
+
+            TrackGDF = []
             all_switch_gdf = []
-            for way in track_data:
+            for Way in TrackData:
                 # TODO figure out how to grab osm_id
-                coords = []
-                node_tags = []
-                for node in way.nodes:
-                    coords.append([node.lon, node.lat])
-                    node_tags.append(node.tags)
-                    if "railway" in node.tags.keys():
-                        if node.tags["railway"] == "switch":
+                Coords = []
+                NodeTags = []
+                for Node in Way.nodes:
+                    Coords.append([Node.lon, Node.lat])
+                    NodeTags.append(Node.tags)
+                    if "railway" in Node.tags.keys():
+                        if Node.tags["railway"] == "switch":
                             switch_gdf = gpd.GeoDataFrame(
-                                data=[node.tags],
-                                geometry=[shapely.Point([node.lon, node.lat])],
+                                data=[Node.tags],
+                                geometry=[shapely.Point([Node.lon, Node.lat])],
                                 crs="EPSG:4326",
                             )
-                            switch_gdf["osm_link_id"] = way.id
+                            switch_gdf["osm_link_id"] = Way.id
                             all_switch_gdf.append(switch_gdf)
 
-                way_gdf = gpd.GeoDataFrame(
-                    data=[way.tags],
-                    geometry=[shapely.LineString(coords)],
+                WayGDF = gpd.GeoDataFrame(
+                    data=[Way.tags],
+                    geometry=[shapely.LineString(Coords)],
                     crs="EPSG:4326",
                 )
-                way_gdf["Node Tags"] = str(node_tags)
-                way_gdf["osm_id"] = way.id
-                track_gdf.append(way_gdf)
+                WayGDF["Node Tags"] = str(NodeTags)
+                WayGDF["osm_id"] = Way.id
+                TrackGDF.append(WayGDF)
             for (
-                result_node
+                Node_
             ) in (
                 result.nodes
             ):  # Only look for junctions and add them to the list of switches
                 if (
-                    "railway" in result_node.tags.keys()
-                    or "railway:switch" in result_node.tags.keys()
+                    "railway" in Node_.tags.keys()
+                    or "railway:switch" in Node_.tags.keys()
                 ):
-                    if "railway" not in result_node.tags.keys():
-                        # this is going to fix the problems of railway not being in the tabs
-                        # for the keys.  This could be better.....
-                        result_node.tags["railway"] = ""
-
+                    # if "railway:switch" in Node_.tags.keys():
+                    # print(Node_.tags.keys())
                     if (
-                        result_node.tags["railway"] == "junction"
-                        or "railway:switch" in result_node.tags.keys()
+                        Node_.tags["railway"] == "junction"
+                        or "railway:switch" in Node_.tags.keys()
                     ):
                         switch_gdf = gpd.GeoDataFrame(
                             data=[{"railway": "junction"}],
-                            geometry=[
-                                shapely.Point([result_node.lon, result_node.lat]),
-                            ],
+                            geometry=[shapely.Point([Node_.lon, Node_.lat])],
                             crs="EPSG:4326",
                         )
-                        switch_gdf["osm_link_id"] = result_node.id
+                        switch_gdf["osm_link_id"] = Node_.id
                         all_switch_gdf.append(switch_gdf)
-            track_gdf = pd.concat(track_gdf)
-
-            if "fixme" in track_gdf.columns:
-                track_gdf = track_gdf.drop("fixme", axis=1)
-
+            TrackGDF = pd.concat(TrackGDF)
+            TrackGDF = TrackGDF.drop("fixme", axis=1)
             all_switch_gdf = pd.concat(all_switch_gdf)
 
             # TODO add logic here to filter down to mainline only plus a buffer. use usage column
             # will also need to reproject to get buffer.
 
-            track_gdf = track_gdf[track_gdf.railway != "abandoned"]
-            track_gdf = track_gdf[track_gdf.railway != "construction"]
-            track_gdf = track_gdf[track_gdf.railway != "defect_detector"]
-            track_gdf = track_gdf[track_gdf.railway != "dismantled"]
-            track_gdf = track_gdf[track_gdf.railway != "disused"]
-            track_gdf = track_gdf[track_gdf.railway != "light_rail"]
-            track_gdf = track_gdf[track_gdf.railway != "miniature"]
-            track_gdf = track_gdf[track_gdf.railway != "monorail"]
-            track_gdf = track_gdf[track_gdf.railway != "narrow_gauge"]
-            track_gdf = track_gdf[track_gdf.railway != "platform"]
-            track_gdf = track_gdf[track_gdf.railway != "proposed"]
-            track_gdf = track_gdf[track_gdf.railway != "razed"]
-            track_gdf = track_gdf[track_gdf.railway != "signal_box"]
-            track_gdf = track_gdf[track_gdf.railway != "station"]
-            track_gdf = track_gdf[track_gdf.railway != "tram"]
-            track_gdf = track_gdf[track_gdf.railway != "traverser"]
-            track_gdf = track_gdf[track_gdf.railway != "turntable"]
-            track_gdf = track_gdf[track_gdf.railway != "yard"]
+            TrackGDF = TrackGDF[TrackGDF.railway != "abandoned"]
+            TrackGDF = TrackGDF[TrackGDF.railway != "construction"]
+            TrackGDF = TrackGDF[TrackGDF.railway != "defect_detector"]
+            TrackGDF = TrackGDF[TrackGDF.railway != "dismantled"]
+            TrackGDF = TrackGDF[TrackGDF.railway != "disused"]
+            TrackGDF = TrackGDF[TrackGDF.railway != "light_rail"]
+            TrackGDF = TrackGDF[TrackGDF.railway != "miniature"]
+            TrackGDF = TrackGDF[TrackGDF.railway != "monorail"]
+            TrackGDF = TrackGDF[TrackGDF.railway != "narrow_gauge"]
+            TrackGDF = TrackGDF[TrackGDF.railway != "platform"]
+            TrackGDF = TrackGDF[TrackGDF.railway != "proposed"]
+            TrackGDF = TrackGDF[TrackGDF.railway != "razed"]
+            TrackGDF = TrackGDF[TrackGDF.railway != "signal_box"]
+            TrackGDF = TrackGDF[TrackGDF.railway != "station"]
+            TrackGDF = TrackGDF[TrackGDF.railway != "tram"]
+            TrackGDF = TrackGDF[TrackGDF.railway != "traverser"]
+            TrackGDF = TrackGDF[TrackGDF.railway != "turntable"]
+            TrackGDF = TrackGDF[TrackGDF.railway != "yard"]
 
-            track_gdf = track_gdf[track_gdf.usage != "military"]
-            track_gdf = track_gdf[track_gdf.usage != "industrial"]
-            track_gdf = track_gdf[track_gdf.usage != "tourism"]
+            TrackGDF = TrackGDF[TrackGDF.usage != "military"]
+            TrackGDF = TrackGDF[TrackGDF.usage != "industrial"]
+            TrackGDF = TrackGDF[TrackGDF.usage != "tourism"]
 
-            track_gdf = track_gdf[track_gdf.service != "construction"]
-            track_gdf = track_gdf[track_gdf.service != "spur"]
-            track_gdf = track_gdf[track_gdf.service != "yard"]
+            TrackGDF = TrackGDF[TrackGDF.service != "construction"]
+            TrackGDF = TrackGDF[TrackGDF.service != "spur"]
+            TrackGDF = TrackGDF[TrackGDF.service != "yard"]
 
-            if "building" in track_gdf.columns.values:
-                track_gdf = track_gdf[track_gdf.building != "train_station"]
+            TrackGDF = TrackGDF[TrackGDF.building != "train_station"]
 
-            if "Note" in track_gdf.columns.values:
-                track_gdf = track_gdf.drop("Note", axis=1)
+            if "barrier" in TrackGDF.columns.values:
+                TrackGDF = TrackGDF[TrackGDF.barrier != "fence"]
 
-            track_gdf = track_gdf.clip(geolayer)
+            if "Note" in TrackGDF.columns.values:
+                TrackGDF = TrackGDF.drop("Note", axis=1)
 
-            track_gdf.to_file(
-                self.geopackage_path,
-                driver="GPKG",
-                layer=layername + "_osm",
-                mode="a",
+            TrackGDF = TrackGDF.clip(geolayer)
+
+            TrackGDF.to_file(
+                self.geopackage_path, driver="GPKG", layer=layername + "_osm", mode="a"
             )
 
             all_switch_gdf.to_file(
@@ -780,11 +641,18 @@ class NetworkBuilder:
                 mode="a",
             )
 
-            self.switchresult = track_data
+            # layer_switch_query = switch_query.format(bounds[1],
+            #                                          bounds[0],
+            #                                          bounds[3],
+            #                                          bounds[2])
+
+            # result = api.query(LayerQuery)
+
+            self.switchresult = TrackData
 
     def create_virtual_raster(self):
         """
-        Combine the previously downloaded elevation data by folder.
+        This function combines the previously downloaded elevation data by folder.
         The folder name is based upon the TO Track File name.  All geotiffs in
         each folder will be used to create a virtual raster with the same name.
         This file is save in the specified data_folder.
@@ -794,17 +662,20 @@ class NetworkBuilder:
         None.
 
         """
+
         for layername in fiona.listlayers(self.geopackage_path):
-            print(f"creating virtual raster for {layername}")
-            # geolayer = gpd.read_file(self.geopackage_path, layer=layername)
-            vrt_name = self.data_folder / "Elevation Data" / (layername + ".vrt")
-            layer_tiff_dir = self.data_folder / "Elevation Data" / layername
+            print("creating virtual raster for {}".format(layername))
+            geolayer = gpd.read_file(self.geopackage_path, layer=layername)
+            VRTName = self.data_folder / "Elevation Data" / (layername + ".vrt")
+            LayerTiffDir = self.data_folder / "Elevation Data" / layername
 
-            tiff_files = layer_tiff_dir.glob("*.tiff")
+            tiff_files = LayerTiffDir.glob("*.tiff")
 
-            tiff_strs = [str(tiff_file) for tiff_file in tiff_files]
+            tiff_strs = []
+            for tiff_file in tiff_files:
+                tiff_strs.append(str(tiff_file))
 
-            gdal.BuildVRT(str(vrt_name), tiff_strs)
+            gdal.BuildVRT(str(VRTName), tiff_strs)
             # have not added filtering yet.
 
     def drape_geometry(
@@ -812,28 +683,34 @@ class NetworkBuilder:
         resample_length=10,
         circle_buffer_m=250,
         buffer=2,
-        dem_crs="EPSG:4269",
-        apply_median=True,
         apply_savgol=True,
+        alt_vrt="",
     ):
-        """Parallelized draping operation."""
+        """
+        Parallelized draping operation.
+        """
         for layername in fiona.listlayers(self.geopackage_path):
             if "_offhead" in layername:
-                print(f"draping layer: {layername}")
-                vrt_path = (
-                    self.data_folder
-                    / "Elevation Data"
-                    / (layername.replace("_offhead", "") + ".vrt")
-                )
+                print("draping layer: {}".format(layername))
+
+                if alt_vrt == "":
+                    vrt_path = (
+                        self.data_folder
+                        / "Elevation Data"
+                        / (layername.replace("_offhead", "") + ".vrt")
+                    )
+                else:
+                    vrt_path = alt_vrt
+
                 trackdata = gpd.read_file(self.geopackage_path, layer=layername)
-                track_data = trackdata.to_crs(dem_crs)
+                track_data = trackdata.to_crs("EPSG:4269")
 
                 # create 2m track buffer
-                track_buffer = track_data.to_crs(self.local_crs).buffer(buffer)
+                track_buffer = track_data.to_crs("ESRI:102009").buffer(buffer)
                 track_buffer = (
-                    gpd.GeoDataFrame([], geometry=track_buffer, crs=self.local_crs)
+                    gpd.GeoDataFrame([], geometry=track_buffer, crs="ESRI:102009")
                     .dissolve()
-                    .to_crs(dem_crs)
+                    .to_crs("EPSG:4269")
                 ).geometry.iloc[0]
                 track_buffer_wkb = track_buffer.wkb
 
@@ -855,10 +732,7 @@ class NetworkBuilder:
                             circle_buffer_m,
                             str(vrt_path),
                             track_buffer_wkb,
-                            self.local_crs,
-                            dem_crs,
-                            apply_median,
-                        ),
+                        )
                     )
 
                 results = {}
@@ -870,36 +744,33 @@ class NetworkBuilder:
                 line_elevations_raw = []
                 num_of_elev_segs = []
                 for idx, row in track_data.iterrows():
-                    offsets = ast.literal_eval(row.offsets)
 
-                    # execute this block if savitsky golay filtering is desired.  This
-                    # occurs by default.added this option to support writing paper with
-                    # UT Austin to evaluate impact of different
-                    # filtering operation in the network generation process.
-                    if apply_savgol:
-                        length = offsets[-1]
-                        number_of_segments = np.ceil(length / resample_length)
-                        num_of_elev_segs.append(int(number_of_segments))
-                        segment_fraction = 1 / number_of_segments
-                        resample_fractions = np.arange(0, 1.00001, segment_fraction)
-                        elevs = results[idx]
-                        line_elevations.append(
-                            list(
-                                map(
-                                    float,
-                                    smooth_link_data(
-                                        offsets,
-                                        elevs,
-                                        window_length=200,
-                                        interp_offsets=resample_fractions * length,
-                                        interp_values=elevs,
-                                    ),
+                    # doing this allow savitsky golay filtering to be turned off to understand
+                    # impact in filtering approach
+                    offsets = ast.literal_eval(row.offsets)
+                    length = offsets[-1]
+                    number_of_segments = np.ceil(length / resample_length)
+                    num_of_elev_segs.append(int(number_of_segments))
+                    segment_fraction = 1 / number_of_segments
+                    resample_fractions = np.arange(0, 1.00001, segment_fraction)
+                    elevs = results[idx]
+
+                    # all the list map stuff is to get the right datatype to put into the geodatabase legibly.
+                    line_elevations.append(
+                        list(
+                            map(
+                                float,
+                                smooth_link_data(
+                                    offsets,
+                                    elevs,
+                                    window_length=200,
+                                    interp_offsets=resample_fractions * length,
+                                    interp_values=elevs,
+                                    apply_savgol=apply_savgol,
                                 ),
                             ),
                         )
-                    else:
-                        # throw in the raw values if we're not filtering.
-                        line_elevations.append(list(map(float, elevs)))
+                    )
                     line_elevations_raw.append(list(map(float, elevs)))
 
                 trackdata["elevations"] = line_elevations
@@ -907,13 +778,12 @@ class NetworkBuilder:
                 track_data["number of elevation segments"] = num_of_elev_segs
 
                 self.delete_and_create_layer(
-                    layername.replace("_offhead", "_draped"),
-                    trackdata,
+                    layername.replace("_offhead", "_draped"), trackdata
                 )
 
     def clean_geometry(self):
         """
-        Clean the OpenStreetMap data.  The main cleaning step is
+        This function cleans the OpenStreetMap data.  The main cleaning step is
         splitting rail links that are not split at switches.  It uses the
         switches found int he '_switches' layer to split all lines that are in
         the '_osm' layer.  If there are links that are not split in the final
@@ -927,17 +797,13 @@ class NetworkBuilder:
         None.
 
         """
-        # this only splits tracks at the switches.  Not planning to do the equivalent of what
-        # we were doing in QGIS becaues splitting at all line intersections creates a lof of other
-        # problems.  Closing gaps shouldn't be much of a problem with the OSM data.  The joining
-        # process uses a buffer anyways.
+        # this only splits tracks at the switches.  Not planning to do the equivalent of what we were doing in QGIS becaues splitting at all line intersections creates a lof of other problems.  Closing gaps shouldn't be much of a problem with the OSM data.  The joining process uses a buffer anyways.
         for layername in fiona.listlayers(self.geopackage_path):
             if "_osm" in layername:
                 trackdata = gpd.read_file(self.geopackage_path, layer=layername)
 
                 switch_data = gpd.read_file(
-                    self.geopackage_path,
-                    layer=layername.replace("_osm", "_switches"),
+                    self.geopackage_path, layer=layername.replace("_osm", "_switches")
                 )
                 print("beginning removal of false nodes")
                 trackdata = momepy.remove_false_nodes(trackdata)
@@ -948,61 +814,48 @@ class NetworkBuilder:
                     # loop through each link of network
                     # https://geopandas.org/en/v0.14.1/docs/reference/api/geopandas.GeoSeries.intersects.html
                     intersecting_switches = switch_data.loc[
-                        switch_data.geometry.intersects(row.geometry),
-                        :,
+                        switch_data.geometry.intersects(row.geometry), :
                     ]
 
-                    # looping through the line and switches so that we keep splitting segments if
-                    # multiple switches on a single line segment
+                    # looping through the line and switches so that we keep splitting segments if multiple switches on a single line segment
                     # initialize to one element list
                     geometry_to_split = [row.geometry]
                     for switch in intersecting_switches.geometry:
                         # loop through each switch that interects current link.
 
-                        # temp = []
+                        temp = []
                         for link in geometry_to_split:
-                            # look the geometry to split.  this will grow with each switch that
-                            # splits it.
-                            # Might have a link with many switches that need to be split.
+                            # look the geometry to split.  this will grow with each switch that splits it.  Might have a link with many switches that need to be split.
                             # https://shapely.readthedocs.io/en/stable/manual.html#shapely.ops.split
                             split_result = shapely.ops.split(link, switch)
-
-                            temp = list(split_result.geoms)  # double check this works.
-                            # The three lines below got replaced by this.
-                            # for line in split_result.geoms:
-                            #     # have to loop through split result because it return a geometry collection.
-                            #     temp.append(line)
-
+                            x = 1
+                            for line in split_result.geoms:
+                                # have to loop through split result because it return a geometry collection.
+                                temp.append(line)
                         geometry_to_split = temp
 
                     for link in geometry_to_split:
                         # build up the geodataframe again with all the other columns
-                        # TODO figure otu how to get all the node metadata parsed out here.  The
-                        # list of node metadata will be the length of the original line but the
-                        # geometry will be split up and shorter.
+                        # TODO figure otu how to get all the node metadata parsed out here.  The list of node metadata will be the length of the original line but the geometry will be split up and shorter.
                         row2 = row.drop("geometry")
                         split_trackdata.append(
                             gpd.GeoDataFrame(
-                                data=[row2],
-                                geometry=[link],
-                                crs="EPSG:4326",
-                            ),
+                                data=[row2], geometry=[link], crs="EPSG:4326"
+                            )
                         )
                 split_trackdata = pd.concat(split_trackdata)
 
                 split_trackdata["uid"] = split_trackdata.geometry.apply(
-                    lambda x: uuid.uuid1(),
+                    lambda x: uuid.uuid1()
                 )
 
                 try:
                     # try to delete layer but it may not exist.
                     fiona.remove(
-                        self.geopackage_path,
-                        layer=layername.replace("_osm", "_split"),
+                        self.geopackage_path, layer=layername.replace("_osm", "_split")
                     )
-                except Exception:
+                except Exception as e:
                     pass
-
                 split_trackdata.to_file(
                     self.geopackage_path,
                     driver="GPKG",
@@ -1012,7 +865,7 @@ class NetworkBuilder:
 
     def create_reverse_links(self):
         """
-        Create the reverse links from the data downloaded from
+        This will create the reverse links from the data downloaded from
         OpenStreetMap.  The osm data is assumed to be in the forward direction
         even though it may not actually be forward (or asscending) per the AAR
         standard.  This step needs to be conducted prior to calculating headings.
@@ -1025,8 +878,7 @@ class NetworkBuilder:
         None.
 
         """
-        # this will take all links and reverse the order of the points in the linestring
-        # and call it a reverse link.
+        # this will take all links and reverse the order of the points in the linestring and call it a reverse link.
         for layername in fiona.listlayers(self.geopackage_path):
             if "_split" in layername:
                 trackdata = gpd.read_file(self.geopackage_path, layer=layername)
@@ -1039,12 +891,10 @@ class NetworkBuilder:
 
                 trackdata = pd.concat([trackdata, reverse_trackdata])
                 trackdata["start coord"] = trackdata.apply(
-                    lambda x: point_from_coord(x["geometry"].coords[0]),
-                    axis=1,
+                    lambda x: point_from_coord(x["geometry"].coords[0]), axis=1
                 )
                 trackdata["end coord"] = trackdata.apply(
-                    lambda x: point_from_coord(x["geometry"].coords[-1]),
-                    axis=1,
+                    lambda x: point_from_coord(x["geometry"].coords[-1]), axis=1
                 )
                 # trackdata['start point'] = trackdata.geometry.
 
@@ -1052,7 +902,7 @@ class NetworkBuilder:
                 try:
                     # try to delete layer but it may not exist.
                     fiona.remove(self.geopackage_path, layer=layername + "_bothdir")
-                except Exception:
+                except Exception as e:
                     pass
 
                 trackdata.to_file(
@@ -1064,7 +914,7 @@ class NetworkBuilder:
 
     def distance_heading_calc(self, linkdata: shapely.LineString):
         """
-        Calculate headings for each row.  This is called by
+        This is used to calculate headings for each row.  This is called by
         calc_offsets_heading with the apply method in pandas.  The offset is
         calculated with the Karney equations in the geogeographiclib that
         assumes a spheroid for the lengths.  It returns a series of headings and
@@ -1087,43 +937,41 @@ class NetworkBuilder:
             last two segments of the LineString because it required a reverse
             rather than a forward approach.
         """
+
         # https://geographiclib.sourceforge.io/Python/2.0/examples.html#basic-geodesic-calculations
         headings = []
         distances = [
-            0,
+            0
         ]  # prepending 0 because 0 is the first offset.  Iterating n-1 times
         for point_idx in range(len(linkdata.coords) - 1):
             basepoint = linkdata.coords[point_idx]
             nextpoint = linkdata.coords[point_idx + 1]
 
             g = self.geod.Inverse(
-                basepoint[1],
-                basepoint[0],
-                nextpoint[1],
-                nextpoint[0],
+                basepoint[1], basepoint[0], nextpoint[1], nextpoint[0]
             )
             headings.append(g["azi1"])  # degrees
             distances.append(g["s12"])  # meters
 
         headings.append(
-            g["azi1"],
+            g["azi1"]
             # appending hear a last time because we need a heading going into the last point.
         )
 
         result = pd.Series()
         result["distances"] = distances
         result["offsets"] = list(
-            map(float, list(np.cumsum(distances))),
+            map(float, list(np.cumsum(distances)))
         )  # convert back to list to keep format of data in cell consistent
         result["headings"] = headings
         result["smooth headings"] = list(
-            map(float, smooth_link_data(result.offsets, headings, unwrap_heading=True)),
+            map(float, smooth_link_data(result.offsets, headings, unwrap_heading=True))
         )
         return result
 
     def calc_offsets_headings(self):
         """
-        Calculate the headings and offsets for each linestring.  Call the
+        Calculates the headings and offsets for each linestring.  Call the
         distance_heading_calc method to do the actual calculation.  saves the
         layer to the geopackage_path with an _offhead appended to name.
 
@@ -1134,18 +982,17 @@ class NetworkBuilder:
         """
         for layername in fiona.listlayers(self.geopackage_path):
             if "_bothdir" in layername:
-                print(f"calculating offsets and headings for {layername}")
+                print("calculating offsets and headings for {}".format(layername))
                 trackdata = gpd.read_file(self.geopackage_path, layer=layername)
                 temp = trackdata.geometry.apply(lambda x: self.distance_heading_calc(x))
                 trackdata = pd.concat([trackdata, temp], axis=1)
                 self.delete_and_create_layer(
-                    layername.replace("_bothdir", "_offhead"),
-                    trackdata,
+                    layername.replace("_bothdir", "_offhead"), trackdata
                 )
 
     def build_links(self):
         """
-        Link the network.  The output is saved with
+        This is the function that does the linking.  The output is saved with
         _linked appended to the name.  The output of this will be used by the
         yaml conversion function.
 
@@ -1154,6 +1001,7 @@ class NetworkBuilder:
         None.
 
         """
+
         for layername in fiona.listlayers(self.geopackage_path):
             buffer_diameter = 1
 
@@ -1167,10 +1015,10 @@ class NetworkBuilder:
                 # convert stand and end coordinates to shapely objects from
                 # WKT strings.
                 trackdata["start coord"] = trackdata["start coord"].apply(
-                    lambda x: shapely.from_wkt(x),
+                    lambda x: shapely.from_wkt(x)
                 )
                 trackdata["end coord"] = trackdata["end coord"].apply(
-                    lambda x: shapely.from_wkt(x),
+                    lambda x: shapely.from_wkt(x)
                 )
 
                 # initialize all the linking columns for the yaml file to 0
@@ -1183,10 +1031,10 @@ class NetworkBuilder:
                 # or last element.  The could be more efficent with one conversion
                 # but it works.
                 trackdata["start heading"] = trackdata["smooth headings"].apply(
-                    lambda x: ast.literal_eval(x)[0],
+                    lambda x: ast.literal_eval(x)[0]
                 )
                 trackdata["end heading"] = trackdata["smooth headings"].apply(
-                    lambda x: ast.literal_eval(x)[-1],
+                    lambda x: ast.literal_eval(x)[-1]
                 )
 
                 # create buffers for the start and end points of each link.
@@ -1195,7 +1043,7 @@ class NetworkBuilder:
                     trackdata[["yaml_idx"]],
                     geometry=trackdata["start coord"],
                     crs="EPSG:4326",
-                ).to_crs(self.local_crs)
+                ).to_crs("ESRI:102009")
                 start_buffer = start_trackdata.buffer(buffer_diameter)
                 start_trackdata.geometry = start_buffer
                 start_trackdata = start_trackdata.to_crs("EPSG:4326")
@@ -1204,23 +1052,22 @@ class NetworkBuilder:
                     trackdata[["yaml_idx"]],
                     geometry=trackdata["end coord"],
                     crs="EPSG:4326",
-                ).to_crs(self.local_crs)
+                ).to_crs("ESRI:102009")
                 end_buffer = end_trackdata.buffer(buffer_diameter)
                 end_trackdata.geometry = end_buffer
                 end_trackdata = end_trackdata.to_crs("EPSG:4326")
 
-                # read switch layer for track file, reprojec to CRS with meters for units, and
-                # create a 2.5 m buffer to give some robustness to switch linking algorithm
+                # read switch layer for track file, reprojec to CRS with meters for units, and create a 2.5 m buffer to give some robustness to switch linking algorithm
                 switches = (
                     gpd.read_file(
                         self.geopackage_path,
                         layer=layername.replace("_draped", "_switches"),
                     )
-                    .to_crs(self.local_crs)
+                    .to_crs("ESRI:102009")
                     .buffer(2.5)
                 ).to_crs("EPSG:4326")
-                track_map = start_trackdata.explore()
-                track_map.save("test.html")
+                map = start_trackdata.explore()
+                map.save("test.html")
                 for idx, row in trackdata.iterrows():
                     # print('--------------{}, {}------------------'.format(idx, row.osm_id))
                     # ------------------------- next link business-----------------------
@@ -1242,7 +1089,7 @@ class NetworkBuilder:
                         crs="EPSG:4326",
                     )
                     potential_next_links = gpd.sjoin(
-                        start_trackdata[not trackdata.covers(row.geometry)],
+                        start_trackdata[trackdata.covers(row.geometry) == False],
                         rowgdf,
                         how="inner",
                         rsuffix="_row",
@@ -1274,7 +1121,7 @@ class NetworkBuilder:
 
                     # sort the links by closest heading to figure out next vs next alt.
                     potential_next_links = potential_next_links.sort_values(
-                        "heading difference",
+                        "heading difference"
                     )
 
                     # if only one link, there is no next alt
@@ -1303,8 +1150,9 @@ class NetworkBuilder:
                             # geometry problems that should probably be checked
                             if potential_next_links.shape[0] > 2:
                                 print(
-                                    f"""WARNING: too many possible links for osm_id {row.uid},
-                                    {row.direction} at end of link""",
+                                    "WARNING: too many possible links for osm_id {}, {} at end of link".format(
+                                        row.uid, row.direction
+                                    )
                                 )
 
                         # if there is no switch, we only link next and generate a warning.
@@ -1317,9 +1165,9 @@ class NetworkBuilder:
                             )
 
                             print(
-                                f""""WARNING: multiple links but no switch for osm_id {row.uid},
-                                {row.direction} at end of link.  Only linking link with
-                                closest heading""",
+                                "WARNING: multiple links but no switch for osm_id {}, {} at end of link.  Only linking link with closest heading".format(
+                                    row.uid, row.direction
+                                )
                             )
 
                     # ----------------prev link business-------------------------------
@@ -1342,7 +1190,7 @@ class NetworkBuilder:
                         crs="EPSG:4326",
                     )
                     potential_prev_links = gpd.sjoin(
-                        end_trackdata[not trackdata.covers(row.geometry)],
+                        end_trackdata[trackdata.covers(row.geometry) == False],
                         rowgdf,
                         how="inner",
                         rsuffix="_row",
@@ -1373,7 +1221,7 @@ class NetworkBuilder:
 
                     # sort the links by closest heading to figure out prev vs prev alt.
                     potential_prev_links = potential_prev_links.sort_values(
-                        "heading difference",
+                        "heading difference"
                     )
 
                     # if only one link, there is no prev alt
@@ -1402,8 +1250,9 @@ class NetworkBuilder:
                             # geometry problems that should probably be checked
                             if potential_prev_links.shape[0] > 2:
                                 print(
-                                    f"""WARNING: too many possible links for osm_id {row.uid},
-                                    {row.direction} at start of link""",
+                                    "WARNING: too many possible links for osm_id {},{} at start of link".format(
+                                        row.uid, row.direction
+                                    )
                                 )
 
                         # if there is no switch, we only link next and generate a warning.
@@ -1416,31 +1265,24 @@ class NetworkBuilder:
                             )
 
                             print(
-                                f"""WARNING: multiple links but no switch for osm_id {row.uid},
-                                {row.direction} at start of link.  Only linking link with
-                                closest heading""",
+                                "WARNING: multiple links but no switch for osm_id {},{} at start of link.  Only linking link with closest heading".format(
+                                    row.uid, row.direction
+                                )
                             )
 
                 self.delete_and_create_layer(
-                    layername.replace("_draped", "_linked"),
-                    trackdata,
+                    layername.replace("_draped", "_linked"), trackdata
                 )
 
-    def convert_to_yaml(
-        self,
-        scale_loc_links=True,
-        desired_length_meters=3500,
-        speed_limit_mph=60.0,
-    ):
+    def convert_to_yaml(self, scale_loc_links=True, desired_length_meters=3500):
         """
-        Convert "_linked" layers to a yaml file.  The output is saved to
+        This converts to linked layers to a yaml file.  The output is saved to
         the 'Generated Networks folder' contained in the 'data_folder'.
 
         scale_loc_links: This will scale the location links if set to True
 
-        desired_length_meters:  This is the desired length in meters so that the offsets
-            can be scaled to provide a link that is long enough for long trains.
-
+        desired_length_meters:  This is the desired length in meters so that the offsets can be scaled to provide
+            a link that is long enough for long trains.
 
         Raises
         ------
@@ -1453,6 +1295,7 @@ class NetworkBuilder:
         None.
 
         """
+
         for layername in fiona.listlayers(self.geopackage_path):
             buffer_diameter = 1
 
@@ -1462,7 +1305,7 @@ class NetworkBuilder:
                 location_data = pd.read_csv(
                     str(self.data_folder)
                     + "/Generated Networks/"
-                    + layername.replace("_linked", "/Network Locations.csv"),
+                    + layername.replace("_linked", "/Network Locations.csv")
                 )
                 links_to_scale = location_data["Link Index"].to_list()
                 track_list = []
@@ -1484,22 +1327,30 @@ class NetworkBuilder:
                     "link_idxs_lockout": [],
                 }
                 track_list.append(link_dict)
+
+                # load up the restrcition data
+                if layername in self.restriction_table_paths:
+                    restriction_df = gpd.read_file(
+                        self.restriction_table_paths[layername]
+                    )
+                else:
+                    restriction_df = None
+
                 for idx, row in trackdata.iterrows():
 
-                    # grab the reverse link and check to make sure there is
-                    # only a single reverse link.
+                    # grab the reverse link and check to make sure there is only a single reverse link.
                     reverse_link = trackdata[
                         (trackdata.covers(row.geometry))
                         & (trackdata.yaml_idx != row.yaml_idx)
                     ]
                     if reverse_link.shape[0] != 1:
                         raise ValueError(
-                            f"""reverse link count was {reverse_link.shape[0]} for yaml_idx
-                            {row.yaml_idx}.  This count should always be 1""",
+                            "reverse link count was {} for yaml_idx {}.  This count should always be 1".format(
+                                reverse_link.shape[0], row.yaml_idx
+                            )
                         )
 
-                    # parse out all the headings and offsets that were lists
-                    # that got stored as stings.
+                    # parse out all the headings and offsets that were lists that got stored as stings.
                     headings = ast.literal_eval(row["smooth headings"])
                     offsets = ast.literal_eval(row.offsets)
 
@@ -1511,12 +1362,11 @@ class NetworkBuilder:
 
                     try:
                         elevations = ast.literal_eval(row.elevations)
-                    except Exception:
-                        # placed this try statement here because sometime elevation data is not
-                        # available.nans get placed in the draping operation.  This is to make the
-                        # code work.  The Example I came across was track in mexico that we don't
-                        # care about yet. The currentwork is focused within the US.  Long term it
-                        # may be worth falling back to SRTM data maybe.
+                    except Exception as e:
+                        # placed this try statement here because sometime elevation data is not available.
+                        # nans get placed in the draping operation.  This is to make the code work.  The
+                        # Example I came across was track in mexico that we don't care about yet. The current
+                        # work is focused within the US.  Long term it may be worth falling back to SRTM data maybe.
                         # This needs to be solved, but I don't have an immediate solution.
                         elevations = [0.0] * len(offsets)
 
@@ -1529,19 +1379,14 @@ class NetworkBuilder:
                     link_elevs = []
                     link_headings = []
                     link_speed_sets = self.apply_speed_restrictions(
-                        row.yaml_idx,
-                        trackdata,
-                        speed_limit_mph=speed_limit_mph,
+                        row.yaml_idx, trackdata, restriction_df
                     )
 
                     for idx in range(len(offsets)):
 
                         if (idx == 0) or (idx == len(offsets) - 1):
                             link_elevs.append(
-                                {
-                                    "offset_meters": offsets[idx],
-                                    "elev": elevations[idx],
-                                },
+                                {"offset_meters": offsets[idx], "elev": elevations[idx]}
                             )
 
                             link_headings.append(
@@ -1550,18 +1395,15 @@ class NetworkBuilder:
                                     "lat": lats[idx],
                                     "lon": lons[idx],
                                     "heading_radians": float(
-                                        np.mod(headings[idx] * np.pi / 180, 2 * np.pi),
+                                        np.mod(headings[idx] * np.pi / 180, 2 * np.pi)
                                     ),
-                                },
+                                }
                             )
                         elif (offsets[idx] > 500) and (
                             (offsets[-1] - offsets[idx]) > 500
                         ):
                             link_elevs.append(
-                                {
-                                    "offset_meters": offsets[idx],
-                                    "elev": elevations[idx],
-                                },
+                                {"offset_meters": offsets[idx], "elev": elevations[idx]}
                             )
 
                             link_headings.append(
@@ -1570,9 +1412,9 @@ class NetworkBuilder:
                                     "lat": lats[idx],
                                     "lon": lons[idx],
                                     "heading_radians": float(
-                                        np.mod(headings[idx] * np.pi / 180, 2 * np.pi),
+                                        np.mod(headings[idx] * np.pi / 180, 2 * np.pi)
                                     ),
-                                },
+                                }
                             )
 
                     link_dict = {
@@ -1607,7 +1449,7 @@ class NetworkBuilder:
                 network_output_dir = Path(
                     self.data_folder
                     / "Generated Networks"
-                    / layername.replace("_linked", ""),
+                    / layername.replace("_linked", "")
                 )
                 network_output_dir.mkdir(parents=True, exist_ok=True)
                 print(network_output_dir)
@@ -1621,8 +1463,8 @@ class NetworkBuilder:
   # Generated with Wabtec ALTRIOS network builder.
   # All Lat, Lon coordinates are WGS84
   # TODO: find and fix grade spikes then dial this back to 0.06
-  # TODO: fix heading change spikes and then lower this to 0.009 (~15 deg per 100 ft)
-  # TODO: fix heading change spikes and then lower this to 0.12 (~7 degrees)\n""",
+  # TODO: fix heading change spikes and then lower this to 0.009 (~15 deg per 100 ft) 
+  # TODO: fix heading change spikes and then lower this to 0.12 (~7 degrees)\n"""
                     )
                     f.write(
                         yaml.dump(
@@ -1630,12 +1472,12 @@ class NetworkBuilder:
                             sort_keys=False,
                             default_flow_style=False,
                             Dumper=NoAliasDumper,
-                        ),
+                        )
                     )
 
-    def build_network(self, force_dem_download=False, speed_limit_mph=60.0):
+    def build_network(self, force_dem_download=False):
         """
-        Run the full build process to create networks from the Trip
+        This will run the full build process to create networks from the Trip
         Optimizer track files.
 
         Parameters
@@ -1652,6 +1494,7 @@ class NetworkBuilder:
             fleshed out in the future.
 
         """
+
         build_complete = False
         # TODO replace MyBuilder with self
         self.input_geopackage_parsing()
@@ -1666,7 +1509,7 @@ class NetworkBuilder:
 
         try:
             self.drape_geometry()
-        except Exception:
+        except Exception as e:
             print("downloading elevation for networks. This may take a while")
             self.download_elevation()
             self.create_virtual_raster()
@@ -1674,7 +1517,7 @@ class NetworkBuilder:
 
         self.build_links()
         self.indentify_links()
-        self.convert_to_yaml(speed_limit_mph=speed_limit_mph)
+        self.convert_to_yaml()
 
         build_complete = True
 
@@ -1685,7 +1528,7 @@ class NetworkBuilder:
 
     def indentify_links(self):
         """
-        Line up individual links within the network to locations
+        This function lines up individual links within the network to locations
         that are needed to specify train routes.  The locations are specified
         in a csv file that has the columns "Location", "Lat", and "Lon".  The
         file location is specified when the Building is initialized.  The
@@ -1702,18 +1545,16 @@ class NetworkBuilder:
         max_link_distance_from_coord = 1500
 
         locations = gpd.read_file(
-            self.input_geopackage,
-            layer=self.input_locations_layer_name,
-        ).to_crs(self.local_crs)
+            self.input_geopackage, layer=self.input_locations_layer_name
+        ).to_crs("ESRI:102009")
 
         for layername in fiona.listlayers(self.geopackage_path):
             if "_linked" in layername:
                 trackdata = gpd.read_file(self.geopackage_path, layer=layername).to_crs(
-                    self.local_crs,
+                    "ESRI:102009"
                 )
 
-                # only grabbing forward link.  Will grab reverse based upon osm_id.
-                # convert crs to get units of meters
+                # only grabbing forward link.  Will grab reverse based upon osm_id. convert crs to get units of meters
                 long_links = trackdata[
                     (trackdata.length >= min_link_length)
                     & (trackdata.direction == "forward")
@@ -1737,11 +1578,9 @@ class NetworkBuilder:
                     ].to_crs(epsg=4326),
                 )
 
-                for long_link in long_links.Location.unique():
-                    loc_links = long_links[
-                        long_links.Location == long_link
-                    ].sort_values(
-                        "match dist [m]",  # "length"
+                for Loc in long_links.Location.unique():
+                    loc_links = long_links[long_links.Location == Loc].sort_values(
+                        "match dist [m]"  # "length"
                     )
                     longest_loc_link = loc_links.iloc[0, :].copy()
                     osm_id_mapping[longest_loc_link.uid] = longest_loc_link.Location
@@ -1764,7 +1603,7 @@ class NetworkBuilder:
                             "Grid Emissions Region": "MROWc",
                             "Electricity Price Region": "MN",
                             "Liquid Fuel Price Region": "MN",
-                        },
+                        }
                     )
                     final_location_mapping.append(
                         {
@@ -1775,7 +1614,7 @@ class NetworkBuilder:
                             "Grid Emissions Region": "MROWc",
                             "Electricity Price Region": "MN",
                             "Liquid Fuel Price Region": "MN",
-                        },
+                        }
                     )
 
                 final_location_mapping = pd.DataFrame(final_location_mapping)
@@ -1788,47 +1627,130 @@ class NetworkBuilder:
                 network_output_dir.mkdir(parents=True, exist_ok=True)
 
                 final_location_mapping.to_csv(
-                    network_output_dir / "Network Locations.csv",
-                    index=False,
+                    network_output_dir / "Network Locations.csv", index=False
                 )
 
-    def apply_speed_restrictions(self, link_yaml_idx, trackdata, speed_limit_mph=60.0):
-        """
-        Apply speed restrictions to a specific link in the network.
+    @cache.memoize(
+        expire=86400 * 7,
+    )  # cache results for a week to be nice to DOT server.
+    def download_milepost_data(self):
 
-        Parameters
-        ----------
-        link_yaml_idx : int
-            The YAML index of the link to which speed restrictions will be applied.
-        trackdata : pd.DataFrame or gpd.GeoDataFrame
-            The DataFrame containing track information.
-        speed_limit_mph : float, optional
-            The speed limit in miles per hour to apply to the link (default is 60.0).
-
-        Returns
-        -------
-        dict
-            A dictionary containing speed restriction information for the link.
-        """
-        # extract the link we are interested
-        link_data = trackdata[trackdata.yaml_idx == link_yaml_idx]
-        # calc current link length here because it could be used in a couple different places below.
-        link_length = np.max(ast.literal_eval(link_data.offsets.values[0]))
-        # TODO figure out way to apply better speed restrictions from OSM data
-        speed_restict_dict = {
-            "speed_limits": [],
-            "speed_params": [],
-            "is_head_end": False,
+        params = {
+            "where": "1=1",
+            "outFields": "*",
+            "f": "geojson",
+            "resultOffset": 0,
+            "resultRecordCount": 1000,  # max per request
         }
 
-        speed_restict_dict["mp_dir"] = "unknown"
-        speed_restict_dict["speed_limits"].append(
-            {
-                "offset_start_meters": 0,
-                "offset_end_meters": float(link_length),
-                "speed_meters_per_second": speed_limit_mph / 2.23693629,
+        features = []
+
+        while True:
+            response = requests.get(self.milepost_layer_name, params=params)
+            data = response.json()
+
+            if "features" not in data or not data["features"]:
+                break
+
+            gdf_chunk = gpd.GeoDataFrame.from_features(
+                data["features"], crs="EPSG:4326"
+            )
+            features.append(gdf_chunk)
+
+            params["resultOffset"] += params["resultRecordCount"]
+
+        # Combine all chunks into one GeoDataFrame
+        full_gdf = pd.concat(features, ignore_index=True)
+
+        print(f"Downloaded {len(full_gdf)} features.")
+        return full_gdf.to_crs("ESRI:102009")
+
+    def apply_mileposts(self):
+        # load up milepost layer once from USDOT server (default) or wherever you want to get it from .
+        mileposts_gdf = (
+            self.download_milepost_data()
+        )  # gpd.read_file(self.milepost_layer_name).to_crs("ESRI:102009")
+
+        for layername in fiona.listlayers(self.geopackage_path):
+            if "_linked" in layername and "Amarillo" in layername:
+                trackdata = gpd.read_file(self.geopackage_path, layer=layername).to_crs(
+                    "ESRI:102009"
+                )
+
+                for idx, row in trackdata.iterrows():
+                    buffer = row.geometry.buffer(25, cap_style="flat")
+
+                    mileposts_for_link = mileposts_gdf[
+                        mileposts_gdf.geometry.intersects(buffer)
+                    ]
+
+                    # stuff that I used for debugging.  leaving as a comment for future debugging.
+                    # if row.yaml_idx == 216:
+                    #     import matplotlib.pyplot as plt
+
+                    #     buffer_series = gpd.GeoSeries([buffer], crs="ESRI:102009")
+                    #     fig, ax = plt.subplots()
+                    #     buffer_series.plot(
+                    #         ax=ax, facecolor="lightblue", edgecolor="black", alpha=0.5
+                    #     )
+                    #     mileposts_gdf.plot(ax=ax, color="red", markersize=50)
+                    #     plt.show()
+                    #     x = 1
+
+                    normalized_offset = []
+                    for idx_post, row_post in mileposts_for_link.iterrows():
+                        normalized_offset.append(
+                            shapely.line_locate_point(
+                                row.geometry, row_post.geometry, normalized=True
+                            )
+                        )  # normalizing because I need offset to match the curved length.  This is assuming cartesian plane.
+
+    def apply_speed_restrictions(self, link_yaml_idx, trackdata, restriction_df):
+
+        if restriction_df:
+            # this will apply speed restrictions where restrictions are present.
+
+            # extract the link we are interested
+            link_data = trackdata[trackdata.yaml_idx == link_yaml_idx]
+            # calc current link length here because it could be used in a couple different places below.
+            link_length = np.max(ast.literal_eval(link_data.offsets.values[0]))
+            # TODO figure out way to apply better speed restrictions from OSM data
+            speed_restict_dict = {
+                "speed_limits": [],
+                "speed_params": [],
+                "is_head_end": False,
             }
-        )
+
+            speed_restict_dict["mp_dir"] = "unknown"
+            speed_restict_dict["speed_limits"].append(
+                {
+                    "offset_start_meters": 0,
+                    "offset_end_meters": float(link_length),
+                    "speed_meters_per_second": 60.0 / 2.23693629,
+                }
+            )
+        else:
+            # this case will handle the track where no speed restrictions are applied.
+
+            # extract the link we are interested
+            link_data = trackdata[trackdata.yaml_idx == link_yaml_idx]
+            # calc current link length here because it could be used in a couple different places below.
+            link_length = np.max(ast.literal_eval(link_data.offsets.values[0]))
+            # TODO figure out way to apply better speed restrictions from OSM data
+            speed_restict_dict = {
+                "speed_limits": [],
+                "speed_params": [],
+                "is_head_end": False,
+            }
+
+            speed_restict_dict["mp_dir"] = "unknown"
+            speed_restict_dict["speed_limits"].append(
+                {
+                    "offset_start_meters": 0,
+                    "offset_end_meters": float(link_length),
+                    "speed_meters_per_second": 60.0 / 2.23693629,
+                }
+            )
 
         return speed_restict_dict
 
@@ -1837,39 +1759,84 @@ if __name__ == "__main__":
 
     # set current working directory to path of this script.
     # have try statement because spyder throws an error.  VS code needs it.
-    with contextlib.suppress(Exception):
+    try:
         os.chdir(Path(__file__).parent)
-
-    MyBuilder = NetworkBuilder(
-        # alt.resources_root() / "networks/NetworkInput_small.gpkg",
-        # "resources/networks/NetworkInput_small.gpkg",
-        "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small.gpkg",
-        "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput",
-        "SmallNetworkBuild",
-    )
-
-    MyBuilder.build_network()
-
-    MyBuilder.input_geopackage_parsing()
-    MyBuilder.download_osm_data()
-    MyBuilder.clean_geometry()
-    MyBuilder.create_reverse_links()
-    MyBuilder.calc_offsets_headings()
-    MyBuilder.drape_geometry()
-    MyBuilder.build_links()
-    MyBuilder.indentify_links()
-    MyBuilder.convert_to_yaml(speed_limit_mph=70)
+    except Exception:
+        pass
 
     # MyBuilder = NetworkBuilder(
-    #     "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small (clovis only).gpkg",  # noqa: E501
-    #     "Clovis Only Build",
-    #     "ClovisBuilder",
+    #     # alt.resources_root() / "networks/NetworkInput_small.gpkg",
+    #     "resources/networks/NetworkInput_small.gpkg",
+    #     "Network Builder Test Small",
+    #     "SmallNetworkBuild",
     # )
 
+    # MyBuilder.build_network()
+    # print(fiona.listlayers(MyBuilder.geopackage_path))
     # MyBuilder.input_geopackage_parsing()
 
-    # # MyBuilder.download_elevation()
+    # MyBuilder.drape_geometry()
+    # MyBuilder.add_speed_limits()
+    # MyBuilder.verify_grade_elev()
+
+    # MyBuilder.indentify_links()
+    # MyBuilder.convert_to_yaml()
+    # MyBuilder.build_links()
+    # MyBuilder.download_elevation()
     # MyBuilder.create_virtual_raster()
-    # MyBuilder.build_network(
-    #     speed_limit_mph=70.0,
-    # )
+
+    builds = [
+        {
+            "input": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small.gpkg",
+            "output folder": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput",
+            "name": "SmallNetworkBuild",
+            "savgol": True,
+            "median": 250,
+        },
+        {
+            "input": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small.gpkg",
+            "output folder": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput - No Savgol",
+            "name": "SmallNetworkBuild_NoSavGol",
+            "savgol": False,
+            "median": 250,
+        },
+        {
+            "input": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small.gpkg",
+            "output folder": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput - No Median",
+            "name": "SmallNetworkBuild - No Median",
+            "savgol": True,
+            "median": 1,
+        },
+    ]
+
+    for build in builds:
+        print("Now processing {}.....".format(build["name"]))
+        MyBuilder = NetworkBuilder(
+            # alt.resources_root() / "networks/NetworkInput_small.gpkg",
+            # "resources/networks/NetworkInput_small.gpkg",
+            build["input"],
+            build["output folder"],
+            build["name"],
+            "https://services.arcgis.com/xOi1kZaI0eWDREZv/arcgis/rest/services/NTAD_Rail_Mileposts/FeatureServer/0/query",
+            {
+                "Amarillo_FortWorth": "/home/garrett/Documents/ALTRIOS_Extras/UT Data - DO NOT SHARE/bnsf-speed - Amarillo - UT Proprietary.csv"
+            },
+        )
+        MyBuilder.apply_mileposts()
+        # # MyBuilder.build_network()
+
+        # MyBuilder.input_geopackage_parsing()
+        # MyBuilder.download_osm_data()
+        # MyBuilder.clean_geometry()
+        # MyBuilder.create_reverse_links()
+        # MyBuilder.calc_offsets_headings()
+        # MyBuilder.download_elevation()
+        # MyBuilder.create_virtual_raster()
+        # MyBuilder.drape_geometry(
+        #     apply_savgol=build["savgol"],
+        #     circle_buffer_m=build["median"],
+        #     alt_vrt="/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/USA_3DEP.vrt",
+        # )
+        # MyBuilder.build_links()
+        # MyBuilder.indentify_links()
+        # MyBuilder.convert_to_yaml()  # speed_limit_mph=70)

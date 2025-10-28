@@ -108,6 +108,9 @@ fmt = "ruff"
 lint = "pylint"
 style = { depends-on = ["fmt", "lint"] }
 
+[tool.pixi.dependencies]
+diskcache = ">=5.6.3,<6"
+
 [tool.ruff]
 # Specify Python version
 target-version = "py311"
