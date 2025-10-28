@@ -4,13 +4,11 @@
 # + [1x BEL](https://www.wabteccorp.com/media/466/download?inline)
 
 
-import time
-
-import matplotlib.pyplot as plt
-import numpy as np
-import seaborn as sns
-
 import altrios as alt
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+import seaborn as sns
 
 sns.set_theme()
 
@@ -50,7 +48,7 @@ i = 0
 ax[i].plot(
     t_s,
     np.array(
-        hel_rslt["loco_type"]["HybridLoco"]["res"]["history"]["pwr_out_chemical_watts"],
+        hel_rslt["loco_type"]["HybridLoco"]["res"]["history"]["pwr_out_chemical_watts"]
     )
     * 1e-6,
     label="pwr_out_chem",

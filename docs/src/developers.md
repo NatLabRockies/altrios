@@ -30,10 +30,6 @@ Windows bash (e.g. git bash), run `sh build_and_test.sh`, or in Linux/Unix, run
 `./build_and_test.sh`. This builds all the Rust code, runs Rust tests, builds the Python-exposed
 Rust code, and runs the Python tests.
 
-If running on a windows machine without git bash, it is possible to run the `build_and_test.bat`
-file to execute the equivalent commands.  To execute this within the pixi environment, run the
-`pixi run -e dev build_and_test.bat` command in the root of the `ALTRIOS/` folder.
-
 ## Manually Building the Python API
 
 Run `maturin develop --release`. Note that not including `--release` will cause a significant
@@ -45,7 +41,7 @@ runtime computational performance penalty.
 
 Whenever updating code, always run `cargo test --release` inside `ALTRIOS/` to ensure that all
 tests pass. Also, be sure to rebuild the Python API regularly to ensure that it is up to date.
-Python unit tests run with `pytest -v` in the root folder of the git repository.
+Python unit tests run with `python -m unittest discover` in the root folder of the git repository.
 
 ### With GitHub Actions
 
