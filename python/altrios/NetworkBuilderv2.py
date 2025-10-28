@@ -11,6 +11,8 @@ import sys
 import os
 from pathlib import Path
 import concurrent.futures
+import requests
+from diskcache import Cache
 
 env_folder_path = os.path.dirname(sys.executable)
 if Path(env_folder_path + "/Library/share/gdal").exists():
@@ -50,13 +52,12 @@ import uuid
 import momepy
 import numpy as np
 from scipy.signal import savgol_filter
-
 from tenacity import retry, stop_after_attempt, wait_fixed
 
 
 import rasterio.mask
 
-
+cache = Cache("./network_builder_cache")
 # import altrios as alt
 
 
@@ -202,6 +203,7 @@ def smooth_link_data(
     unwrap_heading=False,
     interp_offsets=[],
     interp_values=[],
+    apply_savgol=True,
 ):
     # this is going to fit a spline to the elations with the ends constrained to smooth everything out.
 
@@ -224,7 +226,10 @@ def smooth_link_data(
 
     # interpolate back to the original points and replace end points
     f2 = interpolate.interp1d(
-        interp_offsets, savgol_heading, bounds_error=False, fill_value="extrapolate"
+        interp_offsets,
+        savgol_heading,
+        bounds_error=False,
+        fill_value="extrapolate",
     )
 
     smooth_values = f2(offsets)
@@ -232,9 +237,17 @@ def smooth_link_data(
     smooth_values[-1] = values[-1]
 
     # this catches a few short links that were returning nan values
-    if np.isnan(smooth_values).any():
-        print("WARNING: smoothing did not work for a link.")
-        smooth_values = values
+    if np.isnan(smooth_values).any() or not apply_savgol:
+        print("WARNING: smoothing did not work for a link or savgol not applied.")
+
+        f2 = interpolate.interp1d(
+            interp_offsets,
+            values,
+            bounds_error=False,
+            fill_value="extrapolate",
+        )
+
+        smooth_values = f2(offsets)
 
     return list(smooth_values)
 
@@ -278,10 +291,12 @@ def _drape_row(args):
                     gpd.GeoSeries(track_circle_intersect, crs="EPSG:4269"),
                     crop=True,
                     all_touched=True,
+                    nodata=np.nan,
                 )
                 elevs.append(np.nanmedian(masked_elevation))
     except Exception as e:
         elevs = [np.nan] * len(resample_fractions)
+        print("VRT Did not load!!!!!!!!!!!!!!!!!")
     return idx, elevs
 
 
@@ -315,6 +330,8 @@ class NetworkBuilder:
         input_geopackage_path: Path | str,
         data_folder: Path | str,
         builder_name,
+        milepost_layer_name: str,
+        speed_restriction_path: dict,
         input_regions_layer_name="network_regions",
         input_locations_layer_name="network_locations",
     ):
@@ -349,7 +366,8 @@ class NetworkBuilder:
         self.input_geopackage = Path(input_geopackage_path)
         self.input_regions_layer_name = input_regions_layer_name
         self.input_locations_layer_name = input_locations_layer_name
-
+        self.milepost_layer_name = milepost_layer_name
+        self.restriction_table_paths = speed_restriction_path  # this is a dict where the key is the route name, and the value is the path to the csv with speed restriction data.
         self.data_folder = Path(data_folder)
         self.data_folder.mkdir(parents=False, exist_ok=True)
 
@@ -604,7 +622,8 @@ class NetworkBuilder:
 
             TrackGDF = TrackGDF[TrackGDF.building != "train_station"]
 
-            TrackGDF = TrackGDF[TrackGDF.barrier != "fence"]
+            if "barrier" in TrackGDF.columns.values:
+                TrackGDF = TrackGDF[TrackGDF.barrier != "fence"]
 
             if "Note" in TrackGDF.columns.values:
                 TrackGDF = TrackGDF.drop("Note", axis=1)
@@ -660,7 +679,12 @@ class NetworkBuilder:
             # have not added filtering yet.
 
     def drape_geometry(
-        self, resample_length=10, circle_buffer_m=250, buffer=2, apply_savgol=True
+        self,
+        resample_length=10,
+        circle_buffer_m=250,
+        buffer=2,
+        apply_savgol=True,
+        alt_vrt="",
     ):
         """
         Parallelized draping operation.
@@ -668,11 +692,16 @@ class NetworkBuilder:
         for layername in fiona.listlayers(self.geopackage_path):
             if "_offhead" in layername:
                 print("draping layer: {}".format(layername))
-                vrt_path = (
-                    self.data_folder
-                    / "Elevation Data"
-                    / (layername.replace("_offhead", "") + ".vrt")
-                )
+
+                if alt_vrt == "":
+                    vrt_path = (
+                        self.data_folder
+                        / "Elevation Data"
+                        / (layername.replace("_offhead", "") + ".vrt")
+                    )
+                else:
+                    vrt_path = alt_vrt
+
                 trackdata = gpd.read_file(self.geopackage_path, layer=layername)
                 track_data = trackdata.to_crs("EPSG:4269")
 
@@ -718,34 +747,31 @@ class NetworkBuilder:
 
                     # doing this allow savitsky golay filtering to be turned off to understand
                     # impact in filtering approach
+                    offsets = ast.literal_eval(row.offsets)
+                    length = offsets[-1]
+                    number_of_segments = np.ceil(length / resample_length)
+                    num_of_elev_segs.append(int(number_of_segments))
+                    segment_fraction = 1 / number_of_segments
+                    resample_fractions = np.arange(0, 1.00001, segment_fraction)
+                    elevs = results[idx]
 
-                    if apply_savgol:
-                        offsets = ast.literal_eval(row.offsets)
-                        length = offsets[-1]
-                        number_of_segments = np.ceil(length / resample_length)
-                        num_of_elev_segs.append(int(number_of_segments))
-                        segment_fraction = 1 / number_of_segments
-                        resample_fractions = np.arange(0, 1.00001, segment_fraction)
-                        elevs = results[idx]
-                        line_elevations.append(
-                            list(
-                                map(
-                                    float,
-                                    smooth_link_data(
-                                        offsets,
-                                        elevs,
-                                        window_length=200,
-                                        interp_offsets=resample_fractions * length,
-                                        interp_values=elevs,
-                                    ),
+                    # all the list map stuff is to get the right datatype to put into the geodatabase legibly.
+                    line_elevations.append(
+                        list(
+                            map(
+                                float,
+                                smooth_link_data(
+                                    offsets,
+                                    elevs,
+                                    window_length=200,
+                                    interp_offsets=resample_fractions * length,
+                                    interp_values=elevs,
+                                    apply_savgol=apply_savgol,
                                 ),
-                            )
+                            ),
                         )
-                        line_elevations_raw.append(list(map(float, elevs)))
-                    else:
-                        num_of_elev_segs.append(-1)
-                        line_elevations_raw.append(list(map(float, elevs)))
-                        line_elevations.append(list(map(float, elevs)))
+                    )
+                    line_elevations_raw.append(list(map(float, elevs)))
 
                 trackdata["elevations"] = line_elevations
                 trackdata["elevations raw"] = line_elevations_raw
@@ -1301,6 +1327,15 @@ class NetworkBuilder:
                     "link_idxs_lockout": [],
                 }
                 track_list.append(link_dict)
+
+                # load up the restrcition data
+                if layername in self.restriction_table_paths:
+                    restriction_df = gpd.read_file(
+                        self.restriction_table_paths[layername]
+                    )
+                else:
+                    restriction_df = None
+
                 for idx, row in trackdata.iterrows():
 
                     # grab the reverse link and check to make sure there is only a single reverse link.
@@ -1344,7 +1379,7 @@ class NetworkBuilder:
                     link_elevs = []
                     link_headings = []
                     link_speed_sets = self.apply_speed_restrictions(
-                        row.yaml_idx, trackdata
+                        row.yaml_idx, trackdata, restriction_df
                     )
 
                     for idx in range(len(offsets)):
@@ -1595,27 +1630,127 @@ class NetworkBuilder:
                     network_output_dir / "Network Locations.csv", index=False
                 )
 
-    def apply_speed_restrictions(self, link_yaml_idx, trackdata):
+    @cache.memoize(
+        expire=86400 * 7,
+    )  # cache results for a week to be nice to DOT server.
+    def download_milepost_data(self):
 
-        # extract the link we are interested
-        link_data = trackdata[trackdata.yaml_idx == link_yaml_idx]
-        # calc current link length here because it could be used in a couple different places below.
-        link_length = np.max(ast.literal_eval(link_data.offsets.values[0]))
-        # TODO figure out way to apply better speed restrictions from OSM data
-        speed_restict_dict = {
-            "speed_limits": [],
-            "speed_params": [],
-            "is_head_end": False,
+        params = {
+            "where": "1=1",
+            "outFields": "*",
+            "f": "geojson",
+            "resultOffset": 0,
+            "resultRecordCount": 1000,  # max per request
         }
 
-        speed_restict_dict["mp_dir"] = "unknown"
-        speed_restict_dict["speed_limits"].append(
-            {
-                "offset_start_meters": 0,
-                "offset_end_meters": float(link_length),
-                "speed_meters_per_second": 60.0 / 2.23693629,
+        features = []
+
+        while True:
+            response = requests.get(self.milepost_layer_name, params=params)
+            data = response.json()
+
+            if "features" not in data or not data["features"]:
+                break
+
+            gdf_chunk = gpd.GeoDataFrame.from_features(
+                data["features"], crs="EPSG:4326"
+            )
+            features.append(gdf_chunk)
+
+            params["resultOffset"] += params["resultRecordCount"]
+
+        # Combine all chunks into one GeoDataFrame
+        full_gdf = pd.concat(features, ignore_index=True)
+
+        print(f"Downloaded {len(full_gdf)} features.")
+        return full_gdf.to_crs("ESRI:102009")
+
+    def apply_mileposts(self):
+        # load up milepost layer once from USDOT server (default) or wherever you want to get it from .
+        mileposts_gdf = (
+            self.download_milepost_data()
+        )  # gpd.read_file(self.milepost_layer_name).to_crs("ESRI:102009")
+
+        for layername in fiona.listlayers(self.geopackage_path):
+            if "_linked" in layername and "Amarillo" in layername:
+                trackdata = gpd.read_file(self.geopackage_path, layer=layername).to_crs(
+                    "ESRI:102009"
+                )
+
+                for idx, row in trackdata.iterrows():
+                    buffer = row.geometry.buffer(25, cap_style="flat")
+
+                    mileposts_for_link = mileposts_gdf[
+                        mileposts_gdf.geometry.intersects(buffer)
+                    ]
+
+                    # stuff that I used for debugging.  leaving as a comment for future debugging.
+                    # if row.yaml_idx == 216:
+                    #     import matplotlib.pyplot as plt
+
+                    #     buffer_series = gpd.GeoSeries([buffer], crs="ESRI:102009")
+                    #     fig, ax = plt.subplots()
+                    #     buffer_series.plot(
+                    #         ax=ax, facecolor="lightblue", edgecolor="black", alpha=0.5
+                    #     )
+                    #     mileposts_gdf.plot(ax=ax, color="red", markersize=50)
+                    #     plt.show()
+                    #     x = 1
+
+                    normalized_offset = []
+                    for idx_post, row_post in mileposts_for_link.iterrows():
+                        normalized_offset.append(
+                            shapely.line_locate_point(
+                                row.geometry, row_post.geometry, normalized=True
+                            )
+                        )  # normalizing because I need offset to match the curved length.  This is assuming cartesian plane.
+
+    def apply_speed_restrictions(self, link_yaml_idx, trackdata, restriction_df):
+
+        if restriction_df:
+            # this will apply speed restrictions where restrictions are present.
+
+            # extract the link we are interested
+            link_data = trackdata[trackdata.yaml_idx == link_yaml_idx]
+            # calc current link length here because it could be used in a couple different places below.
+            link_length = np.max(ast.literal_eval(link_data.offsets.values[0]))
+            # TODO figure out way to apply better speed restrictions from OSM data
+            speed_restict_dict = {
+                "speed_limits": [],
+                "speed_params": [],
+                "is_head_end": False,
             }
-        )
+
+            speed_restict_dict["mp_dir"] = "unknown"
+            speed_restict_dict["speed_limits"].append(
+                {
+                    "offset_start_meters": 0,
+                    "offset_end_meters": float(link_length),
+                    "speed_meters_per_second": 60.0 / 2.23693629,
+                }
+            )
+        else:
+            # this case will handle the track where no speed restrictions are applied.
+
+            # extract the link we are interested
+            link_data = trackdata[trackdata.yaml_idx == link_yaml_idx]
+            # calc current link length here because it could be used in a couple different places below.
+            link_length = np.max(ast.literal_eval(link_data.offsets.values[0]))
+            # TODO figure out way to apply better speed restrictions from OSM data
+            speed_restict_dict = {
+                "speed_limits": [],
+                "speed_params": [],
+                "is_head_end": False,
+            }
+
+            speed_restict_dict["mp_dir"] = "unknown"
+            speed_restict_dict["speed_limits"].append(
+                {
+                    "offset_start_meters": 0,
+                    "offset_end_meters": float(link_length),
+                    "speed_meters_per_second": 60.0 / 2.23693629,
+                }
+            )
 
         return speed_restict_dict
 
@@ -1650,23 +1785,58 @@ if __name__ == "__main__":
     # MyBuilder.download_elevation()
     # MyBuilder.create_virtual_raster()
 
-    MyBuilder = NetworkBuilder(
-        # alt.resources_root() / "networks/NetworkInput_small.gpkg",
-        # "resources/networks/NetworkInput_small.gpkg",
-        "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small.gpkg",
-        "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput",  # - No Savgol",
-        "SmallNetworkBuild",  # _NoSavGol",
-    )
+    builds = [
+        {
+            "input": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small.gpkg",
+            "output folder": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput",
+            "name": "SmallNetworkBuild",
+            "savgol": True,
+            "median": 250,
+        },
+        {
+            "input": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small.gpkg",
+            "output folder": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput - No Savgol",
+            "name": "SmallNetworkBuild_NoSavGol",
+            "savgol": False,
+            "median": 250,
+        },
+        {
+            "input": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small.gpkg",
+            "output folder": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput - No Median",
+            "name": "SmallNetworkBuild - No Median",
+            "savgol": True,
+            "median": 1,
+        },
+    ]
 
-    # MyBuilder.build_network()
+    for build in builds:
+        print("Now processing {}.....".format(build["name"]))
+        MyBuilder = NetworkBuilder(
+            # alt.resources_root() / "networks/NetworkInput_small.gpkg",
+            # "resources/networks/NetworkInput_small.gpkg",
+            build["input"],
+            build["output folder"],
+            build["name"],
+            "https://services.arcgis.com/xOi1kZaI0eWDREZv/arcgis/rest/services/NTAD_Rail_Mileposts/FeatureServer/0/query",
+            {
+                "Amarillo_FortWorth": "/home/garrett/Documents/ALTRIOS_Extras/UT Data - DO NOT SHARE/bnsf-speed - Amarillo - UT Proprietary.csv"
+            },
+        )
+        MyBuilder.apply_mileposts()
+        # # MyBuilder.build_network()
 
-    MyBuilder.input_geopackage_parsing()
-    MyBuilder.download_osm_data()
-    MyBuilder.clean_geometry()
-    MyBuilder.create_reverse_links()
-    MyBuilder.calc_offsets_headings()
-    # MyBuilder.download_elevation()
-    MyBuilder.drape_geometry(apply_savgol=True)
-    MyBuilder.build_links()
-    MyBuilder.indentify_links()
-    MyBuilder.convert_to_yaml()  # speed_limit_mph=70)
+        # MyBuilder.input_geopackage_parsing()
+        # MyBuilder.download_osm_data()
+        # MyBuilder.clean_geometry()
+        # MyBuilder.create_reverse_links()
+        # MyBuilder.calc_offsets_headings()
+        # MyBuilder.download_elevation()
+        # MyBuilder.create_virtual_raster()
+        # MyBuilder.drape_geometry(
+        #     apply_savgol=build["savgol"],
+        #     circle_buffer_m=build["median"],
+        #     alt_vrt="/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/USA_3DEP.vrt",
+        # )
+        # MyBuilder.build_links()
+        # MyBuilder.indentify_links()
+        # MyBuilder.convert_to_yaml()  # speed_limit_mph=70)
