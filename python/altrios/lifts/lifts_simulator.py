@@ -2,11 +2,10 @@ import simpy
 import random
 import polars as pl
 from altrios.lifts import utilities
-from altrios.lifts.demo_parameters import *
 from altrios.lifts.distances import *
 from altrios.lifts.dictionary import *
 from altrios.lifts.schedule import *
-from altrios.lifts.single_track_vehicle_performance import record_vehicle_event, save_average_times, save_vehicle_logs
+from altrios.lifts.single_track_vehicle_performance import record_vehicle_event
 
 # import sys
 #
@@ -688,8 +687,6 @@ def run_simulation(
     if out_path is not None:
         container_data.write_excel(out_path / f"simulation_crane_{state.CRANE_NUMBER}_hostler_{state.HOSTLER_NUMBER}.xlsx")
 
-    # Use save_average_times and save_vehicle_logs for vehicle related logs
-    save_average_times()
     save_vehicle_logs()
 
     print("Done!")

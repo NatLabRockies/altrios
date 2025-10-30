@@ -1,5 +1,4 @@
 import numpy as np
-from demo_parameters import *
 from scipy.stats import triang, uniform
 import math
 

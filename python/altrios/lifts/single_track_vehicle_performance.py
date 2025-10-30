@@ -1,6 +1,6 @@
 import pandas as pd
 import utilities
-from single_track_parameters import *
+from altrios.lifts.single_track_parameters import *
 from pathlib import Path
 
 package_root = utilities.package_root()
