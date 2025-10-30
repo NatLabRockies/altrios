@@ -1,0 +1,51 @@
+[workspace]
+members = [
+    "altrios-core",                     # pure rust core with optional pyo3 feature
+    "altrios-core/altrios-proc-macros", # proc macros for altrios-core
+    "altrios-py",                       # python module exposing altrios-core
+]
+resolver = "2"
+
+[workspace.package]
+authors = [
+    "ALTRIOS Team <altrios@nrel.gov>",
+    "Chad Baker, Lead Developer",
+    "Nick Reinicke, Developer",
+    "Matt Bruchon, Developer",
+    "Saad Akhtar, Developer",
+    "Jinghu Hu, Developer",
+    "Grant Payne, Developer",
+    "Jason Lustbader, PI",
+    "Garrett Anderson, Developer",
+    "Joel Allardyce, Developer",
+    "Prativa Hartnett, Developer",
+    "Steve Fritz, SwRI Lead",
+    "Tyler Dick, Co-PI",
+]
+license = "BSD-3-Clause"
+edition = "2021"
+homepage = "https://www.nrel.gov/transportation/altrios.html"
+repository = "https://github.com/NREL/altrios"
+rust-version = "1.83"
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 3
+
+[workspace.dependencies]
+ninterp = { version = "0.6.4", features = ["serde"] }
+document-features = "0.2.10"
+anyhow = "1.0.71"
+pyo3 = "0.22"
+polars = { version = "0.45" }
+polars-lazy = { version = "0.45" }
+pyo3-polars = { version = "0.19" }
+uom = { version = "0.35.0" }
+eng_fmt = "0.1.2"
+lazy_static = "1.4.0"
+
+# local crates in this workspace
+altrios-core = { path = "./altrios-core" }
+altrios-proc-macros = { path = "./altrios-core/altrios-proc-macros", version = "1.0" }

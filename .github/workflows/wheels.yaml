@@ -21,8 +21,8 @@ jobs:
           - macos
           - windows
         python-version:
-          - "9"
           - "10"
+          - "11"
         include:
           - os: ubuntu
             platform: linux
@@ -35,39 +35,36 @@ jobs:
       - name: set up python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.9"
+          python-version: "3.11"
 
       - name: set up rust
         if: matrix.os != 'ubuntu'
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: stable 
+          toolchain: stable
           override: true
-      - run: rustup target add aarch64-apple-darwin
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
         if: matrix.os == 'macos'
-
-      # no need to run cargo or python tests because dependence on test workflow should take care of this
 
       - name: install python dependencies
         run: pip install -U maturin wheel twine cibuildwheel
 
       - name: build sdist
-        if: matrix.os == 'ubuntu' && matrix.python-version == '9'
+        if: matrix.os == 'ubuntu' && matrix.python-version == '10'
         run: |
           pip install -U maturin
           maturin build --sdist --out dist/
       - name: build ${{ matrix.platform || matrix.os }} binaries
         run: cibuildwheel --output-dir dist
         env:
+          MACOSX_DEPLOYMENT_TARGET: 10.12
           CIBW_BUILD: "cp3${{ matrix.python-version }}-*"
           CIBW_SKIP: "*-win32 *-musllinux* *i686 *ppc64le *s390x *aarch64"
           CIBW_PLATFORM: ${{ matrix.platform || matrix.os }}
           CIBW_ENVIRONMENT: 'PATH="$HOME/.cargo/bin:$PATH"'
           CIBW_ENVIRONMENT_WINDOWS: 'PATH="$UserProfile\.cargo\bin;$PATH"'
-          CIBW_ARCHS_MACOS: 'universal2'
-          # see https://cibuildwheel.readthedocs.io/en/stable/faq/#universal2
-          CIBW_TEST_SKIP: '*_universal2:arm64'
+          CIBW_ARCHS_MACOS: "universal2"
           CIBW_BEFORE_BUILD: >
             pip install -U maturin &&
             rustup default stable &&
@@ -76,14 +73,12 @@ jobs:
             pip install -U setuptools-rust &&
             curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain=stable --profile=minimal -y &&
             rustup show
-          CIBW_BEFORE_BUILD_MACOS: >
-            rustup target add x86_64-apple-darwin
 
-      - name: upload artifacts 
-        uses: actions/upload-artifact@v3
+      - name: upload artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: wheels 
-          path: dist 
+          name: "wheel-${{ matrix.os }}-py${{ matrix.python-version }}"
+          path: dist
 
   upload:
     if: github.repository == 'nrel/altrios' || github.repository == 'nrel/altrios-private'
@@ -93,13 +88,14 @@ jobs:
       name: pypi
       url: https://pypi.org/p/altrios
     permissions:
-      id-token: write 
+      id-token: write
     steps:
       - name: Download all workflow run artifacts
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
-          name: wheels
-          path: dist 
+          pattern: wheel*
+          path: dist/
+          merge-multiple: true
 
       - name: publish package
         uses: pypa/gh-action-pypi-publish@release/v1

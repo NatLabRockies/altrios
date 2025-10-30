@@ -1,17 +1,18 @@
 ---
 car_type: Manifest_Loaded
-length: 18.0
+freight_type: Manifest_Loaded
+length_meters: 18.0
 axle_count: 4
 brake_count: 1
-mass_static_base: 28500.0
-mass_freight: 101500.0
-speed_max: 20.0
+mass_static_base_kilograms: 28500.0
+mass_freight_kilograms: 101500.0
+speed_max_meters_per_second: 20.0
 braking_ratio: 0.11
-mass_rot_per_axle: 750.0
-bearing_res_per_axle: 40.26
+mass_rot_per_axle_kilograms: 750.0
+bearing_res_per_axle_newtons: 40.26
 rolling_ratio: 0.001546
-davis_b: 0.0
-cd_area: 4.087
+davis_b_seconds_per_meter: 0.0
+cd_area_square_meters: 4.087
 curve_coeff_0: 0.056
 curve_coeff_1: 0.4387579
 curve_coeff_2: 0.01025485

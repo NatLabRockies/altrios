@@ -1,20 +1,35 @@
 """Module for general functions, classes, and unit conversion factors."""
 
 from __future__ import annotations
-import re
 import numpy as np
-from typing import Tuple, Union, Optional, Dict, Any, TYPE_CHECKING
+from typing import Tuple, Union, Optional, List, Dict
 import pandas as pd
+import polars as pl
 import datetime
 import numpy.typing as npt
-import logging
 from pathlib import Path
-import datetime
 import os
 import shutil
 
 # local imports
 from altrios import __version__
+
+MPS_PER_MPH = 1.0 / 2.237
+N_PER_LB = 4.448
+KG_PER_LB = 1.0 / 2.20462
+W_PER_HP = 745.7
+KG_PER_TON = KG_PER_LB * 2000.0
+CM_PER_IN = 2.54
+CM_PER_FT = CM_PER_IN * 12.0
+M_PER_FT = CM_PER_FT / 100.0
+MI_PER_KM = 0.621371
+LITER_PER_M3 = 1.0e3
+G_PER_TONNE = 1.0e6
+GALLONS_PER_LITER = 1.0 / 3.79
+KWH_PER_MJ = 0.277778  # https://www.eia.gov/energyexplained/units-and-calculators/energy-conversion-calculators.php
+MWH_PER_J = 2.77778e-10
+MWH_PER_MJ = KWH_PER_MJ / 1.0e3
+
 
 def package_root() -> Path:
     """
@@ -31,37 +46,10 @@ def resources_root() -> Path:
     path = package_root() / "resources"
     return path
 
-from altrios.altrios_pyo3 import (
-    SetSpeedTrainSim,
-    ConsistSimulation,
-    Consist,
-    LocomotiveSimulation,
-    Locomotive,
-    FuelConverter,
-    ReversibleEnergyStorage,
-    Generator,
-    ElectricDrivetrain,
-    PowerTrace,
-)
-
-MPS_PER_MPH = 1.0 / 2.237
-N_PER_LB = 4.448
-KG_PER_LB = 1.0 / 2.20462
-W_PER_HP = 745.7
-KG_PER_TON = KG_PER_LB * 2000.0
-CM_PER_IN = 2.54
-CM_PER_FT = CM_PER_IN * 12.0
-M_PER_FT = CM_PER_FT / 100.0
-MI_PER_KM = 0.621371
-LITER_PER_M3 = 1.0e3
-G_PER_TONNE = 1.0e6
-GALLONS_PER_LITER = 1.0 / 3.79
-KWH_PER_MJ = 0.277778 # https://www.eia.gov/energyexplained/units-and-calculators/energy-conversion-calculators.php
-MWH_PER_J = 2.77778e-10
-MWH_PER_MJ = KWH_PER_MJ / 1.0e3
 
 def print_dt():
-    print(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    print(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
 
 def cumutrapz(x, y):
     """
@@ -79,111 +67,89 @@ def cumutrapz(x, y):
     return z
 
 
-def set_param_from_path_dict(mod_dict: dict, path: str, value: float) -> Dict:
-    cur_mod_dict = mod_dict
-    path_list = path.split(".")
-
-    cur_ptr = cur_mod_dict
-
-    for step in path_list[:-1]:
-        cur_ptr = cur_ptr[step]
-
-    cur_ptr[path_list[-1]] = value
-
-    return cur_mod_dict
+def range_minmax(self) -> pl.Expr:
+    return self.max() - self.min()  # type: ignore[no-any-return]
 
 
-def set_param_from_path(
-    model: Union[
-        SetSpeedTrainSim,
-        ConsistSimulation,
-        Consist,
-        LocomotiveSimulation,
-        Locomotive,
-        FuelConverter,
-        ReversibleEnergyStorage,
-        Generator,
-        ElectricDrivetrain,
-        PowerTrace,
-    ],
-    path: str,
-    value: Any,
-) -> Union[
-    SetSpeedTrainSim,
-    ConsistSimulation,
-    Consist,
-    LocomotiveSimulation,
-    Locomotive,
-    FuelConverter,
-    ReversibleEnergyStorage,
-    Generator,
-    ElectricDrivetrain,
-    PowerTrace,
-]:
-    """
-    Set parameter `value` on `model` for `path` to parameter
+pl.Expr.range = range_minmax  # type: ignore[attr-defined]
+del range_minmax
 
-    # Example usage
-    ```python
-    import altrios as alt
-    res = alt.ReversibleEnergyStorage.default()
-    alt.set_param_from_path(res, "state.soc", 1.0)
-    ```
-    """
-    path_list = path.split(".")
 
-    def _get_list(path_elem, container):
-        list_match = re.match(r"([\w\d]+)\[(\d+)\]", path_elem)
-        if list_match is not None:
-            list_name = list_match.group(1)
-            index = int(list_match.group(2))
-            l = container.__getattribute__(list_name).tolist()
-            return l, list_name, index
-        else:
-            return None, None, None
+def cumPctWithinGroup(
+    df: Union[pl.DataFrame, pl.LazyFrame], grouping_vars: List[str]
+) -> Union[pl.DataFrame, pl.LazyFrame]:
+    return df.with_columns(
+        (
+            (pl.int_range(pl.len(), dtype=pl.UInt32).over(grouping_vars).add(1))
+            / pl.count().over(grouping_vars)
+        ).alias("Percent_Within_Group_Cumulative")
+    )
 
-    containers = [model]
-    lists = [None] * len(path_list)
-    has_list = [False] * len(path_list)
-    for i, path_elem in enumerate(path_list):
-        container = containers[-1]
 
-        list_attr, list_name, list_index = _get_list(path_elem, container)
-        if list_attr is not None:
-            attr = list_attr[list_index]
-            # save for when we repack the containers
-            lists[i] = (list_attr, list_name, list_index)
-        else:
-            attr = container.__getattribute__(path_elem)
+def allocateIntegerEvenly(
+    df: Union[pl.DataFrame, pl.LazyFrame], target: str, grouping_vars: List[str]
+) -> Union[pl.DataFrame, pl.LazyFrame]:
+    return (
+        df.sort(grouping_vars)
+        .pipe(cumPctWithinGroup, grouping_vars=grouping_vars)
+        .with_columns(
+            pl.col(target)
+            .mul("Percent_Within_Group_Cumulative")
+            .round()
+            .alias(f"{target}_Group_Cumulative")
+        )
+        .with_columns(
+            (
+                pl.col(f"{target}_Group_Cumulative")
+                - pl.col(f"{target}_Group_Cumulative").shift(1).over(grouping_vars)
+            )
+            .fill_null(pl.col(f"{target}_Group_Cumulative"))
+            .alias(f"{target}")
+        )
+        .drop(f"{target}_Group_Cumulative")
+    )
 
-        if i < len(path_list) - 1:
-            containers.append(attr)
 
-    prev_container = value
-
-    # iterate through remaining containers, inner to outer
-    for list_tuple, container, path_elem in zip(
-        lists[-1::-1], containers[-1::-1], path_list[-1::-1]
-    ):
-        if list_tuple is not None:
-            list_attr, list_name, list_index = list_tuple
-            list_attr[list_index] = prev_container
-
-            container.__setattr__(list_name, list_attr)
-        else:
-            container.__setattr__(f"__{path_elem}", prev_container)
-
-        prev_container = container
-
-    return model
+def allocateItems(
+    df: Union[pl.DataFrame, pl.LazyFrame], grouping_vars: list[str], count_target: str
+) -> Union[pl.DataFrame, pl.LazyFrame]:
+    return (
+        df.sort(grouping_vars + [count_target], descending=True)
+        .with_columns(
+            pl.col(count_target)
+            .sum()
+            .over(grouping_vars)
+            .round()
+            .alias(f"{count_target}_Group"),
+            (
+                pl.col(count_target).sum().over(grouping_vars).round()
+                * (
+                    pl.col(count_target).cum_sum().over(grouping_vars)
+                    / pl.col(count_target).sum().over(grouping_vars)
+                )
+            )
+            .round()
+            .alias(f"{count_target}_Group_Cumulative"),
+        )
+        .with_columns(
+            (
+                pl.col(f"{count_target}_Group_Cumulative")
+                - pl.col(f"{count_target}_Group_Cumulative")
+                .shift(1)
+                .over(grouping_vars)
+            )
+            .fill_null(pl.col(f"{count_target}_Group_Cumulative"))
+            .alias("Count")
+        )
+    )
 
 
 def resample(
     df: pd.DataFrame,
     dt_new: Optional[float] = 1.0,
     time_col: Optional[str] = "Time[s]",
-    rate_vars: Optional[Tuple[str]] = [],
-    hold_vars: Optional[Tuple[str]] = [],
+    rate_vars: Tuple[str] = [],
+    hold_vars: Tuple[str] = [],
 ) -> pd.DataFrame:
     """
     Resamples dataframe `df`.
@@ -199,8 +165,7 @@ def resample(
     new_dict = dict()
 
     new_time = np.arange(
-        0, np.floor(df[time_col].to_numpy()[-1] / dt_new) *
-        dt_new + dt_new, dt_new
+        0, np.floor(df[time_col].to_numpy()[-1] / dt_new) * dt_new + dt_new, dt_new
     )
 
     for col in df.columns:
@@ -209,8 +174,7 @@ def resample(
             cumu_vals = (df[time_col].diff().fillna(0) * df[col]).cum_sum()
             new_dict[col] = (
                 np.diff(
-                    np.interp(
-                        x=new_time, xp=df[time_col].to_numpy(), fp=cumu_vals),
+                    np.interp(x=new_time, xp=df[time_col].to_numpy(), fp=cumu_vals),
                     prepend=0,
                 )
                 / dt_new
@@ -250,72 +214,8 @@ def smoothen(signal: npt.ArrayLike, period: int = 9) -> npt.ArrayLike:
 def print_dt():
     print(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
-def set_log_level(level: str | int) -> int:
-    """
-    Sets logging level for both Python and Rust.
-    The default logging level is WARNING (30).
-    https://docs.python.org/3/library/logging.html#logging-levels
 
-    Parameters
-    ----------
-    level: `str` | `int`
-        Logging level to set. `str` level name or `int` logging level
-        
-        =========== ================
-        Level       Numeric value
-        =========== ================
-        CRITICAL    50
-        ERROR       40
-        WARNING     30
-        INFO        20
-        DEBUG       10
-        NOTSET      0
-    
-    Returns
-    -------
-    `int`
-        Previous log level
-    """
-    # Map string name to logging level
-
-    allowed_args = [
-        ("CRITICAL", 50),
-        ("ERROR", 40),
-        ("WARNING", 30),
-        ("INFO", 20),
-        ("DEBUG", 10),
-        ("NOTSET", 0),
-        # no logging of anything ever!
-        ("NONE", logging.CRITICAL + 1),
-    ]
-    allowed_str_args = [a[0] for a in allowed_args]
-    allowed_int_args = [a[1] for a in allowed_args]
-
-    err_str = f"Invalid arg: '{level}'.  See doc string:\n{set_log_level.__doc__}"
-
-    if isinstance(level, str):
-        assert level.upper() in allowed_str_args, err_str
-        level = logging._nameToLevel[level.upper()]
-    else:
-        assert level in allowed_int_args, err_str
-
-    # Extract previous log level and set new log level
-    python_logger  = logging.getLogger("altrios")
-    previous_level = python_logger .level
-    python_logger .setLevel(level)
-    rust_logger = logging.getLogger("altrios_core")
-    rust_logger.setLevel(level)
-    return previous_level
-
-def disable_logging():
-    set_log_level(logging.CRITICAL + 1)
-
-
-def enable_logging():
-    set_log_level(logging.WARNING)
-
-
-def copy_demo_files(demo_path: Path=Path("demos")):
+def copy_demo_files(demo_path: Path = Path("demos")):
     """
     Copies demo files from package directory into local directory.
 
@@ -335,11 +235,8 @@ def copy_demo_files(demo_path: Path=Path("demos")):
             continue
         src_file: Path
         dest_file = demo_path / src_file.name
-        shutil.copyfile(
-            src_file,
-            dest_file
-        )
-    
+        shutil.copyfile(src_file, dest_file)
+
         with open(dest_file, "r+") as file:
             file_content = file.readlines()
             prepend_str = f"# %% Copied from ALTRIOS version '{v}'. Guaranteed compatibility with this version only.\n"
@@ -347,18 +244,22 @@ def copy_demo_files(demo_path: Path=Path("demos")):
             file_content = prepend + file_content
             file.seek(0)
             file.writelines(file_content)
-        
+
     print(f"Saved {dest_file.name} to {dest_file}")
+
 
 def show_plots() -> bool:
     """
-    Returns true if plots should be displayed
+    Returns true if plots should be displayed based on `SHOW_PLOTS` environment variable.
+    `SHOW_PLOTS` defaults to true, and to set it false, run `SHOW_PLOTS=false python your_script.py`
     """
     return (
         os.environ.get(
             # name of environment variable
             "SHOW_PLOTS",
             # defaults to true if not provided
-            "true"
+            "true",
             # only true if provided input is exactly "true", case insensitive
-        ).lower() == "true")        
+        ).lower()
+        == "true"
+    )

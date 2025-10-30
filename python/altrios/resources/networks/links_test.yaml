@@ -1,7 +1,7 @@
 ---
 - elevs: []
   speed_sets: []
-  length: 0.0
+  length_meters: 0.0
   idx_next: 0
   idx_next_alt: 0
   idx_prev: 0
@@ -9,24 +9,24 @@
   idx_curr: 0
   idx_flip: 0
 - elevs:
-    - offset: 0.0
-      elev: 0.0
-    - offset: 50000.0
-      elev: 200.0
-    - offset: 100000.0
-      elev: 0.0
+    - offset_meters: 0.0
+      elev_meters: 0.0
+    - offset_meters: 50000.0
+      elev_meters: 200.0
+    - offset_meters: 100000.0
+      elev_meters: 0.0
   speed_sets:
     - speed_limits:
-        - offset_start: 0.0
-          offset_end: 100000.0
-          speed: 20.0
-        - offset_start: 50000.0
-          offset_end: 100000.0
-          speed: 10.0
+        - offset_start_meters: 0.0
+          offset_end_meters: 100000.0
+          speed_meters_per_second: 20.0
+        - offset_start_meters: 50000.0
+          offset_end_meters: 100000.0
+          speed_meters_per_second: 10.0
       speed_params: []
       train_type: Freight
       is_head_end: false
-  length: 100000.0
+  length_meters: 100000.0
   idx_next: 2
   idx_next_alt: 0
   idx_prev: 0
@@ -34,24 +34,24 @@
   idx_curr: 1
   idx_flip: 0
 - elevs:
-    - offset: 0.0
-      elev: 0.0
-    - offset: 50000.0
-      elev: 200.0
-    - offset: 100000.0
-      elev: 0.0
+    - offset_meters: 0.0
+      elev_meters: 0.0
+    - offset_meters: 50000.0
+      elev_meters: 200.0
+    - offset_meters: 100000.0
+      elev_meters: 0.0
   speed_sets:
     - speed_limits:
-        - offset_start: 0.0
-          offset_end: 100000.0
-          speed: 20.0
-        - offset_start: 50000.0
-          offset_end: 100000.0
-          speed: 10.0
+        - offset_start_meters: 0.0
+          offset_end_meters: 100000.0
+          speed_meters_per_second: 20.0
+        - offset_start_meters: 50000.0
+          offset_end_meters: 100000.0
+          speed_meters_per_second: 10.0
       speed_params: []
       train_type: Freight
       is_head_end: false
-  length: 100000.0
+  length_meters: 100000.0
   idx_next: 0
   idx_next_alt: 0
   idx_prev: 1

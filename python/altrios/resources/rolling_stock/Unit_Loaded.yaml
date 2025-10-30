@@ -1,17 +1,18 @@
 ---
 car_type: Unit_Loaded
-length: 10.7
+freight_type: Unit_Loaded
+length_meters: 10.7
 axle_count: 4
 brake_count: 1
-mass_static_base: 26500.0
-mass_freight: 90500.0
-speed_max: 20.0
+mass_static_base_kilograms: 26500.0
+mass_freight_kilograms: 90500.0
+speed_max_meters_per_second: 20.0
 braking_ratio: 0.11
-mass_rot_per_axle: 750.0
-bearing_res_per_axle: 80.0
+mass_rot_per_axle_kilograms: 750.0
+bearing_res_per_axle_newtons: 80.0
 rolling_ratio: 0.00075
-davis_b: 0.0
-cd_area: 4.0
+davis_b_seconds_per_meter: 0.0
+cd_area_square_meters: 4.0
 curve_coeff_0: 0.056
 curve_coeff_1: 0.4387579
 curve_coeff_2: 0.01025485

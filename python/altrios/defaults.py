@@ -33,6 +33,7 @@ DIESEL_LOCO_COST_USD = DIESEL_MANUFACTURE_COST_USD * RETAIL_PRICE_EQUIVALENT_MUL
 
 LOCO_LIFESPAN = 20
 ANNUAL_LOCO_TURNOVER = 1.0/LOCO_LIFESPAN
+DEFAULT_GAP_SIZE = 0.604
 
 DEMAND_FILE = alt.resources_root() / "Default Demand.csv"
 FUEL_EMISSIONS_FILE = alt.resources_root() / "metrics_inputs" / "GREET-CA_Emissions_Factors.csv"

@@ -4,26 +4,34 @@ import altrios as alt
 
 def mock_fuel_converter(save_interval: Optional[int] = 1) -> alt.FuelConverter:
     fc = alt.FuelConverter.default()
-    alt.set_param_from_path(fc, "save_interval", save_interval)
-    return fc
+    fc_dict = fc.to_pydict()
+    fc_dict["save_interval"] = save_interval
+    return alt.FuelConverter.from_pydict(fc_dict)
 
 
 def mock_generator(save_interval: Optional[int] = 1) -> alt.Generator:
     gen = alt.Generator.default()
-    alt.set_param_from_path(gen, "save_interval", save_interval)
-    return gen
+    gen_dict = gen.to_pydict()
+    gen_dict["save_interval"] = save_interval
+    return alt.Generator.from_pydict(gen_dict)
 
 
-def mock_reversible_energy_storage(save_interval: Optional[int] = 1) -> alt.ReversibleEnergyStorage:
+def mock_reversible_energy_storage(
+    save_interval: Optional[int] = 1,
+) -> alt.ReversibleEnergyStorage:
     res = alt.ReversibleEnergyStorage.default()
-    alt.set_param_from_path(res, "save_interval", save_interval)
-    return res
+    res_dict = res.to_pydict()
+    res_dict["save_interval"] = save_interval
+    return alt.ReversibleEnergyStorage.from_pydict(res_dict)
 
 
-def mock_electric_drivetrain(save_interval: Optional[int] = 1) -> alt.ElectricDrivetrain:
+def mock_electric_drivetrain(
+    save_interval: Optional[int] = 1,
+) -> alt.ElectricDrivetrain:
     edrv = alt.ElectricDrivetrain.default()
-    alt.set_param_from_path(edrv, "save_interval", save_interval)
-    return edrv
+    edrv_dict = edrv.to_pydict()
+    edrv_dict["save_interval"] = save_interval
+    return alt.ElectricDrivetrain.from_pydict(edrv_dict)
 
 
 def mock_conventional_loco(
@@ -51,7 +59,7 @@ def mock_conventional_loco(
             pwr_aux_offset_watts=pwr_aux_offset_watts,
             pwr_aux_traction_coeff_ratio=pwr_aux_traction_coeff,
             force_max_newtons=force_max_newtons,
-        )
+        ),
     )
     return loco_unit
 
@@ -62,9 +70,6 @@ def mock_hybrid_loco(
     res: Optional[alt.ReversibleEnergyStorage] = None,
     edrv: Optional[alt.ElectricDrivetrain] = None,
     save_interval: Optional[int] = 1,
-    fuel_res_split: float = 0.5,
-    fuel_res_ratio: float = 3.0,
-    gss_interval: int = 60,
     pwr_aux_offset_watts: float = 0.0,
     pwr_aux_traction_coeff: float = 0.0,
     force_max_newtons: float = 150000.0,
@@ -78,21 +83,23 @@ def mock_hybrid_loco(
     if not res:
         res = mock_reversible_energy_storage(save_interval)
 
-    loco_unit = alt.Locomotive.build_hybrid_loco(
-        fuel_converter=fc,
-        generator=gen,
-        reversible_energy_storage=res,
-        drivetrain=edrv,
-        save_interval=save_interval,
-        fuel_res_split=fuel_res_split,
-        fuel_res_ratio=fuel_res_ratio,
-        gss_interval=gss_interval,
-        loco_params=alt.LocoParams(
-            pwr_aux_offset_watts=pwr_aux_offset_watts,
-            pwr_aux_traction_coeff_ratio=pwr_aux_traction_coeff,
-            force_max_newtons=force_max_newtons,
-        )
+    loco_unit = alt.Locomotive.from_pydict(
+        {
+            "loco_type": {
+                "HybridLoco": {
+                    "fc": fc.to_pydict(),
+                    "gen": gen.to_pydict(),
+                    "res": res.to_pydict(),
+                    "edrv": edrv.to_pydict(),
+                }
+            },
+            "save_interval": save_interval,
+            "pwr_aux_offset_watts": pwr_aux_offset_watts,
+            "pwr_aux_traction_coeff": pwr_aux_traction_coeff,
+            "force_max_newtons": force_max_newtons,
+        }
     )
+
     return loco_unit
 
 
@@ -108,16 +115,21 @@ def mock_battery_electric_locomotive(
         edrv = mock_electric_drivetrain(save_interval)
     if not res:
         res = mock_reversible_energy_storage(save_interval)
-    loco_unit = alt.Locomotive.build_battery_electric_loco(
-        reversible_energy_storage=res,
-        drivetrain=edrv,
-        save_interval=save_interval,
-        loco_params=alt.LocoParams(
-            pwr_aux_offset_watts=pwr_aux_offset_watts,
-            pwr_aux_traction_coeff_ratio=pwr_aux_traction_coeff,
-            force_max_newtons=force_max_newtons,
-        )
+    loco_unit = alt.Locomotive.from_pydict(
+        {
+            "loco_type": {
+                "BatteryElectricLoco": {
+                    "res": res.to_pydict(),
+                    "edrv": edrv.to_pydict(),
+                }
+            },
+            "save_interval": save_interval,
+            "pwr_aux_offset_watts": pwr_aux_offset_watts,
+            "pwr_aux_traction_coeff": pwr_aux_traction_coeff,
+            "force_max_newtons": force_max_newtons,
+        }
     )
+
     return loco_unit
 
 
@@ -162,7 +174,7 @@ def mock_consist_simulation(
 
 def mock_train_state() -> alt.TrainState:
     train_length = 1_666
-    axle_inertia_kg = 600.
+    axle_inertia_kg = 600.0
     mass_static_kg = 8_000e3
     n_empty_cars = 40
     n_loaded_cars = 60
@@ -199,6 +211,7 @@ def mock_set_speed_train_simulation(
         sim.set_save_interval(save_interval)
     return sim
 
+
 # def mock_speed_limit_train_simulation(
 #     consist: Optional[alt.Consist] = None,
 #     # path_tpc_file: Optional[int] = None,  # `None` triggers default
@@ -221,26 +234,33 @@ def mock_set_speed_train_simulation(
 
 
 def mock_speed_limit_train_simulation_vector(
-    scenario_year: Optional[int] = 2020,
-    simulation_days: Optional[int] = 7
+    scenario_year: Optional[int] = 2020, simulation_days: Optional[int] = 7
 ) -> alt.SpeedLimitTrainSimVec:
-    mock_sim = alt.SpeedLimitTrainSim.default()
-    alt.set_param_from_path(mock_sim, "simulation_days", simulation_days)
-    alt.set_param_from_path(mock_sim, "scenario_year", scenario_year)
+    mock_sim0 = alt.SpeedLimitTrainSim.default()
+    mock_sim_dict = mock_sim0.to_pydict()
+    mock_sim_dict["simulation_days"] = simulation_days
+    mock_sim_dict["scenario_year"] = scenario_year
+    mock_sim = alt.SpeedLimitTrainSim.from_pydict(mock_sim_dict)
     sim_vec = alt.SpeedLimitTrainSimVec([mock_sim])
     return sim_vec
 
 
 def mock_pymoo_conv_cal_df():
     import pandas as pd
-    CUR_FUEL_LHV_J__KG = 43e6
-    loco_sim = alt.LocomotiveSimulation(power_trace=alt.PowerTrace.default(),
-                                         loco_unit=alt.Locomotive.default(),
-                                         save_interval=1)
+
+    # CUR_FUEL_LHV_J__KG = 43e6
+    loco_sim = alt.LocomotiveSimulation(
+        power_trace=alt.PowerTrace.default(),
+        loco_unit=alt.Locomotive.default(),
+        save_interval=1,
+    )
     loco_sim.walk()
-    df = pd.DataFrame({'time [s]': loco_sim.power_trace.time_seconds.tolist(),
-                      'Tractive Power [W]': loco_sim.power_trace.pwr_watts.tolist(),
-                       'Fuel Power [W]': (loco_sim.loco_unit.fc.history.pwr_fuel_watts).tolist(),
-                       })
-    df['engine_on'] = df['Tractive Power [W]'] > 0
+    df = pd.DataFrame(
+        {
+            "time [s]": loco_sim.power_trace.time_seconds.tolist(),
+            "Tractive Power [W]": loco_sim.power_trace.pwr_watts.tolist(),
+            "Fuel Power [W]": (loco_sim.loco_unit.fc.history.pwr_fuel_watts).tolist(),
+        }
+    )
+    df["engine_on"] = df["Tractive Power [W]"] > 0
     return df

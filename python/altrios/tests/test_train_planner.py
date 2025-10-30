@@ -1,7 +1,7 @@
 import unittest
 
 
-from altrios import train_planner
+from altrios.train_planner import planner
 
 
 class TestTrainPlanner(unittest.TestCase):

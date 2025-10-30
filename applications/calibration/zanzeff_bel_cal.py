@@ -55,7 +55,7 @@ def get_bel_trip_mods(df: pd.DataFrame) -> pd.DataFrame:
     """
     # df['dt [s]'] = pd.to_datetime(df['PacificTime']).dt.tz_convert('UTC')
     df['timestamp'] = pd.to_datetime(df['PacificTime']).dt.to_pydatetime()
-    df['time [s]'] = cval.get_delta_seconds(df['timestamp']).cum_sum()
+    df['time [s]'] = cval.get_delta_seconds(df['timestamp']).cumsum()
 
     df3000 = df[['PacificTime', 'time [s]']].copy()
     df3000['Tractive Power [W]'] = (

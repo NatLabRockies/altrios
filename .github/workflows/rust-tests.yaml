@@ -4,11 +4,13 @@ on:
   push:
     branches: [ main ]
     paths:
-      - "rust/**"
+      - "altrios-core/**"
+      - "altrios-py/**"
       - "!python/**"
   pull_request:
     paths:
-      - "rust/**"
+      - "altrios-core/**"
+      - "altrios-py/**"
       - "!python/**"
   workflow_dispatch:
   workflow_call:
@@ -35,7 +37,6 @@ jobs:
 
     - name: Rust unit tests
       run: |
-        cd rust/
         cargo test --workspace
         cd altrios-core/
         cargo test

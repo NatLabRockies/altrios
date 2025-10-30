@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "altrios"
-version = "0.2.3"
+version = "1.0.0"
 authors = [
     { name = "ALTRIOS Team", email = "altrios@nrel.gov" },
     { name = "Chad Baker, Lead Developer" },
@@ -24,7 +24,7 @@ authors = [
 description = "Tool for modeling and optimization of advanced locomotive powertrains for freight rail decarbonization."
 readme = "README.md"
 license = { file = "LICENSE.md" }
-requires-python = ">=3.9, <3.11"
+requires-python = ">=3.10, <3.12"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: BSD License",
@@ -34,20 +34,23 @@ classifiers = [
 ]
 dependencies = [
     "pandas>=2",
-    "numpy==1.24",
+    "numpy~=1.24",
     "pymoo==0.6",
     "openpyxl",
     "xlrd",
     "seaborn",
-    "matplotlib",
-    "plotly",
+    "matplotlib~=3.3",
+    "plotly~=6.0",
     "typing_extensions",
-    "pyyaml",
-    "polars >= 1.14",
-    "pyarrow",
+    "pyarrow >= 16.0",
+    "polars==1.20.0",
     "requests",
     "PyYAML==6.0.2",
-    "simpy"
+    "simpy",
+    "msgpack==1.1.0",
+    "ipykernel~=6.29",
+    "executing~=2.0",
+    "pip",
 ]
 
 [project.urls]
@@ -55,19 +58,52 @@ homepage = "https://www.nrel.gov/transportation/altrios.html"
 source = "https://github.com/NREL/altrios"
 
 [project.optional-dependencies]
-dev = ["black", "pytest", "maturin", "ipykernel"]
+dev = [
+    "pytest~=8.3",
+    "maturin~=1.8",
+    "python-lsp-server~=1.10",
+    "ruff~=0.9",
+    "pylsp-mypy~=0.7.0",
+    "memory_profiler~=0.61.0",
+    "mypy>=1.15.0",
+]
+[dependency-groups]
+dev = [
+    "altrios[dev]",
+]
 
 [tool.maturin]
 profile = "release"
 python-source = "python"
 features = ["pyo3/extension-module"]
 module-name = "altrios.altrios_pyo3"
-manifest-path = "rust/altrios-py/Cargo.toml"
+manifest-path = "altrios-py/Cargo.toml"
 include = [
-    { format = "sdist", path = "rust/altrios-core/Cargo.toml" },
-    { format = "sdist", path = "rust/altrios-core/src/*" },
-    { format = "sdist", path = "rust/altrios-py/Cargo.toml" },
-    { format = "sdist", path = "rust/altrios-py/src/*" },
-    { format = "sdist", path = "rust/altrios-core/proc-macros/Cargo.toml" },
-    { format = "sdist", path = "rust/altrios-core/proc-macros/src/*" },
+    { format = "sdist", path = "altrios-core/Cargo.toml" },
+    { format = "sdist", path = "altrios-core/src/*" },
+    { format = "sdist", path = "altrios-py/Cargo.toml" },
+    { format = "sdist", path = "altrios-py/src/*" },
+    { format = "sdist", path = "altrios-core/proc-macros/Cargo.toml" },
+    { format = "sdist", path = "altrios-core/proc-macros/src/*" },
 ]
+
+[tool.pixi.project]
+channels = ["conda-forge"]
+platforms = ["osx-64", "osx-arm64", "linux-64", "win-64"]
+
+[tool.pixi.pypi-dependencies]
+altrios = { path = ".", editable = true }
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+dev = { features = ["dev"], solve-group = "default" }
+
+[tool.pixi.tasks]
+cargo_test = "cargo test"
+py_test = "maturin develop --release && pixi run -e dev pytest -v"
+build_and_test = { depends-on = ["cargo_test", "py_test"] }
+
+fmt = "ruff"
+lint = "pylint"
+style = { depends-on = ["fmt", "lint"] }
+

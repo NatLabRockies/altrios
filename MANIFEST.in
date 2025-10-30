@@ -1,6 +1,5 @@
-include README.md setup.py rust/altrios-py/Cargo.toml rust/altrios-core/Cargo.toml rust/altrios-core/proc-macros/Cargo.toml 
-recursive-include rust/altrios-py/src * 
-recursive-include rust/altrios-core/src *
-recursive-include rust/altrios-core/proc-macros/src *
-recursive-include rust/uom *
+include README.md setup.py altrios-py/Cargo.toml altrios-core/Cargo.toml altrios-core/proc-macros/Cargo.toml 
+recursive-include altrios-py/src * 
+recursive-include altrios-core/src *
+recursive-include altrios-core/proc-macros/src *
 recursive-include altrios/resources *

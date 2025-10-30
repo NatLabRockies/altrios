@@ -1,7 +1,7 @@
-Origin,Destination,Train_Type,Number_of_Cars,Number_of_Containers
-Hibbing,Allouez,Unit,798,0
-Hibbing,Allouez,Manifest,863,0
-Hibbing,Allouez,Intermodal,740,740
-Allouez,Hibbing,Unit,777,0
-Allouez,Hibbing,Manifest,1076,0
-Allouez,Hibbing,Intermodal,707,707
+Origin,Destination,Train_Type,Number_of_Days,Number_of_Cars,Number_of_Containers
+Hibbing,Allouez,Unit,21,798,0
+Hibbing,Allouez,Manifest,21,863,0
+Hibbing,Allouez,Intermodal,21,740,1480
+Allouez,Hibbing,Unit,21,777,0
+Allouez,Hibbing,Manifest,21,1076,0
+Allouez,Hibbing,Intermodal,21,707,1414

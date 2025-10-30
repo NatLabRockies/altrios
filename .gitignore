@@ -122,7 +122,7 @@ celerybeat.pid
 
 # Environments
 .env
-.venv
+.venv/
 altrios-*venv
 env/
 venv/
@@ -1217,7 +1217,12 @@ code\ meetings
 altrios/resources/networks/Scenic - ALTRIOS Confidential.yaml
 altrios/dispatch/*.json
 activate.sh
-
-*.txt
 *.txt
 /python/altrios/lifts/demos/single_track_results
+altrios/lifts/*.xlsx
+altrios/*.txt
+truck_work_log.txt
+vehicle_average_times.txt
+avg_time_per_train.txt
+crane_work_log.txt
+hostler_work_log.txt

@@ -1,9 +1,0 @@
-Vehicle ID: ('1-1', 'Hybrid'), Action: unload_IC_1-Train-19, State: full, Event Type: end, Emission: 5.993354705577047, Timestamp: 187.09939228367458
-Vehicle ID: ('2-1', 'Hybrid'), Action: unload_IC_1-Train-12, State: full, Event Type: end, Emission: 4.963372867322192, Timestamp: 190.08231132449953
-Vehicle ID: ('1-1', 'Hybrid'), Action: unload_IC_2-Train-19, State: full, Event Type: end, Emission: 5.732713453835665, Timestamp: 190.0950698748563
-Vehicle ID: ('2-2', 'Hybrid'), Action: unload_IC_2-Train-12, State: full, Event Type: end, Emission: 2.6786640407566344, Timestamp: 190.12673361373265
-Vehicle ID: ('1-1', 'Hybrid'), Action: unload_IC_3-Train-19, State: full, Event Type: end, Emission: 3.410279187237164, Timestamp: 190.15162508525825
-Vehicle ID: ('1-1', 'Hybrid'), Action: unload_IC_4-Train-19, State: full, Event Type: end, Emission: 3.0022432555066683, Timestamp: 190.2014135306232
-Vehicle ID: ('2-1', 'Hybrid'), Action: unload_IC_3-Train-12, State: full, Event Type: end, Emission: 7.086861761706799, Timestamp: 190.24426034278252
-Vehicle ID: ('1-1', 'Hybrid'), Action: unload_IC_5-Train-19, State: full, Event Type: end, Emission: 3.1595095998469516, Timestamp: 190.2538100414001
-Vehicle ID: ('2-2', 'Hybrid'), Action: unload_IC_4-Train-12, State: full, Event Type: end, Emission: 4.421134161098927, Timestamp: 190.3175793172618

@@ -1,0 +1,37 @@
+[package]
+name = "altrios-py"
+authors = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+version = "0.1.0"
+rust-version = { workspace = true }
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+altrios-core = { workspace = true, features = ["pyo3"] }
+pyo3 = { workspace = true, features = ["extension-module", "anyhow"] }
+polars = { workspace = true, features = [
+    "dtype-categorical",
+    "rank",
+    "strings",
+    "is_in",
+    "lazy",
+    "polars-ops",
+] }
+polars-lazy = { workspace = true, features = [
+    "dtype-categorical",
+    "rank",
+    "strings",
+] }
+pyo3-polars = { workspace = true, features = ["lazy"] }
+document-features = { workspace = true }
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "altrios_pyo3"
+crate-type = ["cdylib"]
+
+[features]

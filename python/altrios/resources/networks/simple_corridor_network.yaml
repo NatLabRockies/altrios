@@ -1,202 +1,234 @@
 ---
-- idx_curr: 0
-  idx_next: 0
-  idx_next_alt: 0
-  idx_prev: 0
-  idx_prev_alt: 0
-  idx_flip: 0
-  elevs: []
-  headings: []
-  length: 0.0
-- idx_curr: 1
-  idx_next: 2
-  idx_next_alt: 3
-  idx_prev: 0
-  idx_prev_alt: 0
-  idx_flip: 8
-  elevs:
-    - offset: 0.0
-      elev: 0.0
-    - offset: 20000.0
-      elev: 10.0
-  headings:
-    - offset: 0.0
-      heading: 0.0
-    - offset: 20000.0
-      heading: 0.0
-  speed_set:
-    speed_limits:
-      - offset_start: 0.0
-        offset_end: 20000.0
-        speed: 6.5
-    is_head_end: false
-  length: 20000.0
-- idx_curr: 2
-  idx_next: 4
-  idx_next_alt: 0
-  idx_prev: 1
-  idx_prev_alt: 0
-  idx_flip: 7
-  elevs:
-    - offset: 0.0
-      elev: 10.0
-    - offset: 20000.0
-      elev: 10.0
-  headings:
-    - offset: 0.0
-      heading: 0.1
-    - offset: 100.0
-      heading: 0.0
-    - offset: 19900.0
-      heading: 0.0
-    - offset: 20000.0
-      heading: 6.183
-  speed_set:
-    speed_limits:
-      - offset_start: 0.0
-        offset_end: 20000.0
-        speed: 6.5
-    is_head_end: false
-  length: 20000.0
-- idx_curr: 3
-  idx_next: 4
-  idx_next_alt: 0
-  idx_prev: 1
-  idx_prev_alt: 0
-  idx_flip: 6
-  elevs:
-    - offset: 0.0
-      elev: 10.0
-    - offset: 19999.0
-      elev: 10.0
-  headings:
-    - offset: 0.0
-      heading: 0.0
-    - offset: 19999.0
-      heading: 0.0
-  speed_set:
-    speed_limits:
-      - offset_start: 0.0
-        offset_end: 19999.0
-        speed: 6.5
-    is_head_end: false
-  length: 19999.0
-- idx_curr: 4
-  idx_next: 0
-  idx_next_alt: 0
-  idx_prev: 2
-  idx_prev_alt: 3
-  idx_flip: 5
-  elevs:
-    - offset: 0.0
-      elev: 10.0
-    - offset: 20000.0
-      elev: 0.0
-  headings:
-    - offset: 0.0
-      heading: 0.0
-    - offset: 20000.0
-      heading: 0.0
-  speed_set:
-    speed_limits:
-      - offset_start: 0.0
-        offset_end: 20000.0
-        speed: 6.5
-    is_head_end: false
-  length: 20000.0
-- idx_curr: 5
-  idx_next: 6
-  idx_next_alt: 7
-  idx_prev: 0
-  idx_prev_alt: 0
-  idx_flip: 4
-  elevs:
-    - offset: 0.0
-      elev: 0.0
-    - offset: 20000.0
-      elev: 10.0
-  headings:
-    - offset: 0.0
-      heading: 3.142
-    - offset: 20000.0
-      heading: 3.142
-  speed_set:
-    speed_limits:
-      - offset_start: 0.0
-        offset_end: 20000.0
-        speed: 6.5
-    is_head_end: false
-  length: 20000.0
-- idx_curr: 6
-  idx_next: 8
-  idx_next_alt: 0
-  idx_prev: 5
-  idx_prev_alt: 0
-  idx_flip: 3
-  elevs:
-    - offset: 0.0
-      elev: 10.0
-    - offset: 19999.0
-      elev: 10.0
-  headings:
-    - offset: 0.0
-      heading: 3.142
-    - offset: 19999.0
-      heading: 3.142
-  speed_set:
-    speed_limits:
-      - offset_start: 0.0
-        offset_end: 19999.0
-        speed: 6.5
-    is_head_end: false
-  length: 19999.0
-- idx_curr: 7
-  idx_next: 8
-  idx_next_alt: 0
-  idx_prev: 5
-  idx_prev_alt: 0
-  idx_flip: 2
-  elevs:
-    - offset: 0.0
-      elev: 10.0
-    - offset: 20000.0
-      elev: 10.0
-  headings:
-    - offset: 0.0
-      heading: 3.042
-    - offset: 100.0
-      heading: 3.142
-    - offset: 19900.0
-      heading: 3.142
-    - offset: 20000.0
-      heading: 3.242
-  speed_set:
-    speed_limits:
-      - offset_start: 0.0
-        offset_end: 20000.0
-        speed: 6.5
-    is_head_end: false
-  length: 20000.0
-- idx_curr: 8
-  idx_next: 0
-  idx_next_alt: 0
-  idx_prev: 6
-  idx_prev_alt: 7
-  idx_flip: 1
-  elevs:
-    - offset: 0.0
-      elev: 10.0
-    - offset: 20000.0
-      elev: 0.0
-  headings:
-    - offset: 0.0
-      heading: 3.142
-    - offset: 20000.0
-      heading: 3.142
-  speed_set:
-    speed_limits:
-      - offset_start: 0.0
-        offset_end: 20000.0
-        speed: 6.5
-    is_head_end: false
-  length: 20000.0
+- max_grade: 0.06
+  max_curv_radians_per_meter: 0.008589218759814613
+  # TODO: fix heading change spikes and then lower this to 0.12 (~7 degrees)
+  max_heading_step_radians: 0.24
+  max_elev_step_meters: 0.0
+- - idx_curr: 0
+    idx_flip: 0
+    idx_next: 0
+    idx_next_alt: 0
+    idx_prev: 0
+    idx_prev_alt: 0
+    length_meters: 0.0
+    elevs: []
+    headings: []
+    speed_set: ~
+    cat_power_limits: []
+    link_idxs_lockout: []
+  - idx_curr: 1
+    idx_flip: 8
+    idx_next: 2
+    idx_next_alt: 3
+    idx_prev: 0
+    idx_prev_alt: 0
+    length_meters: 20000.0
+    elevs:
+      - offset_meters: 0.0
+        elev_meters: 0.0
+      - offset_meters: 20000.0
+        elev_meters: 10.0
+    headings:
+      - offset_meters: 0.0
+        heading_radians: 0.0
+      - offset_meters: 20000.0
+        heading_radians: 0.0
+    speed_set:
+      speed_limits:
+        - offset_start_meters: 0.0
+          offset_end_meters: 20000.0
+          speed_meters_per_second: 6.5
+      speed_params: []
+      is_head_end: false
+    cat_power_limits: []
+    link_idxs_lockout: []
+  - idx_curr: 2
+    idx_flip: 7
+    idx_next: 4
+    idx_next_alt: 0
+    idx_prev: 1
+    idx_prev_alt: 0
+    length_meters: 20000.0
+    elevs:
+      - offset_meters: 0.0
+        elev_meters: 10.0
+      - offset_meters: 20000.0
+        elev_meters: 10.0
+    headings:
+      - offset_meters: 0.0
+        heading_radians: 0.1
+      - offset_meters: 100.0
+        heading_radians: 0.0
+      - offset_meters: 19900.0
+        heading_radians: 0.0
+      - offset_meters: 20000.0
+        heading_radians: 6.183
+    speed_set:
+      speed_limits:
+        - offset_start_meters: 0.0
+          offset_end_meters: 20000.0
+          speed_meters_per_second: 6.5
+      speed_params: []
+      is_head_end: false
+    cat_power_limits: []
+    link_idxs_lockout: []
+  - idx_curr: 3
+    idx_flip: 6
+    idx_next: 4
+    idx_next_alt: 0
+    idx_prev: 1
+    idx_prev_alt: 0
+    length_meters: 19999.0
+    elevs:
+      - offset_meters: 0.0
+        elev_meters: 10.0
+      - offset_meters: 19999.0
+        elev_meters: 10.0
+    headings:
+      - offset_meters: 0.0
+        heading_radians: 0.0
+      - offset_meters: 19999.0
+        heading_radians: 0.0
+    speed_set:
+      speed_limits:
+        - offset_start_meters: 0.0
+          offset_end_meters: 19999.0
+          speed_meters_per_second: 6.5
+      speed_params: []
+      is_head_end: false
+    cat_power_limits: []
+    link_idxs_lockout: []
+  - idx_curr: 4
+    idx_flip: 5
+    idx_next: 0
+    idx_next_alt: 0
+    idx_prev: 2
+    idx_prev_alt: 3
+    length_meters: 20000.0
+    elevs:
+      - offset_meters: 0.0
+        elev_meters: 10.0
+      - offset_meters: 20000.0
+        elev_meters: 0.0
+    headings:
+      - offset_meters: 0.0
+        heading_radians: 0.0
+      - offset_meters: 20000.0
+        heading_radians: 0.0
+    speed_set:
+      speed_limits:
+        - offset_start_meters: 0.0
+          offset_end_meters: 20000.0
+          speed_meters_per_second: 6.5
+      speed_params: []
+      is_head_end: false
+    cat_power_limits: []
+    link_idxs_lockout: []
+  - idx_curr: 5
+    idx_flip: 4
+    idx_next: 6
+    idx_next_alt: 7
+    idx_prev: 0
+    idx_prev_alt: 0
+    length_meters: 20000.0
+    elevs:
+      - offset_meters: 0.0
+        elev_meters: 0.0
+      - offset_meters: 20000.0
+        elev_meters: 10.0
+    headings:
+      - offset_meters: 0.0
+        heading_radians: 3.142
+      - offset_meters: 20000.0
+        heading_radians: 3.142
+    speed_set:
+      speed_limits:
+        - offset_start_meters: 0.0
+          offset_end_meters: 20000.0
+          speed_meters_per_second: 6.5
+      speed_params: []
+      is_head_end: false
+    cat_power_limits: []
+    link_idxs_lockout: []
+  - idx_curr: 6
+    idx_flip: 3
+    idx_next: 8
+    idx_next_alt: 0
+    idx_prev: 5
+    idx_prev_alt: 0
+    length_meters: 19999.0
+    elevs:
+      - offset_meters: 0.0
+        elev_meters: 10.0
+      - offset_meters: 19999.0
+        elev_meters: 10.0
+    headings:
+      - offset_meters: 0.0
+        heading_radians: 3.142
+      - offset_meters: 19999.0
+        heading_radians: 3.142
+    speed_set:
+      speed_limits:
+        - offset_start_meters: 0.0
+          offset_end_meters: 19999.0
+          speed_meters_per_second: 6.5
+      speed_params: []
+      is_head_end: false
+    cat_power_limits: []
+    link_idxs_lockout: []
+  - idx_curr: 7
+    idx_flip: 2
+    idx_next: 8
+    idx_next_alt: 0
+    idx_prev: 5
+    idx_prev_alt: 0
+    length_meters: 20000.0
+    elevs:
+      - offset_meters: 0.0
+        elev_meters: 10.0
+      - offset_meters: 20000.0
+        elev_meters: 10.0
+    headings:
+      - offset_meters: 0.0
+        heading_radians: 3.042
+      - offset_meters: 100.0
+        heading_radians: 3.142
+      - offset_meters: 19900.0
+        heading_radians: 3.142
+      - offset_meters: 20000.0
+        heading_radians: 3.242
+    speed_set:
+      speed_limits:
+        - offset_start_meters: 0.0
+          offset_end_meters: 20000.0
+          speed_meters_per_second: 6.5
+      speed_params: []
+      is_head_end: false
+    cat_power_limits: []
+    link_idxs_lockout: []
+  - idx_curr: 8
+    idx_flip: 1
+    idx_next: 0
+    idx_next_alt: 0
+    idx_prev: 6
+    idx_prev_alt: 7
+    length_meters: 20000.0
+    elevs:
+      - offset_meters: 0.0
+        elev_meters: 10.0
+      - offset_meters: 20000.0
+        elev_meters: 0.0
+    headings:
+      - offset_meters: 0.0
+        heading_radians: 3.142
+      - offset_meters: 20000.0
+        heading_radians: 3.142
+    speed_set:
+      speed_limits:
+        - offset_start_meters: 0.0
+          offset_end_meters: 20000.0
+          speed_meters_per_second: 6.5
+      speed_params: []
+      is_head_end: false
+    cat_power_limits: []
+    link_idxs_lockout: []

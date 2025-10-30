@@ -33,7 +33,7 @@ def get_conv_trip_mods(df: pd.DataFrame) -> pd.DataFrame:
     df = df.drop_duplicates('PacificTime').copy()
     df['timestamp'] = pd.to_datetime(
         df['PacificTime']).dt.to_pydatetime()
-    df['time [s]'] = cval.get_delta_seconds(df['timestamp']).cum_sum()
+    df['time [s]'] = cval.get_delta_seconds(df['timestamp']).cumsum()
 
   
 
@@ -69,7 +69,7 @@ def get_conv_trip_mods(df: pd.DataFrame) -> pd.DataFrame:
     df39xx["Fuel Energy [J]"] = (df39xx["Fuel Power [W]"] *
                                     cval.get_delta_seconds(
                                         df39xx['timestamp'])
-                                    ).cum_sum().copy()
+                                    ).cumsum().copy()
     df39xx["engine_on"] = df['Engine Speed (RPM) BNSF ' + str(trailing_loc)] > 100
     return df39xx
 

@@ -9,10 +9,10 @@ Strap:
     ratio: 0.000750000082673352
   davis_b:
   # Calculate weighted average of davis_b times mass static for each railcar divided by total mass static
-    davis_b: 0.00003355404807951647
+    davis_b_seconds_per_meter: 0.00003355404807951647
   aerodynamic:
   # Equal to 0.5*Cd*A, sum up value over all railcars
-    cd_area: 8.440293051104742
+    cd_area_square_meters: 8.440293051104742
   grade:
     idx_front: 0
     idx_back: 0
