@@ -1,8 +1,8 @@
 import simpy
 import random
 import polars as pl
-from altrios.lifts import utilities
-from altrios.lifts.distances import *
+from altrios import utilities
+from altrios.lifts.distance_single_track import *
 from altrios.lifts.dictionary import *
 from altrios.lifts.schedule import *
 from altrios.lifts.single_track_vehicle_performance import record_vehicle_event
@@ -637,7 +637,7 @@ def run_simulation(
     # ]
 
     # REAL TEST
-    train_timetable = build_train_timetable(train_consist_plan, terminal, swap_arrive_depart = True, as_dicts = True)
+    train_timetable = altrios.lifts.utilities.build_train_timetable(train_consist_plan, terminal, swap_arrive_depart = True, as_dicts = True)
     TRAIN_NUMBERS = len(train_timetable)
 
     # env.process(train_arrival(env, train_processing, cranes, in_gate_resource, outbound_containers_store, truck_store, train_timetable))
@@ -695,7 +695,7 @@ def run_simulation(
 
 if __name__ == "__main__":
     run_simulation(
-        train_consist_plan=pl.read_csv(utilities.package_root() / 'demos' / 'starter_demo' / 'train_consist_plan.csv'),
+        train_consist_plan=pl.read_csv(utilities.package_root() / 'demos' / 'lifts' / 'demos' / 'starter_demo' / 'train_consist_plan.csv'),
         terminal = "Allouez",
-        out_path = utilities.package_root() / 'demos' / 'starter_demo' / 'results'
+        out_path = utilities.package_root() / 'demos' / 'lifts' / 'demos' / 'starter_demo' / 'results'
     )

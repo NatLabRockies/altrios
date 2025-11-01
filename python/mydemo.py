@@ -72,7 +72,7 @@ def record_container_event(container, event_type, timestamp):
 
 
 def save_vehicle_and_performance_metrics(state):
-    out_path = utilities.package_root() / 'demos' / 'double_track_results'
+    out_path = altrios.lifts.utilities.package_root() / 'demos' / 'double_track_results'
 
     container_excel_path = out_path / f"double_track_simulation_crane_{state.CRANE_NUMBER}_hostler_{state.HOSTLER_NUMBER}.xlsx"
     vehicle_excel_path = out_path / f"double_track_vehicle_log_crane_{state.CRANE_NUMBER}_hostler_{state.HOSTLER_NUMBER}.xlsx"

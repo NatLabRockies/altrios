@@ -66,11 +66,6 @@ t0_main = time.perf_counter()
     debug=True,
 )
 
-train_consist_plan_csv = pl.read_csv('/Users/qianqiantong/PycharmProjects/altrios-private/altrios/python/altrios/lifts/train_consist_plan.csv')
-container_data = lifts_simulator.run_simulation(
-    train_consist_plan = train_consist_plan_csv, 
-    terminal = "Allouez")
-
 t1_main = time.perf_counter()
 print(f"Elapsed time to run `sim_manager.main()`: {t1_main - t0_main:.3g} s")
 

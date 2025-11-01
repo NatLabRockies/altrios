@@ -1,9 +1,9 @@
 import pandas as pd
-import utilities
+import altrios.lifts.utilities
 from demo_parameters import *
 from pathlib import Path
 
-package_root = utilities.package_root()
+package_root = altrios.lifts.utilities.package_root()
 out_path = package_root / 'demos' / 'double_track_results'
 out_path.mkdir(parents=True, exist_ok=True)
 

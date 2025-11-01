@@ -1,0 +1,16 @@
+{
+  "layout":
+{"K": 1600,
+  "k": 200,
+  "M": 2,
+  "N": 3,
+  "n_t": 2,
+  "n_p": 2,
+  "n_r": 34
+},
+  "vehicles":
+  {"simulation_duration": 480,
+    "CRANE_NUMBER": 2,
+    "HOSTLER_NUMBER": 3
+  }
+}

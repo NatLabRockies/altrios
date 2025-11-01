@@ -1,0 +1,63 @@
+simulation:
+  length: 168                 # total simulation time (hours): default 7 days (168 hours)
+  analyze_start: 72           # observation start time (hours): default from day 3 (hour 72)
+  analyze_end: 120            # observation end time (hours): default to day 5 (hour 120)
+  train_number: 1            # number of trains in the simulation
+  train_batch_size: 100       # assume full_cars = oc_number = truck_number
+
+yard:
+  yard_type: parallel
+  track_number: 2             # tracks to process containers
+  receiving_track_numbers: 10 # tracks to hold decoupled railcars
+  railcar_length: 60          # railcar length (joint + railcar; ft)
+  d_f: 15                     # crossing offset (ft)
+  d_x: 15                     # track spacing (ft)
+
+terminal:
+  cranes_per_track: 4           # assume evenly distributed cranes on tracks
+  hostler_number: 36            # all hostlers are shared between tracks
+  hostler_diesel_percentage: 1  # percentage of diesel hostlers (decimal between 0 to 1)
+
+gates:
+  in_gate_numbers: 3        # truck entrance gate
+  out_gate_numbers: 3       # truck exit gate
+
+layout:
+  file_path: "input/layout.xlsx"   # yard geometry file
+  mode: adaptive                   # 'fixed' or 'adaptive'
+
+  # Note: if mode == 'fixed' (i.e. simulation for a specific yard), use default parameters below
+  M: 5         # rows of parking blocks
+  N: 5         # cols of parking blocks
+  n_t: 2       # train aisles per group
+  n_p: 2       # parking aisles per group
+  n_r: 20      # pairs of parking slots
+
+# Fixed emission matrix (ZANZEFF reports, 2022)
+emissions:
+  load_consumption:
+    crane_loaded:
+      Diesel: 0.26    # kWh per load
+      Hybrid: 0.48
+    crane_idle:
+      Diesel: 0.02
+      Hybrid: 0.024
+
+  trip_consumption:
+    hostler_empty:
+      Diesel: 1.11    # gallons/hr or kWh/hr
+      Electric: 2.78
+    hostler_loaded:
+      Diesel: 1.94
+      Electric: 3.66
+    truck_empty:
+      Diesel: 1.11
+      Electric: 2.68
+    truck_loaded:
+      Diesel: 1.94
+      Electric: 3.66
+
+  side_pick_consumption:
+    side:
+      Diesel: 2.88    # per lift
+      Electric: 0.21
