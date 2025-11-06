@@ -1299,13 +1299,13 @@ class NetworkBuilder:
         for layername in fiona.listlayers(self.geopackage_path):
             buffer_diameter = 1
 
-            if "_linked" in layername:
+            if "_mileposts" in layername:
                 trackdata = gpd.read_file(self.geopackage_path, layer=layername)
 
                 location_data = pd.read_csv(
                     str(self.data_folder)
                     + "/Generated Networks/"
-                    + layername.replace("_linked", "/Network Locations.csv")
+                    + layername.replace("_mileposts", "/Network Locations.csv")
                 )
                 links_to_scale = location_data["Link Index"].to_list()
                 track_list = []
@@ -1329,9 +1329,11 @@ class NetworkBuilder:
                 track_list.append(link_dict)
 
                 # load up the restrcition data
-                if layername in self.restriction_table_paths:
-                    restriction_df = gpd.read_file(
-                        self.restriction_table_paths[layername]
+                if layername.replace("_mileposts", "") in self.restriction_table_paths:
+                    restriction_df = pd.read_csv(
+                        self.restriction_table_paths[
+                            layername.replace("_mileposts", "")
+                        ]
                     )
                 else:
                     restriction_df = None
@@ -1379,7 +1381,9 @@ class NetworkBuilder:
                     link_elevs = []
                     link_headings = []
                     link_speed_sets = self.apply_speed_restrictions(
-                        row.yaml_idx, trackdata, restriction_df
+                        row.yaml_idx,
+                        trackdata,
+                        restriction_df,
                     )
 
                     for idx in range(len(offsets)):
@@ -1449,7 +1453,7 @@ class NetworkBuilder:
                 network_output_dir = Path(
                     self.data_folder
                     / "Generated Networks"
-                    / layername.replace("_linked", "")
+                    / layername.replace("_mileposts", "")
                 )
                 network_output_dir.mkdir(parents=True, exist_ok=True)
                 print(network_output_dir)
@@ -1672,7 +1676,9 @@ class NetworkBuilder:
         )  # gpd.read_file(self.milepost_layer_name).to_crs("ESRI:102009")
 
         for layername in fiona.listlayers(self.geopackage_path):
-            if "_linked" in layername and "Amarillo" in layername:
+            if (
+                "_linked" in layername
+            ):  # and "Amarillo" in layername: #had this extra bit in for development purposes
                 trackdata = gpd.read_file(self.geopackage_path, layer=layername).to_crs(
                     "ESRI:102009"
                 )
@@ -1707,6 +1713,16 @@ class NetworkBuilder:
                     normalized_offset = []
                     milepost_number = []
                     milepost_subdiv = []
+
+                    if "Amar" in layername and row.yaml_idx == 363:
+                        x = 1
+
+                    # doing this to fix problem where subdivions come together and messup the interpolation
+                    if mileposts_for_link.shape[0] > 0:
+                        mileposts_for_link = mileposts_for_link[
+                            mileposts_for_link.SUBDIV
+                            == mileposts_for_link.SUBDIV.mode().iloc[0]
+                        ]
                     for idx_post, row_post in mileposts_for_link.iterrows():
                         normalized_offset.append(
                             float(
@@ -1723,13 +1739,11 @@ class NetworkBuilder:
                     trackdata.at[idx, "milepost_mile"] = milepost_number
                     trackdata.at[idx, "milepost_subdiv"] = milepost_subdiv
 
-                # getting rid of orphaned sections of track
-                trackdata = trackdata[
-                    (trackdata.next_idx != 0) | (trackdata.prev_idx != 0)
-                ]
                 no_post_ref = []
                 for idx, row in trackdata.iterrows():
                     print(idx)
+                    if "Amar" in layername and row.yaml_idx == 363:
+                        x = 1
                     base_offset = 0
                     row["base_offset"] = base_offset
                     current_length = ast.literal_eval(row.offsets)[-1]
@@ -1854,23 +1868,26 @@ class NetworkBuilder:
                             fill_value="extrapolate",
                             assume_sorted=False,
                         )
-                        trackdata.at[idx, "milepost_start"] = mp_interpolator(0.0)
-                        trackdata.at[idx, "milepost_end"] = mp_interpolator(
-                            curr_link_length
+                        trackdata.at[idx, "milepost_start"] = float(
+                            mp_interpolator(0.0)
+                        )
+                        trackdata.at[idx, "milepost_end"] = float(
+                            mp_interpolator(curr_link_length)
                         )
 
                         if row.yaml_idx == 229:  # 220 single post link
                             next_links
 
-                # trackdata["milepost_subdiv_start"] = None
-                # trackdata["milepost_subdiv_end"] = None
+                # trying to fix problem where geopandas is writing data to text field
+                trackdata.milepost_start = trackdata.milepost_start.astype("float64")
+                trackdata.milepost_end = trackdata.milepost_end.astype("float64")
                 self.delete_and_create_layer(
                     layername.replace("_linked", "_mileposts"), trackdata
                 )
 
     def apply_speed_restrictions(self, link_yaml_idx, trackdata, restriction_df):
 
-        if restriction_df:
+        if restriction_df is not None:
             # this will apply speed restrictions where restrictions are present.
 
             # extract the link we are interested
@@ -1884,14 +1901,140 @@ class NetworkBuilder:
                 "is_head_end": False,
             }
 
+            link_mp_end = link_data["milepost_end"].iloc[0]
+            link_mp_start = link_data["milepost_start"].iloc[0]
+            applicable_restrictions = restriction_df[
+                (
+                    (restriction_df["BEG MP"] <= link_mp_end)
+                    & (restriction_df["END MP"] >= link_mp_end)
+                )
+                | (
+                    (restriction_df["BEG MP"] <= link_mp_start)
+                    & (restriction_df["END MP"] >= link_mp_end)
+                )
+            ]
             speed_restict_dict["mp_dir"] = "unknown"
-            speed_restict_dict["speed_limits"].append(
-                {
-                    "offset_start_meters": 0,
-                    "offset_end_meters": float(link_length),
-                    "speed_meters_per_second": 60.0 / 2.23693629,
-                }
+
+            current_offset = 0
+
+            mp_interpolator = interp1d(
+                [0, link_length],
+                [link_data.milepost_start.iloc[0], link_data.milepost_end.iloc[0]],
+                kind="linear",
+                fill_value="extrapolate",
+                assume_sorted=False,
             )
+            offset_interpolator = interp1d(
+                [link_data.milepost_start.iloc[0], link_data.milepost_end.iloc[0]],
+                [0, link_length],
+                kind="linear",
+                fill_value="extrapolate",
+                assume_sorted=False,
+            )
+            iteration_count = 0
+            current_mp_value = link_data.milepost_start.iloc[0]
+            while current_offset < float(link_length) and iteration_count < 100:
+                iteration_count = iteration_count + 1
+
+                if link_data.yaml_idx.values[0] == 1147:  # and iteration_count == 11:
+                    x = 1
+
+                # this lets us march through from different directions and not grab two restrictions
+                if link_mp_end > link_mp_start:
+                    current_restriction = applicable_restrictions[
+                        (applicable_restrictions["BEG MP"] <= current_mp_value)
+                        & (applicable_restrictions["END MP"] > current_mp_value)
+                    ].copy()
+                else:
+                    current_restriction = applicable_restrictions[
+                        (applicable_restrictions["BEG MP"] < current_mp_value)
+                        & (applicable_restrictions["END MP"] >= current_mp_value)
+                    ].copy()
+
+                if (
+                    np.isnan(link_mp_start)
+                    or np.isnan(link_mp_end)
+                    or link_mp_end == link_mp_start
+                    or link_mp_start < -1.0
+                    or link_mp_end < -1.0
+                ):
+                    # this covers the case where the link was not referenced to a milepost in the previous step.
+                    # it is most likely orphaned and not important and will result in wild values if not handled.
+                    speed_restict_dict["speed_limits"].append(
+                        {
+                            "offset_start_meters": float(current_offset),
+                            "offset_end_meters": float(link_length),
+                            "speed_meters_per_second": float(60.0 / 2.23693629),
+                        }
+                    )
+                    current_offset = float(link_length)
+
+                elif current_restriction.shape[0] > 0:
+                    # this case covers where there is a speed restriction that is found in the restriction table for the current offset
+
+                    # drop row out of applicable restructions out of table so that logic won't get caught in loop
+                    applicable_restrictions = applicable_restrictions[
+                        applicable_restrictions["BEG MP"]
+                        != current_restriction.iloc[0, :]["BEG MP"]
+                    ]
+                    # this covers cases where you are going with or against milepost direction
+                    if link_mp_end > link_mp_start:
+                        restrict_end_mp = current_restriction.iloc[0, :]["END MP"]
+                    else:
+                        restrict_end_mp = current_restriction.iloc[0, :]["BEG MP"]
+
+                    restrict_end_offset = float(offset_interpolator(restrict_end_mp))
+                    restrict_end_offset = min(restrict_end_offset, link_length)
+
+                    speed_restict_dict["speed_limits"].append(
+                        {
+                            "offset_start_meters": float(current_offset),
+                            "offset_end_meters": float(restrict_end_offset),
+                            "speed_meters_per_second": float(
+                                current_restriction.iloc[0, :]["FREIGHT SPEED"]
+                                / 2.23693629
+                            ),
+                        }
+                    )
+                    current_offset = restrict_end_offset
+                    current_mp_value = restrict_end_mp
+                elif (current_restriction.shape[0] == 0) and (
+                    applicable_restrictions.shape[0] > 0
+                ):
+                    # this case covers where there are speed resrictions for the current link but not the current offset
+                    # defaulting this to 60 for now.  will probalby need to make this a parameter at some point.
+
+                    # this covers cases where you are going with or against milepost direction
+                    if link_mp_end > link_mp_start:
+                        next_restriction_mp = applicable_restrictions["BEG MP"].min()
+                    else:
+                        next_restriction_mp = applicable_restrictions["END MP"].min()
+
+                    next_restriction_offset = offset_interpolator(next_restriction_mp)
+                    speed_restict_dict["speed_limits"].append(
+                        {
+                            "offset_start_meters": float(current_offset),
+                            "offset_end_meters": float(next_restriction_offset),
+                            "speed_meters_per_second": float(60.0 / 2.23693629),
+                        },
+                    )
+                    current_offset = next_restriction_offset
+                    current_mp_value = next_restriction_mp  # don't need to take a min here I think because the start should always fall within the link because of the inequallities used to find rows.
+                else:
+                    # this covers the case where there are no restrictions for the link at all.
+                    speed_restict_dict["speed_limits"].append(
+                        {
+                            "offset_start_meters": float(current_offset),
+                            "offset_end_meters": float(link_length),
+                            "speed_meters_per_second": float(60.0 / 2.23693629),
+                        }
+                    )
+                    current_offset = float(link_length)
+                    # not setting current_mp here because this will round out the link.
+
+            if iteration_count > 90:
+                x = 1
+
         else:
             # this case will handle the track where no speed restrictions are applied.
 
@@ -1985,21 +2128,24 @@ if __name__ == "__main__":
                 "Amarillo_FortWorth": "/home/garrett/Documents/ALTRIOS_Extras/UT Data - DO NOT SHARE/bnsf-speed - Amarillo - UT Proprietary.csv"
             },
         )
-        MyBuilder.apply_mileposts()
+
         # # MyBuilder.build_network()
 
-        # MyBuilder.input_geopackage_parsing()
-        # MyBuilder.download_osm_data()
-        # MyBuilder.clean_geometry()
-        # MyBuilder.create_reverse_links()
-        # MyBuilder.calc_offsets_headings()
+        MyBuilder.input_geopackage_parsing()
+        MyBuilder.download_osm_data()
+        MyBuilder.clean_geometry()
+        MyBuilder.create_reverse_links()
+        MyBuilder.calc_offsets_headings()
+
         # MyBuilder.download_elevation()
         # MyBuilder.create_virtual_raster()
-        # MyBuilder.drape_geometry(
-        #     apply_savgol=build["savgol"],
-        #     circle_buffer_m=build["median"],
-        #     alt_vrt="/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/USA_3DEP.vrt",
-        # )
-        # MyBuilder.build_links()
-        # MyBuilder.indentify_links()
-        # MyBuilder.convert_to_yaml()  # speed_limit_mph=70)
+
+        MyBuilder.drape_geometry(
+            apply_savgol=build["savgol"],
+            circle_buffer_m=build["median"],
+            alt_vrt="/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/USA_3DEP.vrt",
+        )
+        MyBuilder.build_links()
+        MyBuilder.indentify_links()
+        MyBuilder.apply_mileposts()
+        MyBuilder.convert_to_yaml()  # speed_limit_mph=70)
