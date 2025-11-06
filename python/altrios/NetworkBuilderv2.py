@@ -587,7 +587,9 @@ class NetworkBuilder:
                         switch_gdf["osm_link_id"] = Node_.id
                         all_switch_gdf.append(switch_gdf)
             TrackGDF = pd.concat(TrackGDF)
-            TrackGDF = TrackGDF.drop("fixme", axis=1)
+
+            if "fixme" in TrackGDF.columns:
+                TrackGDF = TrackGDF.drop("fixme", axis=1)
             all_switch_gdf = pd.concat(all_switch_gdf)
 
             # TODO add logic here to filter down to mainline only plus a buffer. use usage column
@@ -621,6 +623,11 @@ class NetworkBuilder:
             TrackGDF = TrackGDF[TrackGDF.service != "yard"]
 
             TrackGDF = TrackGDF[TrackGDF.building != "train_station"]
+
+            TrackGDF = TrackGDF[TrackGDF.highway.isna()]
+
+            if "foot" in TrackGDF.columns.values:
+                TrackGDF = TrackGDF[TrackGDF.foot != "yes"]
 
             if "barrier" in TrackGDF.columns.values:
                 TrackGDF = TrackGDF[TrackGDF.barrier != "fence"]
@@ -1639,35 +1646,41 @@ class NetworkBuilder:
     )  # cache results for a week to be nice to DOT server.
     def download_milepost_data(self):
 
-        params = {
-            "where": "1=1",
-            "outFields": "*",
-            "f": "geojson",
-            "resultOffset": 0,
-            "resultRecordCount": 1000,  # max per request
-        }
+        if "https" in self.milepost_layer_name:
+            params = {
+                "where": "1=1",
+                "outFields": "*",
+                "f": "geojson",
+                "resultOffset": 0,
+                "resultRecordCount": 1000,  # max per request
+            }
 
-        features = []
+            features = []
 
-        while True:
-            response = requests.get(self.milepost_layer_name, params=params)
-            data = response.json()
+            while True:
+                response = requests.get(self.milepost_layer_name, params=params)
+                data = response.json()
 
-            if "features" not in data or not data["features"]:
-                break
+                if "features" not in data or not data["features"]:
+                    break
 
-            gdf_chunk = gpd.GeoDataFrame.from_features(
-                data["features"], crs="EPSG:4326"
-            )
-            features.append(gdf_chunk)
+                gdf_chunk = gpd.GeoDataFrame.from_features(
+                    data["features"], crs="EPSG:4326"
+                )
+                features.append(gdf_chunk)
 
-            params["resultOffset"] += params["resultRecordCount"]
+                params["resultOffset"] += params["resultRecordCount"]
 
-        # Combine all chunks into one GeoDataFrame
-        full_gdf = pd.concat(features, ignore_index=True)
+            # Combine all chunks into one GeoDataFrame
+            full_gdf = pd.concat(features, ignore_index=True)
 
-        print(f"Downloaded {len(full_gdf)} features.")
-        return full_gdf.to_crs("ESRI:102009")
+            print(f"Downloaded {len(full_gdf)} features.")
+            return full_gdf.to_crs("ESRI:102009")
+        else:
+
+            milepost_gdf = gpd.read_file(self.milepost_layer_name)
+
+            return milepost_gdf.to_crs("ESRI:102009")
 
     def apply_mileposts(self):
         # load up milepost layer once from USDOT server (default) or wherever you want to get it from .
@@ -1740,6 +1753,7 @@ class NetworkBuilder:
                     trackdata.at[idx, "milepost_subdiv"] = milepost_subdiv
 
                 no_post_ref = []
+
                 for idx, row in trackdata.iterrows():
                     print(idx)
                     if "Amar" in layername and row.yaml_idx == 363:
@@ -1761,7 +1775,13 @@ class NetworkBuilder:
                     if row.next_idx > 0:
 
                         next_idx = row.next_idx
-                        while (post_count < 2) and (base_offset < 5000):
+                        iteration_count = 0
+                        while (
+                            (post_count < 2)
+                            and (base_offset < 5000)
+                            and (iteration_count < 100)
+                        ):
+                            iteration_count = iteration_count + 1
                             # need two posts to establish direction.  offset restriction is to eliminate odd paths to find mileposts
                             print("iterating")
                             # tracking the length  of previous links so if I iterate through 3 or 4 links.  The offets get tracked properly.
@@ -1804,10 +1824,11 @@ class NetworkBuilder:
                             0  # reset to 0 because we're about to go in reverse.
                         )
                         prev_idx = row.prev_idx
-                        while post_count < 2:
+                        iteration_count = 0
+                        while post_count < 2 and iteration_count < 100:
 
                             print("iterating in reverse")
-
+                            iteration_count = iteration_count + 1
                             next_row = trackdata[trackdata.yaml_idx == prev_idx].copy()
 
                             # if row.yaml_idx == 229 and next_row.yaml_idx == 228:
