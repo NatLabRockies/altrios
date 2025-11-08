@@ -1370,7 +1370,12 @@ class NetworkBuilder:
                         offsets = [x * multiplier for x in offsets]
 
                     try:
-                        elevations = ast.literal_eval(row.elevations)
+
+                        elevations = ast.literal_eval(
+                            row.elevations.replace(
+                                "nan", "-12345.0"
+                            )  # replacing nan because it causes an error
+                        )
                     except Exception as e:
                         # placed this try statement here because sometime elevation data is not available.
                         # nans get placed in the draping operation.  This is to make the code work.  The
@@ -1393,12 +1398,21 @@ class NetworkBuilder:
                         restriction_df,
                     )
 
-                    for idx in range(len(offsets)):
+                    if row.yaml_idx == 131:
+                        x = 1
 
+                    for idx in range(len(offsets)):
+                        # have this if else statement to throw out points within 500 meters of ends to eliminate grade spikes from small changes in elevation
                         if (idx == 0) or (idx == len(offsets) - 1):
-                            link_elevs.append(
-                                {"offset_meters": offsets[idx], "elev": elevations[idx]}
-                            )
+
+                            if elevations[idx] != -12345.0:
+
+                                link_elevs.append(
+                                    {
+                                        "offset_meters": offsets[idx],
+                                        "elev": elevations[idx],
+                                    }
+                                )
 
                             link_headings.append(
                                 {
@@ -1413,9 +1427,14 @@ class NetworkBuilder:
                         elif (offsets[idx] > 500) and (
                             (offsets[-1] - offsets[idx]) > 500
                         ):
-                            link_elevs.append(
-                                {"offset_meters": offsets[idx], "elev": elevations[idx]}
-                            )
+
+                            if elevations[idx] != -12345.0:
+                                link_elevs.append(
+                                    {
+                                        "offset_meters": offsets[idx],
+                                        "elev": elevations[idx],
+                                    }
+                                )
 
                             link_headings.append(
                                 {
@@ -1903,7 +1922,8 @@ class NetworkBuilder:
                 trackdata.milepost_start = trackdata.milepost_start.astype("float64")
                 trackdata.milepost_end = trackdata.milepost_end.astype("float64")
                 self.delete_and_create_layer(
-                    layername.replace("_linked", "_mileposts"), trackdata
+                    layername.replace("_linked", "_mileposts"),
+                    trackdata.to_crs("EPSG:4326"),
                 )
 
     def apply_speed_restrictions(self, link_yaml_idx, trackdata, restriction_df):
