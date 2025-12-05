@@ -110,8 +110,8 @@ def plot_exponential_fit(tab1, results_folder, output_file="delay_vs_trains.png"
     print(f"The plot saved to {output_path}")
 
 
-results_folder = "/Users/qianqiantong/PycharmProjects/altrios-private/altrios/python/altrios/resources/double_sidings/random_12/results/"
-freeflow_time_hr = 6.52
+results_folder = "/Users/qianqiantong/PycharmProjects/altrios-private/altrios/python/altrios/resources/double_sidings/results/"
+freeflow_time_hr = 5.86 #6.52
 length_mi = 337.0
 output_excel = os.path.join(results_folder, "results_summary.xlsx")
 tab1, tab2 = process_timetables(results_folder, freeflow_time_hr, length_mi, output_excel)

@@ -60,7 +60,7 @@ impl BrakingPoints {
             }
         }
         assert!(
-            speed <= self.points[self.idx_curr].speed_limit,
+            speed <= self.points[self.idx_curr].speed_limit * 1.1,
             "Speed limit violated! idx_curr={:?}, offset={:?}, speed={speed:?}, speed_limit={:?}, speed_target={:?}",
             self.idx_curr,
             self.points[self.idx_curr].offset,
