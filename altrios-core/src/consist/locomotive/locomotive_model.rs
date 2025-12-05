@@ -661,8 +661,6 @@ impl Init for Locomotive {
         let _mass = self
             .mass()
             .map_err(|err| Error::InitError(format_dbg!(err)))?;
-        self.check_force_max()
-            .map_err(|err| Error::InitError(format_dbg!(err)))?;
         self.loco_type.init()?;
         Ok(())
     }

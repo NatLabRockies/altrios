@@ -1,13 +1,11 @@
 # %%
-from pathlib import Path
-
-import matplotlib.pyplot as plt
-import numpy as np
-import seaborn as sns
-
 import altrios as alt
-from altrios import defaults, rollout
+from altrios import rollout, defaults
 from altrios.train_planner import planner_config
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
 
 sns.set_theme()
 

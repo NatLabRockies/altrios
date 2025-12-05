@@ -53,7 +53,7 @@ import momepy
 import numpy as np
 from scipy.signal import savgol_filter
 from tenacity import retry, stop_after_attempt, wait_fixed
-from scipy.interpolate import interp1d
+
 
 import rasterio.mask
 
@@ -587,9 +587,7 @@ class NetworkBuilder:
                         switch_gdf["osm_link_id"] = Node_.id
                         all_switch_gdf.append(switch_gdf)
             TrackGDF = pd.concat(TrackGDF)
-
-            if "fixme" in TrackGDF.columns:
-                TrackGDF = TrackGDF.drop("fixme", axis=1)
+            TrackGDF = TrackGDF.drop("fixme", axis=1)
             all_switch_gdf = pd.concat(all_switch_gdf)
 
             # TODO add logic here to filter down to mainline only plus a buffer. use usage column
@@ -623,11 +621,6 @@ class NetworkBuilder:
             TrackGDF = TrackGDF[TrackGDF.service != "yard"]
 
             TrackGDF = TrackGDF[TrackGDF.building != "train_station"]
-
-            TrackGDF = TrackGDF[TrackGDF.highway.isna()]
-
-            if "foot" in TrackGDF.columns.values:
-                TrackGDF = TrackGDF[TrackGDF.foot != "yes"]
 
             if "barrier" in TrackGDF.columns.values:
                 TrackGDF = TrackGDF[TrackGDF.barrier != "fence"]
@@ -1306,13 +1299,13 @@ class NetworkBuilder:
         for layername in fiona.listlayers(self.geopackage_path):
             buffer_diameter = 1
 
-            if "_mileposts" in layername:
+            if "_linked" in layername:
                 trackdata = gpd.read_file(self.geopackage_path, layer=layername)
 
                 location_data = pd.read_csv(
                     str(self.data_folder)
                     + "/Generated Networks/"
-                    + layername.replace("_mileposts", "/Network Locations.csv")
+                    + layername.replace("_linked", "/Network Locations.csv")
                 )
                 links_to_scale = location_data["Link Index"].to_list()
                 track_list = []
@@ -1336,11 +1329,9 @@ class NetworkBuilder:
                 track_list.append(link_dict)
 
                 # load up the restrcition data
-                if layername.replace("_mileposts", "") in self.restriction_table_paths:
-                    restriction_df = pd.read_csv(
-                        self.restriction_table_paths[
-                            layername.replace("_mileposts", "")
-                        ]
+                if layername in self.restriction_table_paths:
+                    restriction_df = gpd.read_file(
+                        self.restriction_table_paths[layername]
                     )
                 else:
                     restriction_df = None
@@ -1370,12 +1361,7 @@ class NetworkBuilder:
                         offsets = [x * multiplier for x in offsets]
 
                     try:
-
-                        elevations = ast.literal_eval(
-                            row.elevations.replace(
-                                "nan", "-12345.0"
-                            )  # replacing nan because it causes an error
-                        )
+                        elevations = ast.literal_eval(row.elevations)
                     except Exception as e:
                         # placed this try statement here because sometime elevation data is not available.
                         # nans get placed in the draping operation.  This is to make the code work.  The
@@ -1393,26 +1379,15 @@ class NetworkBuilder:
                     link_elevs = []
                     link_headings = []
                     link_speed_sets = self.apply_speed_restrictions(
-                        row.yaml_idx,
-                        trackdata,
-                        restriction_df,
+                        row.yaml_idx, trackdata, restriction_df
                     )
 
-                    if row.yaml_idx == 131:
-                        x = 1
-
                     for idx in range(len(offsets)):
-                        # have this if else statement to throw out points within 500 meters of ends to eliminate grade spikes from small changes in elevation
+
                         if (idx == 0) or (idx == len(offsets) - 1):
-
-                            if elevations[idx] != -12345.0:
-
-                                link_elevs.append(
-                                    {
-                                        "offset_meters": offsets[idx],
-                                        "elev": elevations[idx],
-                                    }
-                                )
+                            link_elevs.append(
+                                {"offset_meters": offsets[idx], "elev": elevations[idx]}
+                            )
 
                             link_headings.append(
                                 {
@@ -1427,14 +1402,9 @@ class NetworkBuilder:
                         elif (offsets[idx] > 500) and (
                             (offsets[-1] - offsets[idx]) > 500
                         ):
-
-                            if elevations[idx] != -12345.0:
-                                link_elevs.append(
-                                    {
-                                        "offset_meters": offsets[idx],
-                                        "elev": elevations[idx],
-                                    }
-                                )
+                            link_elevs.append(
+                                {"offset_meters": offsets[idx], "elev": elevations[idx]}
+                            )
 
                             link_headings.append(
                                 {
@@ -1479,7 +1449,7 @@ class NetworkBuilder:
                 network_output_dir = Path(
                     self.data_folder
                     / "Generated Networks"
-                    / layername.replace("_mileposts", "")
+                    / layername.replace("_linked", "")
                 )
                 network_output_dir.mkdir(parents=True, exist_ok=True)
                 print(network_output_dir)
@@ -1665,41 +1635,35 @@ class NetworkBuilder:
     )  # cache results for a week to be nice to DOT server.
     def download_milepost_data(self):
 
-        if "https" in self.milepost_layer_name:
-            params = {
-                "where": "1=1",
-                "outFields": "*",
-                "f": "geojson",
-                "resultOffset": 0,
-                "resultRecordCount": 1000,  # max per request
-            }
+        params = {
+            "where": "1=1",
+            "outFields": "*",
+            "f": "geojson",
+            "resultOffset": 0,
+            "resultRecordCount": 1000,  # max per request
+        }
 
-            features = []
+        features = []
 
-            while True:
-                response = requests.get(self.milepost_layer_name, params=params)
-                data = response.json()
+        while True:
+            response = requests.get(self.milepost_layer_name, params=params)
+            data = response.json()
 
-                if "features" not in data or not data["features"]:
-                    break
+            if "features" not in data or not data["features"]:
+                break
 
-                gdf_chunk = gpd.GeoDataFrame.from_features(
-                    data["features"], crs="EPSG:4326"
-                )
-                features.append(gdf_chunk)
+            gdf_chunk = gpd.GeoDataFrame.from_features(
+                data["features"], crs="EPSG:4326"
+            )
+            features.append(gdf_chunk)
 
-                params["resultOffset"] += params["resultRecordCount"]
+            params["resultOffset"] += params["resultRecordCount"]
 
-            # Combine all chunks into one GeoDataFrame
-            full_gdf = pd.concat(features, ignore_index=True)
+        # Combine all chunks into one GeoDataFrame
+        full_gdf = pd.concat(features, ignore_index=True)
 
-            print(f"Downloaded {len(full_gdf)} features.")
-            return full_gdf.to_crs("ESRI:102009")
-        else:
-
-            milepost_gdf = gpd.read_file(self.milepost_layer_name)
-
-            return milepost_gdf.to_crs("ESRI:102009")
+        print(f"Downloaded {len(full_gdf)} features.")
+        return full_gdf.to_crs("ESRI:102009")
 
     def apply_mileposts(self):
         # load up milepost layer once from USDOT server (default) or wherever you want to get it from .
@@ -1708,19 +1672,10 @@ class NetworkBuilder:
         )  # gpd.read_file(self.milepost_layer_name).to_crs("ESRI:102009")
 
         for layername in fiona.listlayers(self.geopackage_path):
-            if (
-                "_linked" in layername
-            ):  # and "Amarillo" in layername: #had this extra bit in for development purposes
+            if "_linked" in layername and "Amarillo" in layername:
                 trackdata = gpd.read_file(self.geopackage_path, layer=layername).to_crs(
                     "ESRI:102009"
                 )
-                trackdata["milepost_offsets"] = None
-                trackdata["milepost_mile"] = None
-                trackdata["milepost_subdiv"] = None
-                trackdata["milepost_start"] = None
-                trackdata["milepost_end"] = None
-                trackdata["milepost_subdiv_start"] = None
-                trackdata["milepost_subdiv_end"] = None
 
                 for idx, row in trackdata.iterrows():
                     buffer = row.geometry.buffer(25, cap_style="flat")
@@ -1743,192 +1698,16 @@ class NetworkBuilder:
                     #     x = 1
 
                     normalized_offset = []
-                    milepost_number = []
-                    milepost_subdiv = []
-
-                    if "Amar" in layername and row.yaml_idx == 363:
-                        x = 1
-
-                    # doing this to fix problem where subdivions come together and messup the interpolation
-                    if mileposts_for_link.shape[0] > 0:
-                        mileposts_for_link = mileposts_for_link[
-                            mileposts_for_link.SUBDIV
-                            == mileposts_for_link.SUBDIV.mode().iloc[0]
-                        ]
                     for idx_post, row_post in mileposts_for_link.iterrows():
                         normalized_offset.append(
-                            float(
-                                shapely.line_locate_point(
-                                    row.geometry,
-                                    row_post.geometry,
-                                    normalized=True,
-                                )
-                            ),
+                            shapely.line_locate_point(
+                                row.geometry, row_post.geometry, normalized=True
+                            )
                         )  # normalizing because I need offset to match the curved length.  This is assuming cartesian plane.
-                        milepost_number.append(row_post.MILEPOST)
-                        milepost_subdiv.append(row_post.SUBDIV)
-                    trackdata.at[idx, "milepost_offsets"] = normalized_offset
-                    trackdata.at[idx, "milepost_mile"] = milepost_number
-                    trackdata.at[idx, "milepost_subdiv"] = milepost_subdiv
-
-                no_post_ref = []
-
-                for idx, row in trackdata.iterrows():
-                    print(idx)
-                    if "Amar" in layername and row.yaml_idx == 363:
-                        x = 1
-                    base_offset = 0
-                    row["base_offset"] = base_offset
-                    current_length = ast.literal_eval(row.offsets)[-1]
-                    curr_link_length = current_length
-                    if len(row.milepost_offsets) > 0:
-                        post_count = len(row.milepost_offsets)
-                        row.milepost_offsets = (
-                            np.array(row.milepost_offsets) * current_length
-                        )
-                    else:
-                        post_count = 0
-
-                    next_links = [pd.DataFrame(row).transpose()]
-
-                    if row.next_idx > 0:
-
-                        next_idx = row.next_idx
-                        iteration_count = 0
-                        while (
-                            (post_count < 2)
-                            and (base_offset < 5000)
-                            and (iteration_count < 100)
-                        ):
-                            iteration_count = iteration_count + 1
-                            # need two posts to establish direction.  offset restriction is to eliminate odd paths to find mileposts
-                            print("iterating")
-                            # tracking the length  of previous links so if I iterate through 3 or 4 links.  The offets get tracked properly.
-                            base_offset = base_offset + current_length
-                            next_row = trackdata[trackdata.yaml_idx == next_idx].copy()
-
-                            if next_row.shape[0] > 0:
-
-                                next_row["base_offset"] = base_offset
-                                current_length = ast.literal_eval(
-                                    next_row.offsets.values[0]
-                                )[-1]
-
-                                if (
-                                    len(next_row.milepost_offsets.values[0]) > 0
-                                ):  # some of this values stuff seems like it should be simplified.
-                                    next_row.at[
-                                        next_row.index[0], "milepost_offsets"
-                                    ] = (
-                                        np.array(next_row.milepost_offsets.values[0])
-                                        * current_length
-                                        + base_offset
-                                    )
-                                next_links.append(next_row)
-
-                                try:
-                                    post_count = post_count + len(
-                                        next_row.milepost_offsets.values[0]
-                                    )
-                                except:
-                                    post_count = post_count + 1
-
-                                next_idx = next_row.next_idx.values[0]
-
-                            else:
-                                break
-                    # iterating through in reverse if link is a dead end
-                    if post_count < 2 and row.prev_idx > 0:
-                        base_offset = (
-                            0  # reset to 0 because we're about to go in reverse.
-                        )
-                        prev_idx = row.prev_idx
-                        iteration_count = 0
-                        while post_count < 2 and iteration_count < 100:
-
-                            print("iterating in reverse")
-                            iteration_count = iteration_count + 1
-                            next_row = trackdata[trackdata.yaml_idx == prev_idx].copy()
-
-                            # if row.yaml_idx == 229 and next_row.yaml_idx == 228:
-                            #     x = 1
-
-                            if next_row.shape[0] > 0:
-                                current_length = ast.literal_eval(
-                                    next_row.offsets.values[0]
-                                )[-1]
-                                next_row["base_offset"] = (
-                                    base_offset - current_length
-                                )  # subtracting offset since we're going in reverse and using current link length
-
-                                base_offset = base_offset - current_length
-                                if len(next_row.milepost_offsets.values[0]) > 0:
-                                    next_row.at[
-                                        next_row.index[0], "milepost_offsets"
-                                    ] = (
-                                        np.array(next_row.milepost_offsets.values[0])
-                                        * current_length
-                                    ) + base_offset  # adding here because I subtract a few lines up
-                                next_links.append(next_row)
-
-                                try:
-                                    post_count = post_count + len(
-                                        next_row.milepost_offsets.values[0]
-                                    )
-                                except:
-                                    post_count = post_count + 1
-
-                                prev_idx = next_row.prev_idx.values[0]
-                            else:
-                                break
-
-                    next_links = pd.concat(next_links)
-                    if post_count < 2:
-                        print("not enough posts: {}".format(idx))
-                        no_post_ref.append(idx)
-                    else:
-
-                        offset_set = np.concatenate(
-                            [
-                                np.atleast_1d(a)
-                                for a in next_links.milepost_offsets.values
-                            ]
-                        )
-                        post_value_set = np.concatenate(
-                            [np.atleast_1d(a) for a in next_links.milepost_mile.values]
-                        )
-                        subdiv_set = np.concatenate(
-                            [np.atleast_1d(a) for a in next_links.milepost_subdiv]
-                        )
-
-                        mp_interpolator = interp1d(
-                            offset_set,
-                            post_value_set,
-                            kind="linear",
-                            fill_value="extrapolate",
-                            assume_sorted=False,
-                        )
-                        trackdata.at[idx, "milepost_start"] = float(
-                            mp_interpolator(0.0)
-                        )
-                        trackdata.at[idx, "milepost_end"] = float(
-                            mp_interpolator(curr_link_length)
-                        )
-
-                        if row.yaml_idx == 229:  # 220 single post link
-                            next_links
-
-                # trying to fix problem where geopandas is writing data to text field
-                trackdata.milepost_start = trackdata.milepost_start.astype("float64")
-                trackdata.milepost_end = trackdata.milepost_end.astype("float64")
-                self.delete_and_create_layer(
-                    layername.replace("_linked", "_mileposts"),
-                    trackdata.to_crs("EPSG:4326"),
-                )
 
     def apply_speed_restrictions(self, link_yaml_idx, trackdata, restriction_df):
 
-        if restriction_df is not None:
+        if restriction_df:
             # this will apply speed restrictions where restrictions are present.
 
             # extract the link we are interested
@@ -1942,140 +1721,14 @@ class NetworkBuilder:
                 "is_head_end": False,
             }
 
-            link_mp_end = link_data["milepost_end"].iloc[0]
-            link_mp_start = link_data["milepost_start"].iloc[0]
-            applicable_restrictions = restriction_df[
-                (
-                    (restriction_df["BEG MP"] <= link_mp_end)
-                    & (restriction_df["END MP"] >= link_mp_end)
-                )
-                | (
-                    (restriction_df["BEG MP"] <= link_mp_start)
-                    & (restriction_df["END MP"] >= link_mp_end)
-                )
-            ]
             speed_restict_dict["mp_dir"] = "unknown"
-
-            current_offset = 0
-
-            mp_interpolator = interp1d(
-                [0, link_length],
-                [link_data.milepost_start.iloc[0], link_data.milepost_end.iloc[0]],
-                kind="linear",
-                fill_value="extrapolate",
-                assume_sorted=False,
+            speed_restict_dict["speed_limits"].append(
+                {
+                    "offset_start_meters": 0,
+                    "offset_end_meters": float(link_length),
+                    "speed_meters_per_second": 60.0 / 2.23693629,
+                }
             )
-            offset_interpolator = interp1d(
-                [link_data.milepost_start.iloc[0], link_data.milepost_end.iloc[0]],
-                [0, link_length],
-                kind="linear",
-                fill_value="extrapolate",
-                assume_sorted=False,
-            )
-            iteration_count = 0
-            current_mp_value = link_data.milepost_start.iloc[0]
-            while current_offset < float(link_length) and iteration_count < 100:
-                iteration_count = iteration_count + 1
-
-                if link_data.yaml_idx.values[0] == 1147:  # and iteration_count == 11:
-                    x = 1
-
-                # this lets us march through from different directions and not grab two restrictions
-                if link_mp_end > link_mp_start:
-                    current_restriction = applicable_restrictions[
-                        (applicable_restrictions["BEG MP"] <= current_mp_value)
-                        & (applicable_restrictions["END MP"] > current_mp_value)
-                    ].copy()
-                else:
-                    current_restriction = applicable_restrictions[
-                        (applicable_restrictions["BEG MP"] < current_mp_value)
-                        & (applicable_restrictions["END MP"] >= current_mp_value)
-                    ].copy()
-
-                if (
-                    np.isnan(link_mp_start)
-                    or np.isnan(link_mp_end)
-                    or link_mp_end == link_mp_start
-                    or link_mp_start < -1.0
-                    or link_mp_end < -1.0
-                ):
-                    # this covers the case where the link was not referenced to a milepost in the previous step.
-                    # it is most likely orphaned and not important and will result in wild values if not handled.
-                    speed_restict_dict["speed_limits"].append(
-                        {
-                            "offset_start_meters": float(current_offset),
-                            "offset_end_meters": float(link_length),
-                            "speed_meters_per_second": float(60.0 / 2.23693629),
-                        }
-                    )
-                    current_offset = float(link_length)
-
-                elif current_restriction.shape[0] > 0:
-                    # this case covers where there is a speed restriction that is found in the restriction table for the current offset
-
-                    # drop row out of applicable restructions out of table so that logic won't get caught in loop
-                    applicable_restrictions = applicable_restrictions[
-                        applicable_restrictions["BEG MP"]
-                        != current_restriction.iloc[0, :]["BEG MP"]
-                    ]
-                    # this covers cases where you are going with or against milepost direction
-                    if link_mp_end > link_mp_start:
-                        restrict_end_mp = current_restriction.iloc[0, :]["END MP"]
-                    else:
-                        restrict_end_mp = current_restriction.iloc[0, :]["BEG MP"]
-
-                    restrict_end_offset = float(offset_interpolator(restrict_end_mp))
-                    restrict_end_offset = min(restrict_end_offset, link_length)
-
-                    speed_restict_dict["speed_limits"].append(
-                        {
-                            "offset_start_meters": float(current_offset),
-                            "offset_end_meters": float(restrict_end_offset),
-                            "speed_meters_per_second": float(
-                                current_restriction.iloc[0, :]["FREIGHT SPEED"]
-                                / 2.23693629
-                            ),
-                        }
-                    )
-                    current_offset = restrict_end_offset
-                    current_mp_value = restrict_end_mp
-                elif (current_restriction.shape[0] == 0) and (
-                    applicable_restrictions.shape[0] > 0
-                ):
-                    # this case covers where there are speed resrictions for the current link but not the current offset
-                    # defaulting this to 60 for now.  will probalby need to make this a parameter at some point.
-
-                    # this covers cases where you are going with or against milepost direction
-                    if link_mp_end > link_mp_start:
-                        next_restriction_mp = applicable_restrictions["BEG MP"].min()
-                    else:
-                        next_restriction_mp = applicable_restrictions["END MP"].min()
-
-                    next_restriction_offset = offset_interpolator(next_restriction_mp)
-                    speed_restict_dict["speed_limits"].append(
-                        {
-                            "offset_start_meters": float(current_offset),
-                            "offset_end_meters": float(next_restriction_offset),
-                            "speed_meters_per_second": float(60.0 / 2.23693629),
-                        },
-                    )
-                    current_offset = next_restriction_offset
-                    current_mp_value = next_restriction_mp  # don't need to take a min here I think because the start should always fall within the link because of the inequallities used to find rows.
-                else:
-                    # this covers the case where there are no restrictions for the link at all.
-                    speed_restict_dict["speed_limits"].append(
-                        {
-                            "offset_start_meters": float(current_offset),
-                            "offset_end_meters": float(link_length),
-                            "speed_meters_per_second": float(60.0 / 2.23693629),
-                        }
-                    )
-                    current_offset = float(link_length)
-                    # not setting current_mp here because this will round out the link.
-
-            if iteration_count > 90:
-                x = 1
-
         else:
             # this case will handle the track where no speed restrictions are applied.
 
@@ -2169,24 +1822,21 @@ if __name__ == "__main__":
                 "Amarillo_FortWorth": "/home/garrett/Documents/ALTRIOS_Extras/UT Data - DO NOT SHARE/bnsf-speed - Amarillo - UT Proprietary.csv"
             },
         )
-
+        MyBuilder.apply_mileposts()
         # # MyBuilder.build_network()
 
-        MyBuilder.input_geopackage_parsing()
-        MyBuilder.download_osm_data()
-        MyBuilder.clean_geometry()
-        MyBuilder.create_reverse_links()
-        MyBuilder.calc_offsets_headings()
-
+        # MyBuilder.input_geopackage_parsing()
+        # MyBuilder.download_osm_data()
+        # MyBuilder.clean_geometry()
+        # MyBuilder.create_reverse_links()
+        # MyBuilder.calc_offsets_headings()
         # MyBuilder.download_elevation()
         # MyBuilder.create_virtual_raster()
-
-        MyBuilder.drape_geometry(
-            apply_savgol=build["savgol"],
-            circle_buffer_m=build["median"],
-            alt_vrt="/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/USA_3DEP.vrt",
-        )
-        MyBuilder.build_links()
-        MyBuilder.indentify_links()
-        MyBuilder.apply_mileposts()
-        MyBuilder.convert_to_yaml()  # speed_limit_mph=70)
+        # MyBuilder.drape_geometry(
+        #     apply_savgol=build["savgol"],
+        #     circle_buffer_m=build["median"],
+        #     alt_vrt="/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/USA_3DEP.vrt",
+        # )
+        # MyBuilder.build_links()
+        # MyBuilder.indentify_links()
+        # MyBuilder.convert_to_yaml()  # speed_limit_mph=70)
