@@ -532,6 +532,58 @@ def plot_train_level_powers(
     return fig, ax
 
 
+def plot_total_resistance(ts):
+    ts_dict = ts.to_pydict()
+    hist = ts_dict["history"]
+
+    # Extract arrays (NumPy)
+    time_seconds = np.array(hist["time_seconds"])
+    time_hours = time_seconds / 3600
+
+    aero = np.array(hist["res_aero_newtons"])
+    rolling = np.array(hist["res_rolling_newtons"])
+    curve = np.array(hist["res_curve_newtons"])
+    bearing = np.array(hist["res_bearing_newtons"])
+    grade = np.array(hist["res_grade_newtons"])
+
+    # Combined resistance
+    total_res = aero + rolling + curve + bearing + grade
+
+    # Find maximum
+    max_idx = np.argmax(total_res)
+    max_res = total_res[max_idx]
+    max_time = time_hours[max_idx]
+
+    # Optional distance
+    if "distance_meters" in hist:
+        dist_m = np.array(hist["distance_meters"])
+        max_dist = dist_m[max_idx] / 1609.34
+    else:
+        max_dist = None
+
+    plt.figure(figsize=(10, 4))
+    plt.plot(time_hours, total_res / 1e6, label="Total Resistance (MN)", color="black")
+    plt.xlabel("Time [hr]")
+    plt.ylabel("Total Resistance [MN]")
+    plt.title("Combined Resistance vs Time")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    print("\n=== Maximum Total Resistance ===")
+    print(f"MAX_IDX:{max_idx}")
+    print(f"MAX_TIME:{max_time}")
+    print(f"MAX_RES:{max_res}")
+
+    if max_dist is not None:
+        print(f"At distance: {max_dist:.3f} miles")
+    else:
+        print("(Distance data not available in history.)")
+
+    return max_idx, max_time, max_res
+
+
 def plot_train_network_info(
     ts: alt.SpeedLimitTrainSim, mod_str: str
 ) -> Tuple[plt.Figure, plt.Axes]:

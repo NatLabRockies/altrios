@@ -1,18 +1,60 @@
 # %%
+import altrios as alt
+from altrios.demos import plot_util
 import time
 import matplotlib.pyplot as plt
 import polars as pl
 import seaborn as sns
 import os
 from copy import copy
+import sys
 
-import altrios as alt
-from altrios.demos import plot_util
+# corridor = 'Amarillo-FortWorth'
+# origin = 'Amarillo'
+# destination = 'Fort Worth - BNSF'
+# location_root = "double_sidings/Garrett/Amarillo_FortWorth - All Filtering/Network Locations.csv"
+# network_root = "double_sidings/Garrett/Amarillo_FortWorth - All Filtering/Network.yaml"
+
+# corridor = 'Amarillo-FortWorth'
+# origin = 'Amarillo'
+# destination = 'FortWorth'
+# location_root = "double_sidings/corridor/Amarillo-FortWorth/locations.csv"
+# network_root = "double_sidings/corridor/Amarillo-FortWorth/Network.yaml"
+
+# corridor = 'Clovis-Flagstaff'
+# origin = 'Clovis'
+# destination = 'Flagstaff'
+# location_root = "double_sidings/corridor/Clovis-Flagstaff/locations.csv"
+# network_root = "double_sidings/corridor/Clovis-Flagstaff/Network.yaml"
+
+corridor = 'Clovis-Flagstaff'
+origin = 'Clovis'
+destination = 'FLagstaff'
+location_root = "double_sidings/Garrett/Flagstaff_Clovis/Network Locations.csv"
+network_root = "double_sidings/Garrett/Flagstaff_Clovis/Network.yaml"
+
+# corridor = 'Barstow-LongBeach'
+# origin = 'Barstow'
+# destination = 'LongBeach'
+# location_root = f"double_sidings/corridor/{corridor}/locations.csv"
+# network_root = f"double_sidings/corridor/{corridor}/Network.yaml"
+
+# corridor = 'Barstow-LongBeach'
+# origin = 'Barstow'
+# destination = 'POLA'
+# location_root = "double_sidings/Garrett/POLA_Barstow_Eastward/Network Locations.csv"
+# network_root = "double_sidings/Garrett/POLA_Barstow_Eastward/Network.yaml"
+
+# define train batch size and locomotives
+if len(sys.argv) > 1:
+    L = int(sys.argv[1])   # train length (# cars)
+    n_locos = int(sys.argv[2])
+else:
+    L = 20
+    n_locos = 1
+
 sns.set_theme()
-
-
 SHOW_PLOTS = alt.utils.show_plots()
-
 SAVE_INTERVAL = 1
 
 # Build the train config
@@ -29,7 +71,7 @@ print("Loading `TrainConfig`")
 train_config = alt.TrainConfig(
     rail_vehicles=[rail_vehicle_loaded, rail_vehicle_empty],
     n_cars_by_type={
-        "Intermodal_Loaded": 200,
+        "Intermodal_Loaded": L,
         "Intermodal_Empty": 0,
     },
     train_length_meters=None,
@@ -103,9 +145,8 @@ hel_sans_buffers = alt.Locomotive.from_pydict(hel_new_dict)
 loco_vec = (
     []
     # + [hel.copy()]
-    + [alt.Locomotive.default()] * 7    # conventional trains
+    + [alt.Locomotive.default()] * n_locos    # conventional trains
 )
-
 
 # instantiate consist
 print("Building `Consist`")
@@ -114,35 +155,19 @@ loco_con = alt.Consist(
     SAVE_INTERVAL,
 )
 
-# tsb = alt.TrainSimBuilder(
-#     train_id="0",
-#     origin_id="Lubbock",
-#     destination_id="Clovis",
-#     train_config=train_config,
-#     loco_con=loco_con,
-# )
-
 
 tsb = alt.TrainSimBuilder(
     train_id="0",
-    origin_id="Amarillo",
-    destination_id="FortWorth",
+    origin_id=f"{origin}",
+    destination_id=f"{destination}",
     train_config=train_config,
     loco_con=loco_con,
 )
 
 # Load the network and construct the timed link path through the network.
 print("Loading `Network`")
-
-# location_map = alt.import_locations(
-#     alt.resources_root() / "double_sidings/FW-A/locations segment 485.csv"
-# )
-# network = alt.Network.from_file(
-#     alt.resources_root() / "double_sidings/FW-A/line segment 485.yaml"
-# )
-
-location_map = alt.import_locations(alt.resources_root() / "double_sidings/Garrett/speed/Network Locations.csv")
-network = alt.Network.from_file(alt.resources_root() / "double_sidings/Garrett/speed/Network.yaml")
+location_map = alt.import_locations(alt.resources_root() / location_root)
+network = alt.Network.from_file(alt.resources_root() / network_root)
 
 train_sim: alt.SpeedLimitTrainSim = tsb.make_speed_limit_train_sim(
     location_map=location_map,
@@ -186,13 +211,9 @@ print(f"Travel time: {ts_dict['state']['time_seconds']}s")
 
 print(f"Time to simulate: {t1 - t0:.5g}")
 raw_fuel_gigajoules = train_sim.get_energy_fuel_joules(False) / 1e9
-print(
-    f"Total raw fuel used with BEL and HEL buffers active: {raw_fuel_gigajoules:.6g} GJ"
-)
+print(f"Total raw fuel used with BEL and HEL buffers active: {raw_fuel_gigajoules:.6g} GJ")
 corrected_fuel_gigajoules = train_sim.get_energy_fuel_soc_corrected_joules() / 1e9
-print(
-    f"Total SOC-corrected fuel used with BEL and HEL buffers active: {corrected_fuel_gigajoules:.6g} GJ"
-)
+print(f"Total SOC-corrected fuel used with BEL and HEL buffers active: {corrected_fuel_gigajoules:.6g} GJ")
 
 assert len(ts_dict["history"]) > 1
 
@@ -234,14 +255,18 @@ ax2.set_xlabel("Distance (m)")
 ax2.set_title("Grade Profile")
 ax2.legend()
 
+
+# distance vs. elevation & grade
 df = pd.DataFrame({
     "total_dist_meters": total_dist_meters,
     "elevation_meters": elevation_meters,
     "grade": grade
 })
-
-df.to_excel("/Users/qianqiantong/Desktop/elevation_grade_data.xlsx", index=False)
+df.to_excel(f"/Users/qianqiantong/Desktop/elevation_{corridor}_grade_data.xlsx", index=False)
 print("saved to desktop!")
+
+# force
+max_idx, max_time, max_res = plot_util.plot_total_resistance(train_sim)
 
 # -------------------------------------
 # -------------------------------------

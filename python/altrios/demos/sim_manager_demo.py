@@ -32,7 +32,7 @@ rail_vehicles = [
 
 location_map = alt.import_locations(alt.resources_root() / "double_sidings/FW-A/locations segment 485.csv")
 network = alt.Network.from_file(alt.resources_root() / "double_sidings/FW-A/line segment 485.yaml")
-manual_dispatch_demand_file =   "dispatch_schedule_daily_throughput_2400.csv"    # "dispatch_schedule_freeflow.csv"
+manual_dispatch_demand_file = "dispatch_schedule_daily_throughput_600.csv"  # "dispatch_schedule_freeflow.csv"
 
 t1_import = time.perf_counter()
 print(f"Elapsed time to import rail vehicles, locations, and network: {t1_import - t0_import:.3g} s")
