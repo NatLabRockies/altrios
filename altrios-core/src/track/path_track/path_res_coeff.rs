@@ -53,8 +53,12 @@ impl LinSearchHint for &[PathResCoeff] {
         } else if dir != &Dir::Fwd {
             ensure!(
                 self.first().unwrap().get_offset() <= offset,
-                "{}\nOffset in reverse direction smaller than first slice offset at idx: {}!",
+                "{}\nOffset in reverse direction ({:.2} m) is smaller than first slice offset ({:.2} m) at idx: {}! \
+                This usually means the train's back end extends beyond the beginning of the path. \
+                Ensure the initial link(s) provide enough length for the train.",
                 format_dbg!(),
+                offset.get::<si::meter>(),
+                self.first().unwrap().get_offset().get::<si::meter>(),
                 idx
             );
             while offset < self[idx].get_offset() {

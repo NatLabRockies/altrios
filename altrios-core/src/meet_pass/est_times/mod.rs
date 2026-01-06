@@ -99,6 +99,74 @@ pub fn check_od_pair_valid(
     }
 }
 
+/// Collect previous links needed to accommodate train length when placing train at origin.
+/// 
+/// When a train is placed at an origin link, the back of the train may extend beyond
+/// the beginning of that link. This function collects previous links until there is
+/// enough total length to contain the entire train, or returns an error if the train
+/// is too long to fit on the available track.
+/// 
+/// # Arguments
+/// * `origin_link_idx` - The link where the train's front will be placed
+/// * `train_length` - The total length of the train
+/// * `network` - The network of links
+/// 
+/// # Returns
+/// A vector of link indices starting from the furthest previous link and ending with
+/// the origin link, ordered so the train can be placed with its front at the origin.
+fn get_links_for_train_placement(
+    origin_link_idx: LinkIdx,
+    train_length: si::Length,
+    network: &[Link],
+) -> anyhow::Result<Vec<LinkIdx>> {
+    let origin_link = &network[origin_link_idx.idx()];
+    
+    // If the train fits on the origin link alone, just return it
+    if origin_link.length >= train_length {
+        return Ok(vec![origin_link_idx]);
+    }
+    
+    // We need to collect previous links to accommodate the train
+    let mut link_path = Vec::with_capacity(8);
+    link_path.push(origin_link_idx);
+    
+    let mut total_length = origin_link.length;
+    let mut current_link_idx = origin_link_idx;
+    
+    // Keep adding previous links until we have enough length
+    while total_length < train_length {
+        let current_link = &network[current_link_idx.idx()];
+        
+        // Get the previous link (prefer idx_prev over idx_prev_alt)
+        let prev_link_idx = if current_link.idx_prev.is_real() {
+            current_link.idx_prev
+        } else if current_link.idx_prev_alt.is_real() {
+            current_link.idx_prev_alt
+        } else {
+            // No more previous links available
+            bail!(
+                "Train too long for initial route: train length ({:.2} m) exceeds available \
+                track length ({:.2} m). The origin link '{}' and its previous links do not \
+                provide enough length to place the train. Consider using a different origin \
+                or reducing train length.",
+                train_length.get::<si::meter>(),
+                total_length.get::<si::meter>(),
+                origin_link_idx
+            );
+        };
+        
+        let prev_link = &network[prev_link_idx.idx()];
+        total_length += prev_link.length;
+        link_path.push(prev_link_idx);
+        current_link_idx = prev_link_idx;
+    }
+    
+    // Reverse the path so it goes from previous links to origin
+    link_path.reverse();
+    
+    Ok(link_path)
+}
+
 /// Build the set of links from which a destination is still reachable.
 ///
 /// Performs a BACKWARD reachability flood starting from every destination link,
@@ -713,8 +781,12 @@ pub fn make_est_times<N: AsRef<[Link]>>(
         saved_sims.push(SavedSim {
             train_sim: {
                 let mut train_sim = Box::new(speed_limit_train_sim.clone());
+                // Get the links needed to place the train (may include previous links if train is longer than origin link)
+                let train_length = *train_sim.state.length.get_fresh(|| format_dbg!())?;
+                let link_path = get_links_for_train_placement(orig.link_idx, train_length, network)
+                    .with_context(|| format_dbg!())?;
                 train_sim
-                    .extend_path_tpc(network, &[orig.link_idx])
+                    .extend_path_tpc(network, &link_path)
                     .with_context(|| format_dbg!())?;
                 train_sim
             },
