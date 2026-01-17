@@ -54,7 +54,7 @@ import numpy as np
 from scipy.signal import savgol_filter
 from tenacity import retry, stop_after_attempt, wait_fixed
 from scipy.interpolate import interp1d
-
+import statistics
 import rasterio.mask
 
 cache = Cache("./network_builder_cache")
@@ -534,6 +534,25 @@ class NetworkBuilder:
             result = call_osm(LayerQuery)
             TrackData = result.ways
 
+            # Build a mapping of way_id -> inherited tags from parent relations
+            # This allows us to filter out ways that are part of industrial areas, etc.
+            way_relation_tags = {}
+            for relation in result.relations:
+                rel_tags = relation.tags
+                # Only propagate relevant tags that help with filtering
+                tags_to_propagate = {}
+                for key in ["landuse", "man_made", "railway"]:
+                    if key in rel_tags:
+                        tags_to_propagate[f"rel_{key}"] = rel_tags[key]
+
+                if tags_to_propagate:
+                    for member in relation.members:
+                        if member._type_value == "way":
+                            way_id = member.ref
+                            if way_id not in way_relation_tags:
+                                way_relation_tags[way_id] = {}
+                            way_relation_tags[way_id].update(tags_to_propagate)
+
             if "FEC" in layername:
                 x = 1
 
@@ -563,6 +582,12 @@ class NetworkBuilder:
                 )
                 WayGDF["Node Tags"] = str(NodeTags)
                 WayGDF["osm_id"] = Way.id
+
+                # Add inherited tags from parent relations (e.g., landuse from multipolygons)
+                if Way.id in way_relation_tags:
+                    for tag_key, tag_value in way_relation_tags[Way.id].items():
+                        WayGDF[tag_key] = tag_value
+
                 TrackGDF.append(WayGDF)
             for (
                 Node_
@@ -618,11 +643,21 @@ class NetworkBuilder:
             TrackGDF = TrackGDF[TrackGDF.usage != "industrial"]
             TrackGDF = TrackGDF[TrackGDF.usage != "tourism"]
 
+            # Filter out ways that are members of relations with landuse=industrial
+            # (e.g., container terminals, industrial areas)
+            if "rel_landuse" in TrackGDF.columns:
+                TrackGDF = TrackGDF[TrackGDF.rel_landuse != "industrial"]
+
+            # Filter out ways that are members of relations with railway=container_terminal
+            if "rel_railway" in TrackGDF.columns:
+                TrackGDF = TrackGDF[TrackGDF.rel_railway != "container_terminal"]
+
             TrackGDF = TrackGDF[TrackGDF.service != "construction"]
             TrackGDF = TrackGDF[TrackGDF.service != "spur"]
             TrackGDF = TrackGDF[TrackGDF.service != "yard"]
 
-            TrackGDF = TrackGDF[TrackGDF.building != "train_station"]
+            if "building" in TrackGDF.columns.values:
+                TrackGDF = TrackGDF[TrackGDF.building != "train_station"]
 
             TrackGDF = TrackGDF[TrackGDF.highway.isna()]
 
@@ -997,7 +1032,7 @@ class NetworkBuilder:
                     layername.replace("_bothdir", "_offhead"), trackdata
                 )
 
-    def build_links(self):
+    def build_links(self, buffer_diameter=0.1):
         """
         This is the function that does the linking.  The output is saved with
         _linked appended to the name.  The output of this will be used by the
@@ -1010,7 +1045,6 @@ class NetworkBuilder:
         """
 
         for layername in fiona.listlayers(self.geopackage_path):
-            buffer_diameter = 1
 
             if "_draped" in layername:
 
@@ -1556,7 +1590,7 @@ class NetworkBuilder:
 
         return build_complete
 
-    def indentify_links(self):
+    def indentify_links(self, min_link_length=1000, max_link_distance_from_coord=1500):
         """
         This function lines up individual links within the network to locations
         that are needed to specify train routes.  The locations are specified
@@ -1570,9 +1604,8 @@ class NetworkBuilder:
         None.
 
         """
-        min_link_length = 1000  # this is the minimum link length for the location
+        # this is the minimum link length for the location
         # maximum distance in meters link can be from coordinate specified for location
-        max_link_distance_from_coord = 1500
 
         locations = gpd.read_file(
             self.input_geopackage, layer=self.input_locations_layer_name
@@ -1721,6 +1754,7 @@ class NetworkBuilder:
                 trackdata["milepost_end"] = None
                 trackdata["milepost_subdiv_start"] = None
                 trackdata["milepost_subdiv_end"] = None
+                trackdata["link_subdiv"] = None
 
                 for idx, row in trackdata.iterrows():
                     buffer = row.geometry.buffer(25, cap_style="flat")
@@ -1802,7 +1836,7 @@ class NetworkBuilder:
                         ):
                             iteration_count = iteration_count + 1
                             # need two posts to establish direction.  offset restriction is to eliminate odd paths to find mileposts
-                            print("iterating")
+                            # print("iterating")
                             # tracking the length  of previous links so if I iterate through 3 or 4 links.  The offets get tracked properly.
                             base_offset = base_offset + current_length
                             next_row = trackdata[trackdata.yaml_idx == next_idx].copy()
@@ -1846,7 +1880,7 @@ class NetworkBuilder:
                         iteration_count = 0
                         while post_count < 2 and iteration_count < 100:
 
-                            print("iterating in reverse")
+                            # print("iterating in reverse")
                             iteration_count = iteration_count + 1
                             next_row = trackdata[trackdata.yaml_idx == prev_idx].copy()
 
@@ -1901,12 +1935,25 @@ class NetworkBuilder:
                             [np.atleast_1d(a) for a in next_links.milepost_subdiv]
                         )
 
+                        milepost_df = pd.DataFrame()
+                        milepost_df["post_values"] = post_value_set
+                        milepost_df["subdivs"] = subdiv_set
+                        milepost_df["offsets"] = offset_set
+
+                        subdiv_mode = milepost_df["subdivs"].unique()[0]
+
+                        milepost_df = milepost_df[milepost_df.subdivs == subdiv_mode]
+
                         mp_interpolator = interp1d(
-                            offset_set,
-                            post_value_set,
+                            milepost_df.offsets,
+                            milepost_df.post_values,
                             kind="linear",
-                            fill_value="extrapolate",
+                            fill_value=(
+                                milepost_df.post_values.values[0],
+                                milepost_df.post_values.values[-1],
+                            ),
                             assume_sorted=False,
+                            bounds_error=False,
                         )
                         trackdata.at[idx, "milepost_start"] = float(
                             mp_interpolator(0.0)
@@ -1914,7 +1961,9 @@ class NetworkBuilder:
                         trackdata.at[idx, "milepost_end"] = float(
                             mp_interpolator(curr_link_length)
                         )
-
+                        trackdata.at[idx, "link_subdiv"] = str(
+                            statistics.mode(subdiv_set)
+                        )
                         if row.yaml_idx == 229:  # 220 single post link
                             next_links
 
@@ -1944,14 +1993,35 @@ class NetworkBuilder:
 
             link_mp_end = link_data["milepost_end"].iloc[0]
             link_mp_start = link_data["milepost_start"].iloc[0]
+
+            if link_data.link_subdiv.values[0] is None:
+                link_data.loc[link_data.index[0], "link_subdiv"] = "No Subdivision"
+
+            # this bit is to handle places where the speed restriction file doesn't have the subdiv column(back compatiblity)
+            if "SUBDIVISION" not in restriction_df.columns:
+                if link_data.link_subdiv.isna().values[0]:
+                    restriction_df["SUBDIVISION"] = "No Subdivision"
+                else:
+                    restriction_df["SUBDIVISION"] = link_data.link_subdiv.values[0]
+
             applicable_restrictions = restriction_df[
                 (
                     (restriction_df["BEG MP"] <= link_mp_end)
                     & (restriction_df["END MP"] >= link_mp_end)
+                    & (
+                        restriction_df["SUBDIVISION"].str.contains(
+                            link_data.link_subdiv.values[0]
+                        )
+                    )
                 )
                 | (
                     (restriction_df["BEG MP"] <= link_mp_start)
                     & (restriction_df["END MP"] >= link_mp_end)
+                    & (
+                        restriction_df["SUBDIVISION"].str.contains(
+                            link_data.link_subdiv.values[0]
+                        )
+                    )
                 )
             ]
             speed_restict_dict["mp_dir"] = "unknown"
@@ -1975,9 +2045,10 @@ class NetworkBuilder:
             iteration_count = 0
             current_mp_value = link_data.milepost_start.iloc[0]
             while current_offset < float(link_length) and iteration_count < 100:
+
                 iteration_count = iteration_count + 1
 
-                if link_data.yaml_idx.values[0] == 1147:  # and iteration_count == 11:
+                if link_data.yaml_idx.values[0] == 1892:  # and iteration_count == 11:
                     x = 1
 
                 # this lets us march through from different directions and not grab two restrictions
@@ -2005,14 +2076,19 @@ class NetworkBuilder:
                         {
                             "offset_start_meters": float(current_offset),
                             "offset_end_meters": float(link_length),
-                            "speed_meters_per_second": float(60.0 / 2.23693629),
+                            "speed_meters_per_second": float(
+                                60.0 / 2.23693629 - 0.00001
+                            ),
                         }
                     )
                     current_offset = float(link_length)
 
                 elif current_restriction.shape[0] > 0:
                     # this case covers where there is a speed restriction that is found in the restriction table for the current offset
-
+                    if (
+                        link_data.yaml_idx.values[0] == 995
+                    ):  # and iteration_count == 11:
+                        x = 1
                     # drop row out of applicable restructions out of table so that logic won't get caught in loop
                     applicable_restrictions = applicable_restrictions[
                         applicable_restrictions["BEG MP"]
@@ -2046,17 +2122,43 @@ class NetworkBuilder:
                     # defaulting this to 60 for now.  will probalby need to make this a parameter at some point.
 
                     # this covers cases where you are going with or against milepost direction
-                    if link_mp_end > link_mp_start:
-                        next_restriction_mp = applicable_restrictions["BEG MP"].min()
-                    else:
-                        next_restriction_mp = applicable_restrictions["END MP"].min()
 
-                    next_restriction_offset = offset_interpolator(next_restriction_mp)
+                    if link_mp_end > link_mp_start:
+                        # sorting out if there is a restriction coming up if there was a gap in the restrictions.
+                        applicable_restrictions = applicable_restrictions[
+                            applicable_restrictions["BEG MP"] > current_mp_value
+                        ]
+                        if applicable_restrictions.shape[0] > 0:
+                            next_restriction_mp = applicable_restrictions[
+                                "BEG MP"
+                            ].min()
+                            next_restriction_offset = offset_interpolator(
+                                next_restriction_mp
+                            )
+                        else:
+                            next_restriction_offset = link_length
+                    else:
+                        applicable_restrictions = applicable_restrictions[
+                            applicable_restrictions["END MP"] < current_mp_value
+                        ]
+                        if applicable_restrictions.shape[0] > 0:
+                            next_restriction_mp = applicable_restrictions[
+                                "END MP"
+                            ].min()
+                            next_restriction_offset = offset_interpolator(
+                                next_restriction_mp
+                            )
+                        else:
+                            next_restriction_offset = link_length
+                            next_restriction_mp = link_mp_end
+
                     speed_restict_dict["speed_limits"].append(
                         {
                             "offset_start_meters": float(current_offset),
                             "offset_end_meters": float(next_restriction_offset),
-                            "speed_meters_per_second": float(60.0 / 2.23693629),
+                            "speed_meters_per_second": float(
+                                60.0 / 2.23693629 - 0.00002
+                            ),
                         },
                     )
                     current_offset = next_restriction_offset
@@ -2067,7 +2169,9 @@ class NetworkBuilder:
                         {
                             "offset_start_meters": float(current_offset),
                             "offset_end_meters": float(link_length),
-                            "speed_meters_per_second": float(60.0 / 2.23693629),
+                            "speed_meters_per_second": float(
+                                60.0 / 2.23693629 - 0.00003
+                            ),
                         }
                     )
                     current_offset = float(link_length)
@@ -2134,26 +2238,26 @@ if __name__ == "__main__":
 
     builds = [
         {
-            "input": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small.gpkg",
-            "output folder": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput",
-            "name": "SmallNetworkBuild",
+            "input": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small (Taconite).gpkg",
+            "output folder": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput (Taconite)",
+            "name": "TaconiteBuild",
             "savgol": True,
             "median": 250,
         },
-        {
-            "input": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small.gpkg",
-            "output folder": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput - No Savgol",
-            "name": "SmallNetworkBuild_NoSavGol",
-            "savgol": False,
-            "median": 250,
-        },
-        {
-            "input": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small.gpkg",
-            "output folder": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput - No Median",
-            "name": "SmallNetworkBuild - No Median",
-            "savgol": True,
-            "median": 1,
-        },
+        # {
+        #     "input": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small.gpkg",
+        #     "output folder": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput - No Savgol",
+        #     "name": "SmallNetworkBuild_NoSavGol",
+        #     "savgol": False,
+        #     "median": 250,
+        # },
+        # {
+        #     "input": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small.gpkg",
+        #     "output folder": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput - No Median",
+        #     "name": "SmallNetworkBuild - No Median",
+        #     "savgol": True,
+        #     "median": 1,
+        # },
     ]
 
     for build in builds:
@@ -2166,11 +2270,14 @@ if __name__ == "__main__":
             build["name"],
             "https://services.arcgis.com/xOi1kZaI0eWDREZv/arcgis/rest/services/NTAD_Rail_Mileposts/FeatureServer/0/query",
             {
-                "Amarillo_FortWorth": "/home/garrett/Documents/ALTRIOS_Extras/UT Data - DO NOT SHARE/bnsf-speed - Amarillo - UT Proprietary.csv"
+                "Amarillo_FortWorth": "/home/garrett/Documents/ALTRIOS_Extras/UT Data - DO NOT SHARE/bnsf-speed - Amarillo - UT Proprietary.csv",
+                "POLA_Barstow_Eastward": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/POLA Speed Restrictions/POLA_SpeedRestrictions_Eastward(Sheet1).csv",
+                "POLA_Barstow_Westward": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/POLA Speed Restrictions/POLA_SpeedRestrictions_Westward(Sheet1).csv",
+                "Flagstaff_Clovis": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/POLA Speed Restrictions/Flagstaff_to_Clovis_SpeedRestrictions.csv",
             },
         )
 
-        # # MyBuilder.build_network()
+        # MyBuilder.build_network()
 
         MyBuilder.input_geopackage_parsing()
         MyBuilder.download_osm_data()
