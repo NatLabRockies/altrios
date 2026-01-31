@@ -100,7 +100,9 @@ train_sim_with_cat.walk_timed_path(
 ts_dict = train_sim_with_cat.to_pydict()
 df_with_cat = pl.DataFrame({
     "meters": ts_dict['history']['offset_back_meters'],
+    "grid_input": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['cat_int']['history']['pwr_elec_in_watts'],
     "catenary_output": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['cat_int']['history']['pwr_elec_out_watts'],
+    "fc_input": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['fc']['history']['pwr_fuel_watts'],
     "fc_output": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['fc']['history']['pwr_shaft_watts'],
 })
 
@@ -129,10 +131,13 @@ train_sim_without_cat.walk_timed_path(
 ts_dict = train_sim_without_cat.to_pydict()
 df_without_cat = pl.DataFrame({
     "meters": ts_dict['history']['offset_back_meters'],
+    "grid_input": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['cat_int']['history']['pwr_elec_in_watts'],
     "catenary_output": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['cat_int']['history']['pwr_elec_out_watts'],
+    "fc_input": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['fc']['history']['pwr_fuel_watts'],
     "fc_output": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['fc']['history']['pwr_shaft_watts'],
 })
-
+df_without_cat.write_csv(alt.resources_route() / "demo_data/without_cat.csv")
+df_with_cat.write_csv(alt.resources_root() / "demo_data/with_cat.csv")
 print(f"Time to simulate: {t1 - t0:.5g}")
 raw_fuel_gigajoules = train_sim.get_energy_fuel_joules(False) / 1e9
 print(
