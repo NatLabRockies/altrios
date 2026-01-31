@@ -263,19 +263,25 @@ impl Consist {
         path_tpc: &crate::track::PathTpc,
         offset: si::Length,
     ) -> anyhow::Result<()> {
-        for cpl in path_tpc.cat_power_limits() {
-            if offset < cpl.offset_start {
-                break;
-            } else if offset <= cpl.offset_end {
-                self.state
-                    .pwr_cat_lim
-                    .update(cpl.power_limit, || format_dbg!())?;
-                return Ok(());
+        let pwr_cat_lim = {
+            let mut limit = si::Power::ZERO;
+            for cpl in path_tpc.cat_power_limits() {
+                if offset < cpl.offset_start {
+                    break;
+                } else if offset <= cpl.offset_end {
+                    limit = cpl.power_limit;
+                    break;
+                }
             }
+            self.state.pwr_cat_lim.update(limit, || format_dbg!())?;
+            limit
+        };
+        
+        // Propagate catenary power limit to individual locomotives
+        for loco in self.loco_vec.iter_mut() {
+            loco.set_cat_power_limit(Some(pwr_cat_lim))?;
         }
-        self.state
-            .pwr_cat_lim
-            .update(si::Power::ZERO, || format_dbg!())?;
+        
         Ok(())
     }
 

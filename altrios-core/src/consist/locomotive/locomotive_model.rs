@@ -25,6 +25,16 @@ impl Init for PowertrainType {
 impl SerdeAPI for PowertrainType {}
 
 impl LocoTrait for PowertrainType {
+    fn set_cat_power_limit(&mut self, pwr_cat_lim: Option<si::Power>) -> anyhow::Result<()> {
+        match self {
+            PowertrainType::ConventionalLoco(conv) => conv.set_cat_power_limit(pwr_cat_lim),
+            PowertrainType::DualModeLoco(dml) => dml.set_cat_power_limit(pwr_cat_lim),
+            PowertrainType::HybridLoco(hel) => hel.set_cat_power_limit(pwr_cat_lim),
+            PowertrainType::BatteryElectricLoco(bel) => bel.set_cat_power_limit(pwr_cat_lim),
+            PowertrainType::DummyLoco(dummy) => dummy.set_cat_power_limit(pwr_cat_lim),
+        }
+    }
+
     fn set_curr_pwr_max_out(
         &mut self,
         pwr_aux: Option<si::Power>,
@@ -924,6 +934,7 @@ impl Locomotive {
                 loco.fc.save_interval = save_interval;
                 loco.gen.save_interval = save_interval;
                 loco.edrv.save_interval = save_interval;
+                loco.cat_int.save_interval = save_interval;
             }
             PowertrainType::HybridLoco(loco) => {
                 loco.fc.save_interval = save_interval;
@@ -1425,6 +1436,10 @@ fn set_pwr_lims(state: &mut LocomotiveState, edrv: &ElectricDrivetrain) -> anyho
 impl LocoTrait for Locomotive {
     fn get_energy_loss(&self) -> anyhow::Result<si::Energy> {
         self.loco_type.get_energy_loss()
+    }
+
+    fn set_cat_power_limit(&mut self, pwr_cat_lim: Option<si::Power>) -> anyhow::Result<()> {
+        self.loco_type.set_cat_power_limit(pwr_cat_lim)
     }
 
     fn set_curr_pwr_max_out(

@@ -42,6 +42,9 @@ impl CatenaryInterface {
 }
 
 impl CatenaryInterface {
+    /// Catenary interface efficiency constant
+    const ETA: f64 = 0.99;
+
     pub fn new(
         pwr_out_max_watts: f64,
         save_interval: Option<usize>,
@@ -75,36 +78,18 @@ impl CatenaryInterface {
             .pwr_out_req_max
             .update(pwr_out_req_max, || format_dbg!())?;
 
-        self.state.eta.update(
-            uc::R * 0.99,
-            || format_dbg!(),
-        )?;
-        ensure!(
-            *self.state.eta.get_fresh(|| format_dbg!())? >= 0.0 * uc::R
-                || *self.state.eta.get_fresh(|| format_dbg!())? <= 1.0 * uc::R,
-            format!(
-                "{}\ncatenary interface eta ({}) must be between 0 and 1",
-                format_dbg!(
-                    *self.state.eta.get_fresh(|| format_dbg!())? >= 0.0 * uc::R
-                        || *self.state.eta.get_fresh(|| format_dbg!())? <= 1.0 * uc::R
-                ),
-                self.state
-                    .eta
-                    .get_fresh(|| format_dbg!())?
-                    .get::<si::ratio>()
-            )
-        );
+        let eta = uc::R * Self::ETA;
 
         self.state.pwr_elec_out.update(
             (*self.state.pwr_elec_in_max.get_fresh(|| format_dbg!())? 
-                * *self.state.eta.get_fresh(|| format_dbg!())?)
+                * eta)
                 .min(pwr_out_req_max),
             || format_dbg!(),
         )?;
 
         self.state.pwr_elec_in.update(
             *self.state.pwr_elec_out.get_fresh(|| format_dbg!())? 
-                / *self.state.eta.get_fresh(|| format_dbg!())?,
+                / eta,
             || format_dbg!(),
         )?;
 
@@ -146,8 +131,9 @@ impl ElectricMachine for CatenaryInterface {
         pwr_aux: Option<si::Power>,
     ) -> anyhow::Result<()> {
         ensure!(pwr_aux.is_none(), format_dbg!(pwr_aux.is_none()));
+        let eta = uc::R * Self::ETA;
         self.state.pwr_elec_out_max.update(
-            self.pwr_out_max.min(pwr_in_max * *self.state.eta.get_fresh(|| format_dbg!())?).max(si::Power::ZERO),
+            self.pwr_out_max.min(pwr_in_max * eta).max(si::Power::ZERO),
             || format_dbg!(),
         )?;
         Ok(())
@@ -176,8 +162,6 @@ impl ElectricMachine for CatenaryInterface {
 pub struct CatenaryInterfaceState {
     /// index
     pub i: TrackedState<usize>,
-    /// Component efficiency based on current power demand.
-    pub eta: TrackedState<si::Ratio>,
 
     // Current values
     /// Maximum potential necessary power requirement from boundary conditions

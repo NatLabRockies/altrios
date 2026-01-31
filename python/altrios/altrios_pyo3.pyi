@@ -185,7 +185,6 @@ class CatenaryInterface(SerdeAPI):
 class CatenaryInterfaceState(SerdeAPI):
     energy_elec_in_joules: float
     energy_loss_joules: float
-    eta: float
     i: int
     pwr_elec_in_watts: float
     pwr_elec_in_max_watts: float
@@ -201,7 +200,6 @@ class CatenaryInterfaceState(SerdeAPI):
 class CatenaryInterfaceStateHistoryVec(SerdeAPI):
     energy_elec_in_joules: list[float]
     energy_loss_joules: list[float]
-    eta: list[float]
     i: list[int]
     pwr_elec_in_watts: list[float]
     pwr_elec_in_max_watts: list[float]
