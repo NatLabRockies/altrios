@@ -361,10 +361,10 @@ impl SetSpeedTrainSim {
         // TODO: update this if length ever becomes dynamic
         self.state.length.mark_fresh(|| format_dbg!())?;
         // set the catenary power limit.  I'm assuming it is 0 at this point.
-        // self.loco_con.set_cat_power_limit(
-        //     &self.path_tpc,
-        //     *self.state.offset.get_fresh(|| format_dbg!())?,
-        // )?;
+        self.loco_con.set_cat_power_limit(
+             &self.path_tpc,
+             *self.state.offset.get_fresh(|| format_dbg!())?,
+        )?;
         // set aux power loads.  this will be calculated in the locomotive model and be loco type dependent.
         self.loco_con.set_pwr_aux(Some(true))?;
         let train_mass = Some(self.state.mass_compound().with_context(|| format_dbg!())?);

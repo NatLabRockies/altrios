@@ -3,20 +3,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 from typing import Tuple
 
-
-def extract_bel_from_train_sim(ts: alt.SetSpeedTrainSim) -> list:
-    ts_dict = ts.to_pydict()
-    ts_list = ts_dict["loco_con"]["loco_vec"]
-    loco_list = []
-    for loco in ts_list:
-        if "BatteryElectricLoco" in loco["loco_type"]:
-            loco_list.append(loco)
-    if not loco_list:
-        print("NO BEL IS FOUND IN CONSIST")
-        return False
-    return loco_list
-
-
 def extract_conv_from_train_sim(ts: alt.SetSpeedTrainSim) -> list:
     ts_dict = ts.to_pydict()
     ts_list = ts_dict["loco_con"]["loco_vec"]
@@ -28,6 +14,19 @@ def extract_conv_from_train_sim(ts: alt.SetSpeedTrainSim) -> list:
         print("NO CONVENTIONAL LOCO IS FOUND IN CONSIST")
         return False
     return loco_list
+
+def extract_dualmode_from_train_sim(ts: alt.SetSpeedTrainSim) -> list:
+    ts_dict = ts.to_pydict()
+    ts_list = ts_dict["loco_con"]["loco_vec"]
+    loco_list = []
+    for loco in ts_list:
+        if "DualModeLoco" in loco["loco_type"]:
+            loco_list.append(loco)
+    if not loco_list:
+        print("NO DUAL MODE LOCO IS FOUND IN CONSIST")
+        return False
+    return loco_list
+
 
 
 def extract_hel_from_train_sim(ts: alt.SetSpeedTrainSim) -> list:
@@ -42,6 +41,17 @@ def extract_hel_from_train_sim(ts: alt.SetSpeedTrainSim) -> list:
         return False
     return loco_list
 
+def extract_bel_from_train_sim(ts: alt.SetSpeedTrainSim) -> list:
+    ts_dict = ts.to_pydict()
+    ts_list = ts_dict["loco_con"]["loco_vec"]
+    loco_list = []
+    for loco in ts_list:
+        if "BatteryElectricLoco" in loco["loco_type"]:
+            loco_list.append(loco)
+    if not loco_list:
+        print("NO BEL IS FOUND IN CONSIST")
+        return False
+    return loco_list
 
 def plot_locos_from_ts(ts: alt.SetSpeedTrainSim, x: str, show_plots: bool = False):
     """

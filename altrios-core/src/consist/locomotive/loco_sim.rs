@@ -485,6 +485,14 @@ mod tests {
     }
 
     #[test]
+    fn test_dual_mode_locomotive_sim() {
+        let dml = Locomotive::default_dual_mode_loco();
+        let pt = PowerTrace::default();
+        let mut loco_sim = LocomotiveSimulation::new(dml, pt, None);
+        loco_sim.walk().unwrap();
+    }
+
+    #[test]
     fn test_hybrid_locomotive_sim() {
         let hel = Locomotive::default_hybrid_electric_loco();
         let pt = PowerTrace::default();

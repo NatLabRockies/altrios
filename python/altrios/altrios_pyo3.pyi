@@ -169,6 +169,52 @@ class ElectricDrivetrainStateHistoryVec(SerdeAPI):
     def __copy__(self) -> Self: ...
     def __len__(self) -> int: ...
 
+
+class CatenaryInterface(SerdeAPI):
+    history: CatenaryInterfaceStateHistoryVec
+    pwr_out_max_watts: float
+    save_interval: Optional[int]
+    state: CatenaryInterfaceState
+    @classmethod
+    def __init__(cls) -> None: ...
+    def clone(self) -> Self: ...
+    @classmethod
+    def default(cls) -> Self: ...
+    def __copy__(self) -> Self: ...
+
+class CatenaryInterfaceState(SerdeAPI):
+    energy_elec_in_joules: float
+    energy_loss_joules: float
+    eta: float
+    i: int
+    pwr_elec_in_watts: float
+    pwr_elec_in_max_watts: float
+    pwr_loss_watts: float
+    pwr_elec_out_max_watts: float
+    @classmethod
+    def __init__(cls) -> None: ...
+    def clone(self) -> Self: ...
+    @classmethod
+    def default(cls) -> Self: ...
+    def __copy__(self) -> Self: ...
+
+class CatenaryInterfaceStateHistoryVec(SerdeAPI):
+    energy_elec_in_joules: list[float]
+    energy_loss_joules: list[float]
+    eta: list[float]
+    i: list[int]
+    pwr_elec_in_watts: list[float]
+    pwr_elec_in_max_watts: list[float]
+    pwr_loss_watts: list[float]
+    pwr_elec_out_max_watts: list[float]
+    @classmethod
+    def __init__(cls) -> None: ...
+    def clone(self) -> Self: ...
+    @classmethod
+    def default(cls) -> Self: ...
+    def __copy__(self) -> Self: ...
+    def __len__(self) -> int: ...
+
 class FuelConverter(SerdeAPI):
     eta_interp: list[float]
     eta_max: float
@@ -305,6 +351,13 @@ class ConventionalLoco(SerdeAPI):
     edrv: ElectricDrivetrain
 
 @dataclass
+class DualModeLoco(SerdeAPI):
+    fc: FuelConverter
+    gen: Generator
+    edrv: ElectricDrivetrain
+    cat_int: CatenaryInterface
+
+@dataclass
 class HybridLoco(SerdeAPI):
     fuel_converter: FuelConverter
     generator: Generator
@@ -335,7 +388,7 @@ class Locomotive(SerdeAPI):
     @classmethod
     def __new__(
         cls,
-        loco_type: Union[ConventionalLoco, HybridLoco, BatteryElectricLoco, DummyLoco],
+        loco_type: Union[ConventionalLoco, DualModeLoco, HybridLoco, BatteryElectricLoco, DummyLoco],
         loco_params: LocoParams,
     ): ...
     @classmethod

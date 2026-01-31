@@ -22,10 +22,14 @@ fn altrios_pyo3(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<ConsistState>()?;
     m.add_class::<ConsistStateHistoryVec>()?;
     m.add_class::<ConventionalLoco>()?;
+    m.add_class::<DualModeLoco>()?;
     m.add_class::<DummyLoco>()?;
     m.add_class::<ElectricDrivetrain>()?;
     m.add_class::<ElectricDrivetrainState>()?;
     m.add_class::<ElectricDrivetrainStateHistoryVec>()?;
+    m.add_class::<CatenaryInterface>()?;
+    m.add_class::<CatenaryInterfaceState>()?;
+    m.add_class::<CatenaryInterfaceStateHistoryVec>()?;
     m.add_class::<Elev>()?;
     m.add_class::<EstTimeNet>()?;
     m.add_class::<FuelConverter>()?;

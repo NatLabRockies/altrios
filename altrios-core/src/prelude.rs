@@ -3,6 +3,9 @@ pub use crate::consist::locomotive::loco_sim::{LocomotiveSimulation, PowerTrace}
 pub use crate::consist::locomotive::powertrain::electric_drivetrain::{
     ElectricDrivetrain, ElectricDrivetrainState, ElectricDrivetrainStateHistoryVec,
 };
+pub use crate::consist::locomotive::powertrain::catenary_interface::{
+    CatenaryInterface, CatenaryInterfaceState, CatenaryInterfaceStateHistoryVec,
+};
 pub use crate::consist::locomotive::powertrain::fuel_converter::{
     FuelConverter, FuelConverterState, FuelConverterStateHistoryVec,
 };
@@ -14,7 +17,7 @@ pub use crate::consist::locomotive::powertrain::reversible_energy_storage::{
     ReversibleEnergyStorage, ReversibleEnergyStorageState, ReversibleEnergyStorageStateHistoryVec,
 };
 pub use crate::consist::locomotive::{
-    BatteryElectricLoco, ConventionalLoco, DummyLoco, HybridLoco, LocoParams, Locomotive,
+    BatteryElectricLoco, ConventionalLoco, DualModeLoco, DummyLoco, HybridLoco, LocoParams, Locomotive,
     LocomotiveState, LocomotiveStateHistoryVec, RESGreedyWithDynamicBuffers,
     RESGreedyWithDynamicBuffersBEL,
 };

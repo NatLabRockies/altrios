@@ -12,6 +12,7 @@ import os
 import shutil
 
 # local imports
+import altrios as alt
 from altrios import __version__
 
 MPS_PER_MPH = 1.0 / 2.237
@@ -214,6 +215,25 @@ def smoothen(signal: npt.ArrayLike, period: int = 9) -> npt.ArrayLike:
 def print_dt():
     print(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
+def add_catenary_to_network(
+    network: alt.Network,
+    uniform_power_limit_watts: float,
+) -> alt.Network:
+    network_dict = network.to_pydict()
+    # Iterate through all links in the dictionary
+    # network_dict is a tuple: (NetworkErrTol dict, [links])
+    # Skip index 0 which is the dummy link
+    for i in range(1, len(network_dict[1])):
+        link = network_dict[1][i]
+        # Add catenary power limit spanning the entire link
+        link['cat_power_limits'] = [{
+            'offset_start_meters': 0.0,
+            'offset_end_meters': link['length_meters'],
+            'power_limit_watts': uniform_power_limit_watts,
+            'district_id': None
+        }]
+
+    return alt.Network.from_pydict(network_dict)
 
 def copy_demo_files(demo_path: Path = Path("demos")):
     """

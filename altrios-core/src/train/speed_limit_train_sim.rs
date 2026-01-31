@@ -489,10 +489,11 @@ impl SpeedLimitTrainSim {
             .pwr_cat_lim
             .mark_fresh(|| format_dbg!())?;
         // set catenary power limit
-        // self.loco_con.set_cat_power_limit(
-        //     &self.path_tpc,
-        //     *self.state.offset.get_fresh(|| format_dbg!())?,
-        // )?;
+        self.loco_con
+            .set_cat_power_limit(
+                &self.path_tpc,
+                *self.state.offset.get_fresh(|| format_dbg!())?,
+            )?;
         // set aux power for the consist
         timer!(self
             .loco_con

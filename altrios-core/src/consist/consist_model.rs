@@ -462,6 +462,9 @@ impl Consist {
                             PowertrainType::ConventionalLoco(cl) => {
                                 *cl.fc.state.pwr_fuel.get_fresh(|| format_dbg!())?
                             }
+                            PowertrainType::DualModeLoco(dml) => {
+                                *dml.fc.state.pwr_fuel.get_fresh(|| format_dbg!())?
+                            }
                             PowertrainType::HybridLoco(hel) => {
                                 *hel.fc.state.pwr_fuel.get_fresh(|| format_dbg!())?
                             }
@@ -484,6 +487,7 @@ impl Consist {
                     .try_fold(si::Power::ZERO, |acc, loco| -> anyhow::Result<si::Power> {
                         let new = match &loco.loco_type {
                             PowertrainType::ConventionalLoco(_cl) => si::Power::ZERO,
+                            PowertrainType::DualModeLoco(_dml) => si::Power::ZERO,
                             PowertrainType::HybridLoco(hel) => {
                                 *hel.res.state.pwr_out_chemical.get_fresh(|| format_dbg!())?
                             }
@@ -526,6 +530,7 @@ impl Consist {
                 .iter()
                 .map(|loco| match &loco.loco_type {
                     PowertrainType::ConventionalLoco(conv) => conv.edrv.pwr_out_max,
+                    PowertrainType::DualModeLoco(dml) => dml.edrv.pwr_out_max,
                     PowertrainType::HybridLoco(hel) => hel.edrv.pwr_out_max,
                     PowertrainType::BatteryElectricLoco(bel) => bel.edrv.pwr_out_max,
                     // really big number that is not inf to avoid null in json
@@ -660,6 +665,7 @@ impl LocoTrait for Consist {
                     .try_fold(si::Power::ZERO, |acc, loco| -> anyhow::Result<si::Power> {
                         let new = match &loco.loco_type {
                             PowertrainType::ConventionalLoco(_) => si::Power::ZERO,
+                            PowertrainType::DualModeLoco(_) => si::Power::ZERO,
                             PowertrainType::HybridLoco(_) => {
                                 *loco.state.pwr_out_max.get_fresh(|| format_dbg!())?
                             }
