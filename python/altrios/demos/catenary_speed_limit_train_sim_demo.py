@@ -13,7 +13,7 @@ sns.set_theme()
 
 SHOW_PLOTS = alt.utils.show_plots()
 
-SAVE_INTERVAL = 1
+SAVE_INTERVAL = 60
 
 # Build the train config
 print("Loading rail vehicles")
@@ -29,8 +29,8 @@ print("Loading `TrainConfig`")
 train_config = alt.TrainConfig(
     rail_vehicles=[rail_vehicle_loaded, rail_vehicle_empty],
     n_cars_by_type={
-        "Manifest_Loaded": 20,
-        "Manifest_Empty": 20,
+        "Manifest_Loaded": 30,
+        "Manifest_Empty": 30,
     },
     train_length_meters=None,
     train_mass_kilograms=None,
@@ -56,8 +56,8 @@ loco_con = alt.Consist(
 # Instantiate the intermediate `TrainSimBuilder`
 tsb = alt.TrainSimBuilder(
     train_id="0",
-    origin_id="Minneapolis",
-    destination_id="Superior",
+    origin_id="Superior",
+    destination_id="Minneapolis",
     train_config=train_config,
     loco_con=loco_con,
 )
@@ -100,10 +100,12 @@ train_sim_with_cat.walk_timed_path(
 ts_dict = train_sim_with_cat.to_pydict()
 df_with_cat = pl.DataFrame({
     "meters": ts_dict['history']['offset_back_meters'],
+    "seconds": ts_dict['history']['time_seconds'],
     "grid_input": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['cat_int']['history']['pwr_elec_in_watts'],
     "catenary_output": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['cat_int']['history']['pwr_elec_out_watts'],
     "fc_input": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['fc']['history']['pwr_fuel_watts'],
     "fc_output": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['fc']['history']['pwr_shaft_watts'],
+    "edrive_output": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['edrv']['history']['pwr_mech_prop_out_watts'],
 })
 
 train_sim_without_cat: alt.SpeedLimitTrainSim = tsb.make_speed_limit_train_sim(
@@ -131,22 +133,21 @@ train_sim_without_cat.walk_timed_path(
 ts_dict = train_sim_without_cat.to_pydict()
 df_without_cat = pl.DataFrame({
     "meters": ts_dict['history']['offset_back_meters'],
+    "seconds": ts_dict['history']['time_seconds'],
     "grid_input": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['cat_int']['history']['pwr_elec_in_watts'],
     "catenary_output": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['cat_int']['history']['pwr_elec_out_watts'],
     "fc_input": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['fc']['history']['pwr_fuel_watts'],
     "fc_output": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['fc']['history']['pwr_shaft_watts'],
+    "edrive_output": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['edrv']['history']['pwr_mech_prop_out_watts'],
 })
-df_without_cat.write_csv(alt.resources_route() / "demo_data/without_cat.csv")
-df_with_cat.write_csv(alt.resources_root() / "demo_data/with_cat.csv")
-print(f"Time to simulate: {t1 - t0:.5g}")
-raw_fuel_gigajoules = train_sim.get_energy_fuel_joules(False) / 1e9
-print(
-    f"Total raw fuel used with BEL and HEL buffers active: {raw_fuel_gigajoules:.6g} GJ"
-)
-corrected_fuel_gigajoules = train_sim.get_energy_fuel_soc_corrected_joules() / 1e9
-print(
-    f"Total SOC-corrected fuel used with BEL and HEL buffers active: {corrected_fuel_gigajoules:.6g} GJ"
-)
+df_without_cat.with_columns(
+    pl.col("meters").mul(0.000621371).alias("miles"),
+    pl.selectors.ends_with("put").cum_sum().mul(SAVE_INTERVAL/3600.0/1e6)
+).write_csv(alt.resources_root() / "demo_data/without_cat2.csv")
+df_with_cat.with_columns(
+    pl.col("meters").mul(0.000621371).alias("miles"),
+    pl.selectors.ends_with("put").cum_sum().mul(SAVE_INTERVAL/3600.0/1e6)
+).write_csv(alt.resources_root() / "demo_data/with_cat2.csv")
 assert len(ts_dict["history"]) > 1
 
 # %%
