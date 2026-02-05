@@ -2133,27 +2133,27 @@ if __name__ == "__main__":
     # MyBuilder.create_virtual_raster()
 
     builds = [
+        # {
+            # "input": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small.gpkg",
+            # "output folder": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput",
+            # "name": "SmallNetworkBuild",
+            # "savgol": True,
+            # "median": 250,
+        # },
         {
-            "input": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small.gpkg",
-            "output folder": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput",
-            "name": "SmallNetworkBuild",
-            "savgol": True,
-            "median": 250,
-        },
-        {
-            "input": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small.gpkg",
-            "output folder": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput - No Savgol",
-            "name": "SmallNetworkBuild_NoSavGol",
+            "input": Path(__file__).parents[2] / "Demo_Network/Demo_Network.gpkg",
+            "output folder": Path(__file__).parents[2] / "SouthCentralTX",
+            "name": "SouthCentralTX_NoSavgol50",
             "savgol": False,
-            "median": 250,
+            "median": 50,
         },
-        {
-            "input": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small.gpkg",
-            "output folder": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput - No Median",
-            "name": "SmallNetworkBuild - No Median",
-            "savgol": True,
-            "median": 1,
-        },
+        # {
+            # "input": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/NetworkInput_small.gpkg",
+            # "output folder": "/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/Network Builder Test Small Ouput - No Median",
+            # "name": "SmallNetworkBuild - No Median",
+            # "savgol": True,
+            # "median": 1,
+        # },
     ]
 
     for build in builds:
@@ -2165,12 +2165,13 @@ if __name__ == "__main__":
             build["output folder"],
             build["name"],
             "https://services.arcgis.com/xOi1kZaI0eWDREZv/arcgis/rest/services/NTAD_Rail_Mileposts/FeatureServer/0/query",
-            {
-                "Amarillo_FortWorth": "/home/garrett/Documents/ALTRIOS_Extras/UT Data - DO NOT SHARE/bnsf-speed - Amarillo - UT Proprietary.csv"
-            },
+            {},
+            # {
+            #     "Amarillo_FortWorth": "/home/garrett/Documents/ALTRIOS_Extras/UT Data - DO NOT SHARE/bnsf-speed - Amarillo - UT Proprietary.csv"
+            # },
         )
 
-        # # MyBuilder.build_network()
+        # MyBuilder.build_network()
 
         MyBuilder.input_geopackage_parsing()
         MyBuilder.download_osm_data()
@@ -2178,15 +2179,15 @@ if __name__ == "__main__":
         MyBuilder.create_reverse_links()
         MyBuilder.calc_offsets_headings()
 
-        # MyBuilder.download_elevation()
-        # MyBuilder.create_virtual_raster()
+        MyBuilder.download_elevation()
+        MyBuilder.create_virtual_raster()
 
         MyBuilder.drape_geometry(
             apply_savgol=build["savgol"],
             circle_buffer_m=build["median"],
-            alt_vrt="/home/garrett/Documents/ALTRIOS_Extras/Tomas Networks/USA_3DEP.vrt",
+            # alt_vrt="",
         )
         MyBuilder.build_links()
         MyBuilder.indentify_links()
-        MyBuilder.apply_mileposts()
+        # MyBuilder.apply_mileposts()
         MyBuilder.convert_to_yaml()  # speed_limit_mph=70)
