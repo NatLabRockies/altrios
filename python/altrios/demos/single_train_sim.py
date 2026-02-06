@@ -9,11 +9,11 @@ import os
 from copy import copy
 import sys
 
-# corridor = 'Amarillo-FortWorth'
-# origin = 'Amarillo'
-# destination = 'Fort Worth - BNSF'
-# location_root = "double_sidings/Garrett/Amarillo_FortWorth - All Filtering/Network Locations.csv"
-# network_root = "double_sidings/Garrett/Amarillo_FortWorth - All Filtering/Network.yaml"
+corridor = 'Amarillo-FortWorth'
+origin = 'Amarillo'
+destination = 'Fort Worth - BNSF'
+location_root = "double_sidings/Garrett/Amarillo_FortWorth -  No Savgol/Network Locations.csv"
+network_root = "double_sidings/Garrett/Amarillo_FortWorth -  No Savgol/Network.yaml"
 
 # corridor = 'Amarillo-FortWorth'
 # origin = 'Amarillo'
@@ -27,11 +27,11 @@ import sys
 # location_root = "double_sidings/corridor/Clovis-Flagstaff/locations.csv"
 # network_root = "double_sidings/corridor/Clovis-Flagstaff/Network.yaml"
 
-corridor = 'Clovis-Flagstaff'
-origin = 'Clovis'
-destination = 'FLagstaff'
-location_root = "double_sidings/Garrett/Flagstaff_Clovis/Network Locations.csv"
-network_root = "double_sidings/Garrett/Flagstaff_Clovis/Network.yaml"
+# corridor = 'Clovis-Flagstaff'
+# origin = 'Clovis'
+# destination = 'FLagstaff'
+# location_root = "double_sidings/Garrett/Flagstaff_Clovis - No Savgol/Network Locations.csv"
+# network_root = "double_sidings/Garrett/Flagstaff_Clovis - No Savgol/Network.yaml"
 
 # corridor = 'Barstow-LongBeach'
 # origin = 'Barstow'
@@ -275,8 +275,7 @@ if SHOW_PLOTS:
     plt.tight_layout()
     plt.show()
 
-# Impact of sweep of battery capacity TODO: make this happen
-
+# Impact of sweep of battery capacity
 # whether to run assertions, enabled by default
 ENABLE_ASSERTS = os.environ.get("ENABLE_ASSERTS", "true").lower() == "true"
 # whether to override reference files used in assertions, disabled by default

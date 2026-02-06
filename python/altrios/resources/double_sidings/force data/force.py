@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import os
 
 
-corridor_name = "clovis"
+corridor_name = "amarillo"    # clovis or amarillo.xlsx
 file_path = f"/Users/qianqiantong/PycharmProjects/altrios-private/altrios/python/altrios/resources/double_sidings/force data/{corridor_name}.xlsx"
 output_dir = "/Users/qianqiantong/PycharmProjects/altrios-private/altrios/python/altrios/resources/double_sidings/force data/corridor_plots"
 os.makedirs(output_dir, exist_ok=True)
@@ -82,9 +82,9 @@ energy_compare_cols = [
     "usgs_no_savgol_total_energy_GJ"
 ]
 energy_labels_usgs = [
-    "Filtered USGS Data",
-    "USGS Data Without Mean Filter",
-    "USGS Data Without Savgol Filter"
+    "USGS With Median and Savitsky-Golay Filter",   # Filtered USGS Data
+    "USGS With Mean Filter",    # USGS Data Without Mean Filter
+    "USGS Baseline Processing"   # USGS Data Without Savgol Filter
 ]
 
 plot_energy_or_force(
@@ -100,9 +100,8 @@ plot_energy_or_force(
     filename=f"energy_{corridor_name}.png"
 )
 
-# ============================================================
+
 # FORCE SETTINGS
-# ============================================================
 force_base = "track_chart_max_res_newtons"
 force_compare_cols = [
     "usgs_filtered_max_res_newtons",
