@@ -475,7 +475,9 @@ class NetworkBuilder:
                 print("downloading layer data for layer: {}".format(layername))
                 geolayer = gpd.read_file(self.geopackage_path, layer=layername)
                 # get the bounding box for the layer and add a bit to it.
+
                 bounds = tuple(geolayer.buffer(0.5).total_bounds)
+
                 LayerTiffDir = Path(self.data_folder / "Elevation Data" / layername)
                 LayerTiffDir.mkdir(parents=True, exist_ok=True)
                 # Download DEM
