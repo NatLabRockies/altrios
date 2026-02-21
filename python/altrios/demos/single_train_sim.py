@@ -9,41 +9,16 @@ import os
 from copy import copy
 import sys
 
-corridor = 'Amarillo-FortWorth'
-origin = 'Amarillo'
-destination = 'Fort Worth - BNSF'
-location_root = "double_sidings/Garrett/Amarillo_FortWorth -  No Savgol/Network Locations.csv"
-network_root = "double_sidings/Garrett/Amarillo_FortWorth -  No Savgol/Network.yaml"
 
-# corridor = 'Amarillo-FortWorth'
-# origin = 'Amarillo'
-# destination = 'FortWorth'
-# location_root = "double_sidings/corridor/Amarillo-FortWorth/locations.csv"
-# network_root = "double_sidings/corridor/Amarillo-FortWorth/Network.yaml"
+origin = 'Galveston'
+destination = 'Rosenburg'
+# origin = "Amarillo"
+# destination = "FortWorth"
+corridor = f"{origin}-{destination}"
 
-# corridor = 'Clovis-Flagstaff'
-# origin = 'Clovis'
-# destination = 'Flagstaff'
-# location_root = "double_sidings/corridor/Clovis-Flagstaff/locations.csv"
-# network_root = "double_sidings/corridor/Clovis-Flagstaff/Network.yaml"
+location_root = f"double_sidings/corridor/{corridor}/locations.csv"
+network_root = f"double_sidings/corridor/{corridor}/Network.yaml"
 
-# corridor = 'Clovis-Flagstaff'
-# origin = 'Clovis'
-# destination = 'FLagstaff'
-# location_root = "double_sidings/Garrett/Flagstaff_Clovis - No Savgol/Network Locations.csv"
-# network_root = "double_sidings/Garrett/Flagstaff_Clovis - No Savgol/Network.yaml"
-
-# corridor = 'Barstow-LongBeach'
-# origin = 'Barstow'
-# destination = 'LongBeach'
-# location_root = f"double_sidings/corridor/{corridor}/locations.csv"
-# network_root = f"double_sidings/corridor/{corridor}/Network.yaml"
-
-# corridor = 'Barstow-LongBeach'
-# origin = 'Barstow'
-# destination = 'POLA'
-# location_root = "double_sidings/Garrett/POLA_Barstow_Eastward/Network Locations.csv"
-# network_root = "double_sidings/Garrett/POLA_Barstow_Eastward/Network.yaml"
 
 # define train batch size and locomotives
 if len(sys.argv) > 1:
@@ -208,6 +183,7 @@ t1 = time.perf_counter()
 
 ts_dict = train_sim.to_pydict()
 print(f"Travel time: {ts_dict['state']['time_seconds']}s")
+print(f"Travel time: {round((ts_dict['state']['time_seconds'] / 3600), 2)}hrs")
 
 print(f"Time to simulate: {t1 - t0:.5g}")
 raw_fuel_gigajoules = train_sim.get_energy_fuel_joules(False) / 1e9

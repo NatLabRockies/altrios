@@ -235,7 +235,7 @@ if __name__ == "__main__":
 
     corridor_meta = load_corridor_metadata()
 
-    corridors = ["Somerville-Temple", "Galveston-Rosenburg", "Rosenburg-Somerville", "Temple-FtWorth"]  #  \\ list(corridor_meta.keys())
+    corridors = ["Galveston-Rosenburg", "Rosenburg-Somerville", "Temple-FtWorth", "Somerville-Temple"]  #  \\ list(corridor_meta.keys())
 
     for corridor in corridors:
         run_corridor_pipeline(corridor, corridor_meta[corridor])

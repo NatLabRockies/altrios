@@ -8,6 +8,8 @@ from copy import copy
 
 import altrios as alt
 from altrios.demos import plot_util
+from altrios.demos.single_train_sim import corridor
+
 sns.set_theme()
 
 
@@ -141,8 +143,9 @@ print("Loading `Network`")
 #     alt.resources_root() / "double_sidings/FW-A/line segment 485.yaml"
 # )
 
-location_map = alt.import_locations(alt.resources_root() / "double_sidings/Garrett/speed/Network Locations.csv")
-network = alt.Network.from_file(alt.resources_root() / "double_sidings/Garrett/speed/Network.yaml")
+print("root", alt.resources_root())
+location_map = alt.import_locations(alt.resources_root() / "double_sidings/corridor/speed/Network Locations.csv")
+network = alt.Network.from_file(alt.resources_root() / "double_sidings/corridor/speed/Network.yaml")
 
 train_sim: alt.SpeedLimitTrainSim = tsb.make_speed_limit_train_sim(
     location_map=location_map,
