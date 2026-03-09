@@ -1,52 +1,77 @@
 # %%
-from altrios import sim_manager
-from altrios import utilities, defaults
-import altrios as alt
+import argparse
+import time
+from pathlib import Path
+
 import numpy as np
 import matplotlib.pyplot as plt
-import time
 import seaborn as sns
 import polars as pl
-from pathlib import Path
+
+import altrios as alt
+from altrios import sim_manager, utilities, defaults
 from altrios.train_planner import planner_config, manual_dispatch_demand
 
 sns.set_theme()
 
 SHOW_PLOTS = alt.utils.show_plots()
-# %
 
-plot_dir = Path() / "plots"
-# make the dir if it doesn't exist
-plot_dir.mkdir(exist_ok=True)
-# print("alt.resources_root()",alt.resources_root())
 
 # %%
+parser = argparse.ArgumentParser()
 
-t0_import = time.perf_counter()
+parser.add_argument("--network", required=True)
+parser.add_argument("--locations", required=True)
+parser.add_argument("--dispatch", required=True)
+parser.add_argument("--output", required=True)
+
+args = parser.parse_args()
+
+network_path = Path(args.network)
+locations_path = Path(args.locations)
+# origin = 'Galveston'
+# destination = 'Rosenburg'
+# corridor = f"{origin}-{destination}"
+#
+# locations_path = f"double_sidings/corridor/{corridor}/locations.csv"
+# network_path = f"double_sidings/corridor/{corridor}/Network.yaml"
+
+dispatch_path = Path(args.dispatch)
+output_path = Path(args.output)
+
+output_path.mkdir(parents=True, exist_ok=True)
+
+# %%
 t0_total = time.perf_counter()
+t0_import = time.perf_counter()
 
 rail_vehicles = [
     alt.RailVehicle.from_file(vehicle_file, skip_init=False)
-    for vehicle_file in Path(alt.resources_root() / "rolling_stock/").glob("*.yaml")
+    for vehicle_file in (alt.resources_root() / "rolling_stock").glob("*.yaml")
 ]
 
-location_map = alt.import_locations(alt.resources_root() / "double_sidings/FW-A/locations segment 485.csv")
-network = alt.Network.from_file(alt.resources_root() / "double_sidings/FW-A/line segment 485.yaml")
-manual_dispatch_demand_file = "dispatch_schedule_daily_throughput_600.csv"  # "dispatch_schedule_freeflow.csv"
+location_map = alt.import_locations(str(locations_path))
+network = alt.Network.from_file(str(network_path))
 
 t1_import = time.perf_counter()
-print(f"Elapsed time to import rail vehicles, locations, and network: {t1_import - t0_import:.3g} s")
+print(f"Import time: {t1_import - t0_import:.3g} s")
 
-manual_dispatch_schedule_path = alt.resources_root() / "double_sidings" / "timetable" / manual_dispatch_demand_file
-dispatch_scheduler = manual_dispatch_demand.manual_dispatch_demand(manual_dispatch_schedule_path)
+
+# %%
+dispatch_scheduler = manual_dispatch_demand.manual_dispatch_demand(
+    str(dispatch_path)
+)
 
 train_planner_config = planner_config.TrainPlannerConfig(
-            cars_per_locomotive={"Default": 50},
-            target_cars_per_train={"Default": 90},
-            loco_type_shares={'BEL': 0, 'Diesel_Large': 1},
-            require_diesel=True,
-            dispatch_scheduler = dispatch_scheduler)
+    cars_per_locomotive={"Default": 50},
+    target_cars_per_train={"Default": 90},
+    loco_type_shares={"BEL": 0, "Diesel_Large": 1},
+    require_diesel=True,
+    dispatch_scheduler=dispatch_scheduler,
+)
 
+
+# %%
 t0_main = time.perf_counter()
 
 (
@@ -59,26 +84,24 @@ t0_main = time.perf_counter()
     timed_paths,
     train_consist_plan_untrimmed,
     travel_time,
-    # lifts_timetable,
 ) = sim_manager.main(
     network=network,
     rail_vehicles=rail_vehicles,
     location_map=location_map,
     train_planner_config=train_planner_config,
-    debug=True,
+    debug=False,
 )
 
 t1_main = time.perf_counter()
-print(f"Elapsed time to run `sim_manager.main()`: {t1_main - t0_main:.3g} s")
+print(f"sim_manager.main() time: {t1_main - t0_main:.3g} s")
 
-# print(f"Timetable for lifts is: {lifts_timetable}")
 
 # %%
-t0_train_sims = time.perf_counter()
 speed_limit_train_sims.set_save_interval(100)
 
+t0_train = time.perf_counter()
 
-(sims, refuel_sessions) = alt.run_speed_limit_train_sims(
+sims, refuel_sessions = alt.run_speed_limit_train_sims(
     speed_limit_train_sims=speed_limit_train_sims,
     network=network,
     train_consist_plan_py=train_consist_plan,
@@ -86,25 +109,22 @@ speed_limit_train_sims.set_save_interval(100)
     refuel_facilities_py=refuel_facilities,
     timed_paths=[alt.TimedLinkPath.from_pydict(tp) for tp in timed_paths],
 )
-t1_train_sims = time.perf_counter()
-print(f"Elapsed time to run train sims: {t1_train_sims - t0_train_sims:.3g} s")
 
-# # travel time record
+t1_train = time.perf_counter()
+print(f"Train sims time: {t1_train - t0_train:.3g} s")
+
+
+# %%
 train_times = pl.DataFrame(travel_time)
-multiple_siding_results = "travel_time_" + manual_dispatch_demand_file
-multiple_siding_results_path = alt.resources_root() / "double_sidings" / "results" / multiple_siding_results
-train_times.write_csv(multiple_siding_results_path)
-print("travel time obtained！")
 
+output_file = output_path / f"travel_time_{dispatch_path.name}"
+train_times.write_csv(output_file)
 
-t_train_time = sum([sim["state"]["time_seconds"] for sim in sims.to_pydict()])
-print(f"Total train-seconds simulated: {t_train_time} s")
+print(f"Travel time saved to {output_file}")
 
-
-# %%
-t0_summary_sims = time.perf_counter()
 speed_limit_train_sims.set_save_interval(None)
-(summary_sims, summary_refuel_sessions) = alt.run_speed_limit_train_sims(
+
+summary_sims, summary_refuel_sessions = alt.run_speed_limit_train_sims(
     speed_limit_train_sims=speed_limit_train_sims,
     network=network,
     train_consist_plan_py=train_consist_plan,
@@ -112,23 +132,8 @@ speed_limit_train_sims.set_save_interval(None)
     refuel_facilities_py=refuel_facilities,
     timed_paths=[alt.TimedLinkPath.from_pydict(tp) for tp in timed_paths],
 )
-t1_summary_sims = time.perf_counter()
-print(f"Elapsed time to build and run summary sims: {t1_summary_sims - t0_summary_sims:.3g} s")
 
-# %%
-t0_tolist = time.perf_counter()
-sims_list = sims.to_pydict()
-t1_tolist = time.perf_counter()
-print(f"Elapsed time to run `tolist()`: {t1_tolist - t0_tolist:.3g} s")
-
-sim0 = sims_list[0]
-
-t0_main = time.perf_counter()
 e_total_fuel_mj = summary_sims.get_energy_fuel_joules(annualize=False) / 1e9
-t1_main = time.perf_counter()
-
-print(f"Elapsed time to get total fuel energy: {t1_main - t0_main:.3g} s")
-print(f"Total fuel energy used: {e_total_fuel_mj:.3g} GJ")
 
 v_total_fuel_gal = (
     summary_sims.get_energy_fuel_joules(annualize=False)
@@ -139,66 +144,28 @@ v_total_fuel_gal = (
     * utilities.GALLONS_PER_LITER
 )
 
+print(f"Total fuel energy: {e_total_fuel_mj:.3g} GJ")
 print(f"Total fuel used: {v_total_fuel_gal:.3g} gallons")
-print(f"Total elapsed time: {time.perf_counter() - t0_total} s")
+print(f"Total runtime: {time.perf_counter() - t0_total:.3g} s")
 
 
-# %%
+if SHOW_PLOTS:
+    sims_list = sims.to_pydict()
 
-for idx, sim_dict in enumerate(sims_list[:10]):
+    for idx, sim_dict in enumerate(sims_list[:5]):
 
-    loco0 = next(iter(sim_dict["loco_con"]["loco_vec"]))
-    loco0_type = next(iter(loco0["loco_type"].values()))
-
-    if len(sim_dict["loco_con"]["loco_vec"]) > 1:
-        loco1 = next(iter(sim_dict["loco_con"]["loco_vec"]))
-        loco1_type = next(iter(loco1["loco_type"].values()))
-        #plt.suptitle(f"sim #: {idx}")
-    number_of_plots = 1
-    if "fc" in loco0_type:
-        number_of_plots += 1
-    if "res" in loco1_type:
-        number_of_plots += 1
-    fig, ax = plt.subplots(number_of_plots, 1, sharex=True)
-    fig.suptitle(f"sim #: {idx + 1}")
-    ax_idx = -1
-    if "fc" in loco0_type:
-        ax_idx += 1
-        ax[ax_idx].plot(
-            np.array(sim_dict["history"]["time_seconds"]) / 3_600,
-            np.array(loco0_type["fc"]["history"]["pwr_fuel_watts"]) / 1e6,
-            # label='fuel'
+        fig, ax = plt.subplots(1, 1)
+        ax.plot(
+            np.array(sim_dict["history"]["time_seconds"]) / 3600,
+            sim_dict["history"]["speed_meters_per_second"],
+            label="actual",
         )
-
-        ax[ax_idx].set_ylabel("Single Loco.\nFuel Power [MW]")
-
-    if "res" in loco1_type:
-        ax_idx += 1
-        ax[ax_idx].plot(
-            np.array(sim_dict["history"]["time_seconds"]) / 3_600,
-            loco1_type["res"]["history"]["soc"],
+        ax.plot(
+            np.array(sim_dict["history"]["time_seconds"]) / 3600,
+            sim_dict["history"]["speed_limit_meters_per_second"],
+            label="limit",
         )
-        ax[ax_idx].set_ylabel("SOC")
-
-    ax[-1].plot(
-        np.array(sim_dict["history"]["time_seconds"]) / 3_600,
-        sim_dict["history"]["speed_meters_per_second"],
-        label="actual",
-    )
-    ax[-1].plot(
-        np.array(sim_dict["history"]["time_seconds"]) / 3_600,
-        sim_dict["history"]["speed_limit_meters_per_second"],
-        label="limit",
-    )
-
-    ax[-1].legend()
-    ax[-1].set_xlabel("Time [hr]")
-    ax[-1].set_ylabel("Speed [m/s]")
-
-    fig.tight_layout()
-
-    if SHOW_PLOTS:
+        ax.set_xlabel("Time [hr]")
+        ax.set_ylabel("Speed [m/s]")
+        ax.legend()
         plt.show()
-
-
-# %%

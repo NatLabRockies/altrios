@@ -94,6 +94,20 @@ def main(
     )
     t1_ptc = time.perf_counter()
 
+    # get planned departure time from train consist plan
+    # planned_times = train_consist_plan.select(
+    #     ["Train_ID", "Departure_Time_Planned_Hr"]
+    # )
+
+    planned_times = (
+        train_consist_plan
+        .select(["Train_ID", "" "Departure_Time_Planned_Hr"])
+        .unique(subset="Train_ID")
+        .sort("Train_ID")
+    )
+
+    # print("planned_times from train_consist_plan:", planned_times)
+
     if grid_emissions_factors is None:
         grid_emissions_factors = metrics.import_emissions_factors_cambium(
             location_map=location_map, scenario_year=scenario_year
@@ -154,15 +168,29 @@ def main(
         }
     )
 
-    travel_time = [
-        {
-            "Train_ID": str(sim["train_id"]),
-            "Departure_Time_Actual_Hr": round(tp[0]["time_seconds"] / 3600, 4),
-            "Arrival_Time_Actual_Hr": round(tp[-1]["time_seconds"] / 3600, 4),
-            "Travel_Time_Hr": round((tp[-1]["time_seconds"] - tp[0]["time_seconds"]) / 3600, 4),
-        }
-        for sim, tp in zip(slts_dicts, timed_paths)
-    ]
+    train_times = train_times.join(
+        planned_times,
+        on="Train_ID",
+        how="left"
+    )
+    # print("train_times:", train_times)
+
+    travel_time = train_times.with_columns(
+        (
+                pl.col("Arrival_Time_Actual_Hr")
+                - pl.col("Departure_Time_Planned_Hr")
+        ).alias("Travel_Time_Hr")
+    ).to_dicts()
+
+    # travel_time = [
+    #     {
+    #         "Train_ID": str(sim["train_id"]),
+    #         "Departure_Time_Actual_Hr": round(tp[0]["time_seconds"] / 3600, 4),
+    #         "Arrival_Time_Actual_Hr": round(tp[-1]["time_seconds"] / 3600, 4),
+    #         "Travel_Time_Hr": round((tp[-1]["time_seconds"] - tp[0]["time_seconds"]) / 3600, 4),
+    #     }
+    #     for sim, tp in zip(slts_dicts, timed_paths)
+    # ]
 
     train_consist_plan = train_consist_plan.join(
         train_times, on=["Train_ID", "Origin_ID", "Destination_ID"], how="left"
@@ -177,6 +205,8 @@ def main(
     train_consist_plan = train_consist_plan.with_columns(
         (pl.col("Train_ID").rank("dense") - 1).alias("TrainSimVec_Index")
     )
+
+    # print("train_consist_plan:", train_consist_plan)
 
     # # train_consist_plan -> DataFrame -> dictionary
     # df = train_consist_plan.select([

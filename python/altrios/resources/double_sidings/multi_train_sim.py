@@ -50,7 +50,6 @@ network = alt.Network.from_file(str(network_path))
 t1_import = time.perf_counter()
 print(f"Import time: {t1_import - t0_import:.3g} s")
 
-
 # %%
 dispatch_scheduler = manual_dispatch_demand.manual_dispatch_demand(
     str(dispatch_path)

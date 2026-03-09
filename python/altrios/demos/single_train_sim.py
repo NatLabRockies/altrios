@@ -10,14 +10,11 @@ from copy import copy
 import sys
 
 
-origin = 'Galveston'
-destination = 'Rosenburg'
-# origin = "Amarillo"
-# destination = "FortWorth"
+origin = 'Amarillo'    # 'Dobbin'
+destination = 'FtWorth' # 'Silsbee'
 corridor = f"{origin}-{destination}"
-
-location_root = f"double_sidings/corridor/{corridor}/locations.csv"
-network_root = f"double_sidings/corridor/{corridor}/Network.yaml"
+location_root = f"double_sidings/output/{corridor}/locations.csv"
+network_root = f"double_sidings/output/{corridor}/Network.yaml"
 
 
 # define train batch size and locomotives
@@ -232,14 +229,14 @@ ax2.set_title("Grade Profile")
 ax2.legend()
 
 
-# distance vs. elevation & grade
-df = pd.DataFrame({
-    "total_dist_meters": total_dist_meters,
-    "elevation_meters": elevation_meters,
-    "grade": grade
-})
-df.to_excel(f"/Users/qianqiantong/Desktop/elevation_{corridor}_grade_data.xlsx", index=False)
-print("saved to desktop!")
+# # distance vs. elevation & grade
+# df = pd.DataFrame({
+#     "total_dist_meters": total_dist_meters,
+#     "elevation_meters": elevation_meters,
+#     "grade": grade
+# })
+# df.to_excel(f"/Users/qianqiantong/Desktop/elevation_{corridor}_grade_data.xlsx", index=False)
+# print("saved to desktop!")
 
 # force
 max_idx, max_time, max_res = plot_util.plot_total_resistance(train_sim)

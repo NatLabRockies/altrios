@@ -46,6 +46,7 @@ from scipy.interpolate import interp1d
 
 from tenacity import retry, stop_after_attempt, wait_fixed
 from diskcache import Cache
+import matplotlib.pyplot as plt
 
 
 # GDAL/PROJ env (keep as current had)
@@ -233,7 +234,16 @@ class AwsCogPool:
         x, y = tf.transform(lon, lat)
 
         b = ds.bounds
-        inside = (x >= b.left) & (x <= b.right) & (y >= b.bottom) & (y <= b.top)
+
+        eps = 1.0  # 1 meter tolerance
+        inside = (
+                (x >= b.left - eps) &
+                (x <= b.right + eps) &
+                (y >= b.bottom - eps) &
+                (y <= b.top + eps)
+        )
+
+        # inside = (x >= b.left) & (x <= b.right) & (y >= b.bottom) & (y <= b.top)
         if not np.any(inside):
             rr = np.zeros_like(lon, dtype=int)
             cc = np.zeros_like(lon, dtype=int)
@@ -282,6 +292,9 @@ class AwsCogPool:
             # Index within window
             elev_vals = arr[r - r0, c - c0]
             elev[need] = elev_vals
+
+            print("Tile:", tile)
+            print("Inside count:", inside.sum())
 
         return elev
 
@@ -591,8 +604,32 @@ class NetworkBuilder:
         - If tile_urls is None: auto-select needed tiles from region bounds.
         - Samples elevation by reading ONE window per link per tile (no full-tile loads).
         """
-        bounds4326 = self._get_region_bounds4326()
-        need_tiles = tiles_for_bounds(bounds4326)
+        # bounds4326 = self._get_region_bounds4326()
+        # need_tiles = tiles_for_bounds(bounds4326)
+
+        # ------------------------------
+        # NEW: robust tile selection
+        # ------------------------------
+        need_tiles = set()
+
+        for layername in fiona.listlayers(self.geopackage_path):
+            if "_offhead" not in layername:
+                continue
+
+            gdf = gpd.read_file(self.geopackage_path, layer=layername)
+
+            if gdf.crs is None:
+                gdf = gdf.set_crs("EPSG:4326")
+            if gdf.crs.to_epsg() != 4326:
+                gdf = gdf.to_crs("EPSG:4326")
+
+            for geom in gdf.geometry:
+                tiles = tiles_for_bounds(geom.bounds)
+                need_tiles.update(tiles)
+
+        need_tiles = sorted(need_tiles)
+        print("Tiles required for network:", need_tiles)
+
 
         if tile_urls is None:
             tile_urls = {t: aws_cog_url(t) for t in need_tiles}
@@ -653,12 +690,16 @@ class NetworkBuilder:
 
                     elev = pool.sample_link_points(lon, lat, list(tile_urls.keys()))
 
-                    # fill NaNs along the link
+                    # throw error if jump to 0
                     good = np.isfinite(elev)
                     if good.sum() >= 2:
                         elev = np.interp(np.arange(len(elev)), np.where(good)[0], elev[good]).astype(np.float32)
                     else:
-                        elev[:] = 0.0
+                        link_bounds = (lon.min(), lat.min(), lon.max(), lat.max())
+                        print("FAILED LINK bounds:", link_bounds)
+                        print("FAILED LINK tiles:", tiles_for_bounds(link_bounds))
+                        print("Loaded tiles:", tile_urls.keys())
+                        raise RuntimeError(f"Elevation sampling failed for link at lat range {lat.min()}-{lat.max()}")
 
                     elevations_raw_all.append(list(map(float, elev)))
 
@@ -861,13 +902,11 @@ class NetworkBuilder:
 
     def convert_to_yaml(self, scale_loc_links=True, desired_length_meters=3500):
         """
-        Convert _linked layers directly to ALTRIOS YAML format.
-        No dependency on _mileposts layer.
+        Convert _linked layers to ALTRIOS YAML format (FULLY ALIGNED with working schema).
         """
 
         for layername in fiona.listlayers(self.geopackage_path):
 
-            # 🔥 现在读取 _linked 层
             if "_linked" not in layername:
                 continue
 
@@ -875,7 +914,6 @@ class NetworkBuilder:
 
             trackdata = gpd.read_file(self.geopackage_path, layer=layername)
 
-            # Output folder
             network_output_dir = Path(
                 self.data_folder
                 / "Generated Networks"
@@ -883,17 +921,11 @@ class NetworkBuilder:
             )
             network_output_dir.mkdir(parents=True, exist_ok=True)
 
-            # Load location links if exists
-            location_csv = network_output_dir / "Network Locations.csv"
-            if location_csv.exists():
-                location_data = pd.read_csv(location_csv)
-                links_to_scale = location_data["Link Index"].to_list()
-            else:
-                links_to_scale = []
-
             track_list = []
 
-            # ALTRIOS dummy link 0
+            # ---------------------------
+            # Dummy link 0 (REQUIRED)
+            # ---------------------------
             track_list.append({
                 "idx_curr": 0,
                 "idx_flip": 0,
@@ -902,7 +934,7 @@ class NetworkBuilder:
                 "idx_prev": 0,
                 "idx_prev_alt": 0,
                 "osm_id": 0,
-                "length_meters": 0,
+                "length_meters": 0.0,
                 "elevs": [],
                 "headings": [],
                 "speed_set": None,
@@ -910,57 +942,52 @@ class NetworkBuilder:
                 "link_idxs_lockout": [],
             })
 
+            # ---------------------------
+            # Real links
+            # ---------------------------
             for _, row in trackdata.iterrows():
 
-                # ---- Reverse link ----
                 reverse_link = trackdata[
-                    (trackdata.covers(row.geometry))
-                    & (trackdata.yaml_idx != row.yaml_idx)
+                    (trackdata.covers(row.geometry)) &
+                    (trackdata.yaml_idx != row.yaml_idx)
                     ]
 
                 if reverse_link.shape[0] != 1:
                     raise ValueError(
-                        f"reverse link count was {reverse_link.shape[0]} for yaml_idx {row.yaml_idx}"
+                        f"Reverse link count {reverse_link.shape[0]} for yaml_idx {row.yaml_idx}"
                     )
 
-                # ---- Parse headings ----
-                if isinstance(row["smooth headings"], str):
-                    headings = ast.literal_eval(row["smooth headings"])
-                else:
-                    headings = row["smooth headings"]
+                headings = (
+                    ast.literal_eval(row["smooth headings"])
+                    if isinstance(row["smooth headings"], str)
+                    else row["smooth headings"]
+                )
 
-                # ---- Parse offsets ----
-                if isinstance(row.offsets, str):
-                    offsets = ast.literal_eval(row.offsets)
-                else:
-                    offsets = row.offsets
+                offsets = (
+                    ast.literal_eval(row.offsets)
+                    if isinstance(row.offsets, str)
+                    else row.offsets
+                )
 
-                # ---- Parse elevations ----
                 if isinstance(row.elevations, str):
-                    elevations = ast.literal_eval(row.elevations.replace("nan", "-12345.0"))
+                    elevations = ast.literal_eval(
+                        row.elevations.replace("nan", "-12345.0")
+                    )
                 else:
                     elevations = row.elevations
 
-                # ---- Optional scaling ----
-                if (row.yaml_idx in links_to_scale) and (offsets[-1] < desired_length_meters):
-                    multiplier = desired_length_meters / offsets[-1]
-                    offsets = [x * multiplier for x in offsets]
-
-                # ---- Geometry coords ----
-                lats = []
-                lons = []
-                for coord in row.geometry.coords:
-                    lons.append(coord[0])
-                    lats.append(coord[1])
+                lats = [coord[1] for coord in row.geometry.coords]
+                lons = [coord[0] for coord in row.geometry.coords]
 
                 link_elevs = []
                 link_headings = []
 
                 for i in range(len(offsets)):
 
-                    # remove edge spikes (<500m rule)
-                    if (i == 0) or (i == len(offsets) - 1) or (
-                            (offsets[i] > 500) and ((offsets[-1] - offsets[i]) > 500)
+                    if (
+                            (i == 0)
+                            or (i == len(offsets) - 1)
+                            or ((offsets[i] > 500) and ((offsets[-1] - offsets[i]) > 500))
                     ):
 
                         if elevations[i] != -12345.0:
@@ -974,9 +1001,23 @@ class NetworkBuilder:
                             "lat": float(lats[i]),
                             "lon": float(lons[i]),
                             "heading_radians": float(
-                                np.mod(headings[i] * np.pi / 180, 2 * np.pi)
+                                np.mod(headings[i] * np.pi / 180.0, 2.0 * np.pi)
                             ),
                         })
+
+                # ---------------------------
+                # IMPORTANT: Correct speed_set structure
+                # ---------------------------
+                speed_set_struct = {
+                    "speed_limits": [{
+                        "offset_start_meters": 0.0,
+                        "offset_end_meters": float(offsets[-1]),
+                        "speed_meters_per_second": 25.0
+                    }],
+                    "speed_params": [],
+                    "is_head_end": False,
+                    "mp_dir": "unknown"
+                }
 
                 link_dict = {
                     "idx_curr": int(row.yaml_idx),
@@ -990,43 +1031,133 @@ class NetworkBuilder:
                     "length_meters": float(offsets[-1]),
                     "elevs": link_elevs,
                     "headings": link_headings,
-                    "speed_set": None,
+                    "speed_set": speed_set_struct,
                     "cat_power_limits": [],
                     "link_idxs_lockout": [],
                 }
 
                 track_list.append(link_dict)
 
-            network_dict = [
-                {
-                    "max_grade": 20.25,
-                    "max_curv_radians_per_meter": 20.020,
-                    "max_heading_step_radians": 20.24,
-                    "max_elev_step_meters": 10.0,
-                },
-                track_list,
+            # ---------------------------
+            # Global settings (REQUIRED)
+            # ---------------------------
+            global_settings = {
+                "max_grade": 20.25,
+                "max_curv_radians_per_meter": 20.02,
+                "max_heading_step_radians": 20.24,
+                "max_elev_step_meters": 10.0,
+            }
+
+            network_yaml = [
+                global_settings,
+                track_list
             ]
 
-            with open(network_output_dir / "Network.pickle", "wb") as handle:
-                pickle.dump(network_dict, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
             with open(network_output_dir / "Network.yaml", "w") as f:
-                f.write(
-                    """---
-    # Generated with AWS-based ALTRIOS NetworkBuilder
-    # All coordinates are WGS84
-    """
-                )
-                f.write(
-                    yaml.dump(
-                        network_dict,
-                        sort_keys=False,
-                        default_flow_style=False,
-                        Dumper=NoAliasDumper,
-                    )
+                f.write("---\n")
+                yaml.dump(
+                    network_yaml,
+                    f,
+                    sort_keys=False,
+                    default_flow_style=False,
+                    Dumper=NoAliasDumper,
                 )
 
             print(f"YAML generated at: {network_output_dir}")
+
+
+    def plot_corridor_from_linked_layer(self, start_idx=1, max_links=20000, jump_threshold_m=10.0):
+        """
+        Plot elevation + grade using dense offsets/elevations stored in *_linked layer.
+        This avoids the sparsity of YAML 'elevs' and helps diagnose drape/topology issues.
+        """
+        for layername in fiona.listlayers(self.geopackage_path):
+            if "_linked" not in layername:
+                continue
+
+            print(f"\n[Plot] Building corridor profile from layer: {layername}")
+            gdf = gpd.read_file(self.geopackage_path, layer=layername)
+
+            # Build lookup by yaml_idx
+            gdf["yaml_idx"] = gdf["yaml_idx"].astype(int)
+            idx2row = {int(r["yaml_idx"]): r for _, r in gdf.iterrows()}
+
+            # Traverse corridor by idx_next
+            curr = int(start_idx)
+            visited = set()
+            rows = []
+            cum = 0.0
+            n_links = 0
+
+            while curr != 0 and curr not in visited and n_links < max_links:
+                visited.add(curr)
+                r = idx2row.get(curr)
+                if r is None:
+                    print(f"[Plot] stop: idx {curr} not found in layer.")
+                    break
+
+                # parse offsets/elevations from gpkg (may be stored as list or string)
+                offsets = r["offsets"]
+                elevations = r["elevations"]
+
+                if isinstance(offsets, str):
+                    offsets = ast.literal_eval(offsets)
+                if isinstance(elevations, str):
+                    # keep NaN if present
+                    elevations = ast.literal_eval(elevations.replace("nan", "float('nan')"))
+
+                offsets = np.asarray(offsets, dtype=float)
+                elevations = np.asarray(elevations, dtype=float)
+
+                # if this link failed drape, elevations may be all 0 or all NaN
+                # store all points with corridor cumulative distance
+                for o, e in zip(offsets, elevations):
+                    rows.append({"corridor_m": cum + o, "elev_m": e, "link_idx": curr})
+
+                # advance
+                link_len = float(offsets[-1]) if len(offsets) else 0.0
+                cum += link_len
+
+                next_idx = int(r["next_idx"]) if pd.notna(r["next_idx"]) else 0
+                curr = next_idx
+                n_links += 1
+
+            df = pd.DataFrame(rows).sort_values("corridor_m").reset_index(drop=True)
+
+            print(
+                f"[Plot] visited links: {n_links}, points: {len(df)}, total distance: {df['corridor_m'].max() / 1000.0:.3f} km")
+            if len(df) < 5:
+                print("[Plot] too few points; likely start_idx wrong or topology breaks early.")
+                continue
+
+            # Drop duplicate distances (prevents diff=0 -> inf grades)
+            df = df.drop_duplicates(subset=["corridor_m"]).reset_index(drop=True)
+
+            # Compute grade (%)
+            dx = df["corridor_m"].diff()
+            dz = df["elev_m"].diff()
+            df["grade_pct"] = (dz / dx) * 100.0
+            df.loc[dx == 0, "grade_pct"] = np.nan
+            df["grade_pct"] = df["grade_pct"].replace([np.inf, -np.inf], np.nan)
+
+            # Detect large elevation jumps
+            jumps = df[np.abs(dz) > jump_threshold_m]
+            if len(jumps) > 0:
+                print(f"[Plot] large elevation jumps (> {jump_threshold_m} m) detected. First few:")
+                print(jumps.head(10)[["corridor_m", "elev_m", "link_idx"]])
+
+            # Plot
+            fig, ax = plt.subplots(2, 1, sharex=True, figsize=(10, 6))
+            ax[0].plot(df["corridor_m"] / 1000.0, df["elev_m"])
+            ax[0].set_ylabel("Elevation (m)")
+            ax[0].set_title("Elevation Profile (dense from GPKG)")
+
+            ax[1].plot(df["corridor_m"] / 1000.0, df["grade_pct"])
+            ax[1].set_ylabel("Grade (%)")
+            ax[1].set_xlabel("Distance (km)")
+
+            plt.tight_layout()
+            plt.show()
 
     def build_network(self, apply_savgol_elev: bool = False):
         self.input_geopackage_parsing()
@@ -1043,6 +1174,7 @@ class NetworkBuilder:
         )
 
         self.build_links()
+        self.plot_corridor_from_linked_layer(start_idx=1)   # 327
         self.indentify_links()
         self.convert_to_yaml()
         return True
