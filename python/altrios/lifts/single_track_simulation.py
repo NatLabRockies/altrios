@@ -3,13 +3,12 @@ import random
 import time
 import json
 import polars as pl
-from altrios.lifts.parameters import *
-from altrios.lifts.distance_single_track import *
+
+from altrios.lifts.distances_single_track import *
 from altrios.lifts.dictionary import *
 from altrios.lifts.vehicle import *
-import altrios.lifts.distance_single_track as layout
+import altrios.lifts.distances_single_track as layout
 import altrios.lifts.utilities
-from altrios.lifts.vehicle import vehicle_events
 
 K, k, M, N, n_t, n_p, n_r= layout.load_layout_config_from_json()
 
@@ -59,7 +58,7 @@ def handle_train_departure(env, train_schedule, train_id, track_id):
     if env.now < train_schedule["departure_time"]:
         print(f"Time {env.now}: [EARLY] Train {train_schedule['train_id']} departs from the track {track_id}.")
     elif env.now == train_schedule["departure_time"]:
-        print(f"Time {env.now}: [In Time] Train {train_schedule['train_id']} departs from the track {track_id}.")
+        print(f"Time {env.now}: [Ing Time] Train {train_schedule['train_id']} departs from the track {track_id}.")
     else:
         delay_time = env.now - train_schedule["departure_time"]
         print(f"Time {env.now}: [DELAYED] Train {train_schedule['train_id']} has been delayed for {delay_time} hours from the track {track_id}.")
@@ -878,7 +877,7 @@ def run_simulation(terminal: str, train_consist_plan: pl.DataFrame = None, out_p
     # ==== 6. Save to excel ====
     if out_path is not None:
         container_data.to_excel(out_path / f"{state.CRANE_NUMBER}C-{state.HOSTLER_NUMBER}H_container_throughput_{K}_batch_size_{k}.xlsx", index=False)
-    performance_df, vehicle_log_dfs = save_energy_to_excel(state)
+    performance_df, vehicle_log_df = save_energy_to_excel(state)
 
     # ==== 7. Delay Calculations ====
     # Processing time for IC => avg processing time + delay time

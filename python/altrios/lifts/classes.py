@@ -1,24 +1,12 @@
+import polars as pl
 from dataclasses import dataclass, field
 from enum import IntEnum
-import json
-import polars as pl
-import altrios.lifts.utilities
-
-CONFIG_PATH = altrios.lifts.utilities.resources_root() / 'sim_config.json'
-
-def load_config():
-    try:
-        with open(CONFIG_PATH, 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        raise FileNotFoundError(f"[Error] sim_config.json not found at: {CONFIG_PATH}")
-
+from altrios.lifts.utilities import load_config
 
 class loggingLevel(IntEnum):
     NONE = 1
     BASIC = 2
     DEBUG = 3
-
 
 @dataclass
 class container:
@@ -165,5 +153,3 @@ class LiftsState:
         self.sim_time = vehicles["simulation_duration"]
         self.CRANE_NUMBER = vehicles["CRANE_NUMBER"]
         self.HOSTLER_NUMBER = vehicles["HOSTLER_NUMBER"]
-
-state = LiftsState()

@@ -1,10 +1,5 @@
 import pandas as pd
-from pathlib import Path
 import altrios.lifts.utilities
-from altrios.lifts.parameters import *
-import altrios.lifts.distance_single_track as layout
-
-K, k, M, N, n_t, n_p, n_r= layout.load_layout_config_from_json()
 
 package_root = altrios.lifts.utilities.package_root()
 out_path = package_root / 'output'
@@ -17,7 +12,6 @@ vehicle_events = {
     'truck': [],
     'side': []
 }
-
 
 def record_vehicle_event(vehicle_category, vehicle, container, state, move, time, distance, speed, density, emission, type, timestamp):
     vehicle_events[vehicle_category].append({
@@ -33,7 +27,6 @@ def record_vehicle_event(vehicle_category, vehicle, container, state, move, time
         'type': type,  # 'D'->Diesel, 'E'->Electric, 'H'->Hybrid
         'timestamp': timestamp
     })
-
 
 def calculate_performance(dataframes, ic_count, oc_count):
     summary = {vehicle: {'IC Emissions': 0, 'OC Emissions': 0, 'Total Emissions': 0}

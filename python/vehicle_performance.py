@@ -7,24 +7,6 @@ package_root = altrios.lifts.utilities.package_root()
 out_path = package_root / 'demos' / 'double_track_results'
 out_path.mkdir(parents=True, exist_ok=True)
 
-# Dictionary to store vehicle events
-vehicle_events = {
-    'crane': [],
-    'hostler': [],
-    'truck': []
-}
-
-def record_vehicle_event(vehicle_category, vehicle, action, state, time, emission, event_type, timestamp):
-    vehicle_events[vehicle_category].append({
-        'vehicle_id': str(vehicle),
-        'action': action,
-        'state': state,
-        'time': time,
-        'emission': emission,
-        'event_type': event_type,
-        'timestamp': timestamp
-    })
-
 def calculate_performance(dataframes, ic_count, oc_count):
     summary = {vehicle: {'IC Emissions': 0, 'OC Emissions': 0, 'Total Emissions': 0,
                          'IC Time': 0, 'OC Time': 0, 'Total Time': 0} for vehicle in dataframes.keys()}
@@ -91,9 +73,6 @@ def save_energy_to_excel(state):
         for vehicle_type, df in df_logs.items():
             df.to_excel(writer, sheet_name=vehicle_type, index=False)
         performance_df.to_excel(writer, sheet_name='performance', index=True)
-
-
-import pandas as pd
 
 def calculate_container_processing_time(container_excel_path):
     df = pd.read_excel(container_excel_path)

@@ -1,6 +1,8 @@
 """Module for general functions, classes, and unit conversion factors."""
 from pathlib import Path
 import polars as pl
+import json
+import yaml
 
 def package_root() -> Path:
     """
@@ -16,6 +18,22 @@ def resources_root() -> Path:
     """
     path = package_root() / "resources"
     return path
+
+CONFIG_PATH = resources_root() / 'sim_config.json'
+
+def load_config(config_path: Path = CONFIG_PATH):
+    suffix = Path(config_path).suffix.lower()
+    try:
+        with open(config_path, 'r') as f:
+            if suffix == '.yaml' or suffix == '.yml':
+                return yaml.safe_load(f)
+            elif suffix == '.json':
+                return json.load(f)
+            else:
+                raise ValueError(f"Unsupported config file format: '{suffix}'. Expected .yaml, .yml, or .json.")
+    except FileNotFoundError:
+        raise FileNotFoundError(f"[Error] Config file not found at: {config_path}")
+
 
 def build_train_timetable(train_consist_plan, terminal_name, as_dicts, track_count=1, start_end_padding_hours = 12.0):
     if track_count > 1:

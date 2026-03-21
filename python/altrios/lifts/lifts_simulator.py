@@ -1,11 +1,68 @@
 import simpy
 import random
 import polars as pl
-from altrios import utilities
-from altrios.lifts.distance_single_track import *
+from altrios.lifts import utilities
+from altrios.lifts.distances import *
 from altrios.lifts.dictionary import *
-from altrios.lifts.schedule import *
-from altrios.lifts.single_track_vehicle_performance import record_vehicle_event
+from altrios.lifts.classes import *
+#from altrios.lifts.schedule import *
+from altrios.lifts.vehicle import record_vehicle_event
+import altrios.lifts.distances as layout
+
+state = LiftsState()
+
+class Terminal:
+    def __init__(self, env, truck_capacity, chassis_count):
+        self.env = env
+        self.tracks = simpy.Store(env, capacity=2)
+        for track_id in range(1, self.tracks.capacity + 1):
+            self.tracks.put(track_id)
+        # Example of number of cranes per track
+        self.cranes_per_track = {1: 2, 2: 2}    # user-define
+        self.cranes_by_track = {
+            track_id: simpy.Store(env, capacity=num_cranes)
+            for track_id, num_cranes in self.cranes_per_track.items()}
+        for track_id, num_cranes in self.cranes_per_track.items():
+            for crane_number in range(1, num_cranes + 1):
+                c = crane(type='Hybrid', id=crane_number, track_id=track_id)
+                self.cranes_by_track[track_id].put(c)
+
+        self.all_trucks_arrived_events = {}  # condition for train arrival
+        self.train_ic_unload_events = {}
+        self.train_ic_unload_count = {}  # condition for train_ic_picked
+        self.train_ic_picked_events = {}  # condition 1 for crane loading
+        self.train_oc_prepared_events = {}  # condition 2 for crane loading
+        self.train_start_load_events = {}  # condition 1 for train departure
+        self.train_end_load_events = {}  # condition 2 for train departure
+        self.train_departed_events = {}
+
+        self.IC_COUNT = {}
+        self.OC_COUNT = {}
+        self.total_ic = {}
+        self.total_oc = {}
+
+        self.train_pool_stores = simpy.Store(env, capacity=99)  # train queue capacity
+        self.train_ic_stores = simpy.FilterStore(env, capacity=9999)
+        self.train_oc_stores = simpy.Store(env, capacity=9999)
+        self.in_gates = simpy.Resource(env, state.IN_GATE_NUMBERS)
+        self.out_gates = simpy.Resource(env, state.OUT_GATE_NUMBERS)
+        self.oc_store = simpy.Store(env, capacity=9999)
+        self.parking_slots = simpy.FilterStore(env, capacity=9999)  # store ic and oc in the parking area
+        self.chassis = simpy.FilterStore(env, capacity=9999)
+        self.parked_hostlers = simpy.Store(env, capacity=99)
+        self.active_hostlers = simpy.Store(env, capacity=99)
+        self.truck_store = simpy.Store(env)
+
+        # Hostler setup
+        hostler_diesel = round(state.HOSTLER_NUMBER * state.HOSTLER_DIESEL_PERCENTAGE)
+        hostler_electric = state.HOSTLER_NUMBER - hostler_diesel
+        hostlers = [hostler(id=i, type="Diesel") for i in range(hostler_diesel)] + \
+                   [hostler(id=i + hostler_diesel, type="electric") for i in range(hostler_electric)]
+        for hostler_id in hostlers:
+            self.parked_hostlers.put(hostler_id)    # initialization: all hostlers parked
+
+terminal_config = utilities.load_config(utilities.resources_root() / "config.yaml")
+terminal_layout = layout.get_layout(terminal_config)
 
 # import sys
 #
@@ -603,43 +660,36 @@ def run_simulation(
     '''
     global state
     state.terminal = terminal
-    state.initialize_from_consist_plan(train_consist_plan)
+    state.train_consist_plan = train_consist_plan
+    state.initialize()
 
-    print(f"Starting simulation with No.{state.TRAIN_ID} trains, {state.HOSTLER_NUMBER} hostlers, {state.CRANE_NUMBER} cranes, and {state.TRUCK_NUMBERS} trucks.")
+    random.seed(42)
+    
+    # REAL TEST
+    train_timetable = altrios.lifts.utilities.build_train_timetable(train_consist_plan, terminal, as_dicts = True)
+    truck_number = max([entry['truck_number'] for entry in train_timetable])
+    chassis_count = max([entry['empty_cars'] + entry['full_cars'] for entry in train_timetable])
     env = simpy.Environment()
 
+    terminal = Terminal(env, truck_capacity=truck_number, chassis_count=chassis_count)
     # Resources
     train_processing = simpy.Resource(env, capacity=1)
     cranes = simpy.Resource(env, capacity=state.CRANE_NUMBER)
-    chassis = simpy.Resource(env, capacity=state.CHASSIS_NUMBER)
+    chassis = simpy.Resource(env, capacity=chassis_count)
     hostlers = simpy.Resource(env, capacity=state.HOSTLER_NUMBER)
     in_gate_resource = simpy.Resource(env, capacity=state.IN_GATE_NUMBERS)
     out_gate_resource = simpy.Resource(env, capacity=state.OUT_GATE_NUMBERS)
-    outbound_containers_store = simpy.Store(env, capacity=100)
-    truck_store = simpy.Store(env, capacity=100)
+    outbound_containers_store = simpy.Store(env)
+    truck_store = simpy.Store(env, capacity=truck_number)
 
     # Initialize trucks
     truck_store.items.clear()
     # print("TRUCK_NUMBERS:",  TRUCK_NUMBERS)
-    for truck_id in range(1, 100 + 1):
+    for truck_id in range(1, truck_number + 1):
         truck_store.put(truck_id)
     # print("TRUCK_STORE:", truck_store.items)
 
     state.all_trucks_ready_event = env.event()
-
-    # # toy case
-    # train_timetable = [
-    #     {"train_id": 19, "arrival_time": 187, "departure_time": 200, "empty_cars": 3, "full_cars":7, "oc_number": 2, "truck_number":7 },
-    #     {"train_id": 25, "arrival_time": 250, "departure_time": 350, "empty_cars": 4, "full_cars":6, "oc_number": 2, "truck_number":6 },
-    #     {"train_id": 49, "arrival_time": 400, "departure_time": 600, "empty_cars": 5, "full_cars":5, "oc_number": 2, "truck_number":5 },
-    #     {"train_id": 60, "arrival_time": 650, "departure_time": 750, "empty_cars": 6, "full_cars":4, "oc_number": 2, "truck_number":4 },
-    #     {"train_id": 12, "arrival_time": 800, "departure_time": 1000, "empty_cars": 7, "full_cars":3, "oc_number": 4, "truck_number":4 },
-    # ]
-
-    # REAL TEST
-    train_timetable = altrios.lifts.utilities.build_train_timetable(train_consist_plan, terminal, swap_arrive_depart = True, as_dicts = True)
-    TRAIN_NUMBERS = len(train_timetable)
-
     # env.process(train_arrival(env, train_processing, cranes, in_gate_resource, outbound_containers_store, truck_store, train_timetable))
     env.process(train_arrival(env, train_timetable, train_processing, cranes, hostlers, chassis, in_gate_resource,
                   outbound_containers_store, truck_store, out_gate_resource))

@@ -3,7 +3,7 @@ from altrios.lifts.schedule import *
 from enum import IntEnum
 
 def train_arrival_parameters(train_consist_plan, terminal):
-    TRAIN_TIMETABLE = build_train_timetable(train_consist_plan, terminal, swap_arrive_depart = False, as_dicts = False)
+    TRAIN_TIMETABLE = build_train_timetable(train_consist_plan, terminal, as_dicts = False)
     return TRAIN_TIMETABLE
 
 class loggingLevel(IntEnum):
