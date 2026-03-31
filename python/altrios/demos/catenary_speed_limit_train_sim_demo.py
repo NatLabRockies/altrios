@@ -62,19 +62,72 @@ tsb = alt.TrainSimBuilder(
     loco_con=loco_con,
 )
 
+location_map = alt.import_locations(alt.resources_root() / "networks/default_locations.csv")
+
 # Load the network and construct the timed link path through the network.
 print("Loading `Network`")
 network = alt.Network.from_file(
     alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
 )
 network_without_catenary = copy(network)
+
+train_sim_without_cat: alt.SpeedLimitTrainSim = tsb.make_speed_limit_train_sim(
+    location_map=location_map,
+    save_interval=SAVE_INTERVAL,
+)
+train_sim_without_cat.set_save_interval(SAVE_INTERVAL)
+est_time_net, _consist = alt.make_est_times(train_sim_without_cat, network_without_catenary)
+
+df_est_time_net = (
+    pl.DataFrame(est_time_net.to_pydict()["val"])
+    .lazy()
+    .unnest("link_event")
+    .with_columns(
+        pl.col("est_type").replace({0: "Arrive", 1: "Clear", 2: "Fake"}).cast(pl.Categorical),
+        pl.selectors.contains("idx").replace({0: None}).cast(pl.UInt32)
+    )
+    .filter(pl.col("est_type") == pl.lit("Arrive"))
+    .select("link_idx", "time_sched", "speed", "dist_to_next")
+    .unique()
+    .sort("time_sched")
+    .with_columns(
+        pl.col("dist_to_next").cum_sum().alias("total_dist_meters")
+    )
+    .with_columns(
+    ((pl.col("total_dist_meters").shift(1, fill_value=0) % 50_000) < 5_000).alias("has_catenary")
+    )
+).collect()
+
+
+timed_link_path = next(
+    iter(
+        alt.run_dispatch(
+            network_without_catenary,
+            alt.SpeedLimitTrainSimVec([train_sim_without_cat]),
+            [est_time_net],
+            False,
+            False,
+        )
+    )
+)
+print("Running `walk_timed_path`")
+train_sim_without_cat.walk_timed_path(
+    network=network_without_catenary,
+    timed_path=timed_link_path,
+)
+ts_dict = train_sim_without_cat.to_pydict()
+df_without_cat = pl.DataFrame({
+    "meters": ts_dict['history']['offset_back_meters'],
+    "seconds": ts_dict['history']['time_seconds'],
+    "grid_input": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['cat_int']['history']['pwr_elec_in_watts'],
+    "catenary_output": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['cat_int']['history']['pwr_elec_out_watts'],
+    "fc_input": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['fc']['history']['pwr_fuel_watts'],
+    "fc_output": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['fc']['history']['pwr_shaft_watts'],
+    "edrive_output": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['edrv']['history']['pwr_mech_prop_out_watts'],
+})
+
 uniform_power_limit_watts=50_000_000.0
 network_with_catenary = alt.utils.add_catenary_to_network(network, uniform_power_limit_watts)
-
-location_map = alt.import_locations(
-    alt.resources_root() / "networks/default_locations.csv"
-)
-
 train_sim_with_cat: alt.SpeedLimitTrainSim = tsb.make_speed_limit_train_sim(
     location_map=location_map,
     save_interval=SAVE_INTERVAL,
@@ -108,38 +161,6 @@ df_with_cat = pl.DataFrame({
     "edrive_output": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['edrv']['history']['pwr_mech_prop_out_watts'],
 })
 
-train_sim_without_cat: alt.SpeedLimitTrainSim = tsb.make_speed_limit_train_sim(
-    location_map=location_map,
-    save_interval=SAVE_INTERVAL,
-)
-train_sim_without_cat.set_save_interval(SAVE_INTERVAL)
-est_time_net, _consist = alt.make_est_times(train_sim_without_cat, network_with_catenary)
-timed_link_path = next(
-    iter(
-        alt.run_dispatch(
-            network_without_catenary,
-            alt.SpeedLimitTrainSimVec([train_sim_without_cat]),
-            [est_time_net],
-            False,
-            False,
-        )
-    )
-)
-print("Running `walk_timed_path`")
-train_sim_without_cat.walk_timed_path(
-    network=network_without_catenary,
-    timed_path=timed_link_path,
-)
-ts_dict = train_sim_without_cat.to_pydict()
-df_without_cat = pl.DataFrame({
-    "meters": ts_dict['history']['offset_back_meters'],
-    "seconds": ts_dict['history']['time_seconds'],
-    "grid_input": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['cat_int']['history']['pwr_elec_in_watts'],
-    "catenary_output": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['cat_int']['history']['pwr_elec_out_watts'],
-    "fc_input": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['fc']['history']['pwr_fuel_watts'],
-    "fc_output": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['fc']['history']['pwr_shaft_watts'],
-    "edrive_output": ts_dict['loco_con']['loco_vec'][0]['loco_type']['DualModeLoco']['edrv']['history']['pwr_mech_prop_out_watts'],
-})
 df_without_cat.with_columns(
     pl.col("meters").mul(0.000621371).alias("miles"),
     pl.selectors.ends_with("put").cum_sum().mul(SAVE_INTERVAL/3600.0/1e6)

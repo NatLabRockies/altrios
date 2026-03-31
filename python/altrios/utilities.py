@@ -215,7 +215,7 @@ def smoothen(signal: npt.ArrayLike, period: int = 9) -> npt.ArrayLike:
 def print_dt():
     print(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
-def add_catenary_to_network(
+def add_catenary_uniform(
     network: alt.Network,
     uniform_power_limit_watts: float,
 ) -> alt.Network:
@@ -232,6 +232,58 @@ def add_catenary_to_network(
             'power_limit_watts': uniform_power_limit_watts,
             'district_id': None
         }]
+
+    return alt.Network.from_pydict(network_dict)
+
+def add_catenary_even_spacing(
+    network: alt.Network,
+    uniform_power_limit_watts: float,
+    spacing_meters: Tuple[float, float],
+    est_time_nets: List[alt.EstTimeNet],
+) -> alt.Network:
+    est_time_net_dfs = []
+    for est_time_net in est_time_nets:
+        df = (           
+            pl.DataFrame(est_time_net.to_pydict()["val"])
+            .lazy()
+            .unnest("link_event")
+            .with_columns(
+                pl.col("est_type").replace({0: "Arrive", 1: "Clear", 2: "Fake"}).cast(pl.Categorical),
+                pl.selectors.contains("idx").replace({0: None}).cast(pl.UInt32)
+            )
+            .filter(pl.col("est_type") == pl.lit("Clear"))
+            .select("link_idx", "time_sched", "speed", "dist_to_next")
+            .group_by("time_sched").first()
+            .sort("time_sched")
+            .with_columns(
+                pl.col("dist_to_next").cum_sum().alias("total_dist_meters")
+            )
+            .with_columns(
+            ((pl.col("total_dist_meters").shift(1, fill_value=0) % (spacing_meters[1] + spacing_meters[0])) >= spacing_meters[0]).alias("has_catenary")
+            )
+        ).collect()
+        est_time_net_dfs.append(df)
+    links_to_energize = set(
+        pl.concat(est_time_net_dfs)
+            .filter(pl.col("has_catenary"))
+            .get_column("link_idx")
+            .to_list()
+    )
+
+    network_dict = network.to_pydict()
+    # Iterate through all links in the dictionary
+    # network_dict is a tuple: (NetworkErrTol dict, [links])
+    # Skip index 0 which is the dummy link
+    for i in range(1, len(network_dict[1])):
+        link = network_dict[1][i]
+        if link['idx_curr'] in links_to_energize:
+            # Add catenary power limit spanning the entire link
+            link['cat_power_limits'] = [{
+                'offset_start_meters': 0.0,
+                'offset_end_meters': link['length_meters'],
+                'power_limit_watts': uniform_power_limit_watts,
+                'district_id': None
+            }]
 
     return alt.Network.from_pydict(network_dict)
 
