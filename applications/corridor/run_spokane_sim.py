@@ -279,29 +279,33 @@ def create_visualization(df, output_html):
 
 
 def main():
-    # Paths
-    workspace_root = os.getcwd()  # Should be the root of the repo
-    network_yaml = os.path.join(
-        workspace_root, "networks", "spokane_lethbridge_path.yaml"
+    import argparse
+    parser = argparse.ArgumentParser(description="Run Spokane-Lethbridge simulation")
+    parser.add_argument(
+        "--network",
+        default="spokane_lethbridge_with_sidings",
+        help="Network file prefix under networks/ (default: spokane_lethbridge_with_sidings)",
     )
-    locations_csv = os.path.join(
-        workspace_root, "networks", "spokane_lethbridge_path_locations.csv"
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Output HTML file path (default: networks/<network>_simulation_results.html)",
     )
-    output_html = os.path.join(
-        workspace_root, "networks", "spokane_simulation_results.html"
+    args = parser.parse_args()
+
+    workspace_root = os.getcwd()
+    network_yaml = os.path.join(workspace_root, "networks", f"{args.network}.yaml")
+    locations_csv = os.path.join(workspace_root, "networks", f"{args.network}_locations.csv")
+    output_html = args.output or os.path.join(
+        workspace_root, "networks", f"{args.network}_simulation_results.html"
     )
 
     if not os.path.exists(network_yaml):
         logger.error(f"Network file not found: {network_yaml}")
-        logger.info(
-            "Please run 'applications/network_builder/build_altrios_from_local.py' first."
-        )
         return
 
     if not os.path.exists(locations_csv):
-        # Fallback or error
         logger.error(f"Locations file not found: {locations_csv}")
-        # Could create temporary one if missing, but builder should have made it.
         return
 
     run_simulation(network_yaml, locations_csv, output_html)

@@ -282,10 +282,10 @@ def export_path_to_altrios(G, path_nodes, output_prefix, fast_mode=False):
     node_elevations = smooth_elevation(node_elevations, window_size=31)
 
     links_list = []
-    # Dummy link 0
+    # Dummy link 0 - speed_set must be None (null/~) for ALTRIOS to parse correctly
     links_list.append({
         "idx_curr": 0, "idx_flip": 0, "idx_next": 0, "idx_next_alt": 0, 
-        "idx_prev": 0, "idx_prev_alt": 0, "osm_id": 0, "length_meters": 0,
+        "idx_prev": 0, "idx_prev_alt": 0, "osm_id": 0, "length_meters": 0.0,
         "elevs": [], "headings": [], "speed_set": None, "cat_power_limits": [], 
         "link_idxs_lockout": []
     })

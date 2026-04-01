@@ -105,7 +105,8 @@ def set_speed_limits(
     """
     for link in links:
         if link.get("idx_curr", -1) == 0:
-            link["speed_set"] = {"is_head_end": False, "speed_limits": []}
+            # Dummy link 0 must have speed_set = None for ALTRIOS to parse
+            link["speed_set"] = None
             continue
 
         # Determine if link is a siding based on temporary metadata if available
@@ -115,8 +116,8 @@ def set_speed_limits(
         else:
             current_limit = default_speed_mps
 
-        # New SpeedSet schema:
-        # speed_set: { speed_limits: [ { offset_start: ..., offset_end: ..., speed: ... } ] }
+        # SpeedSet schema must include speed_params (empty list) for ALTRIOS compatibility
+        # speed_set: { speed_limits: [...], speed_params: [], is_head_end: bool }
 
         link_length = link.get("length_meters", 0.0)
 
@@ -128,7 +129,8 @@ def set_speed_limits(
                     "offset_end_meters": link_length,
                 }
             ],
-            "is_head_end": True,
+            "speed_params": [],
+            "is_head_end": False,
         }
 
     return links
