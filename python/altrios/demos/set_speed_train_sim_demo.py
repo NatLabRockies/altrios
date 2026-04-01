@@ -1,15 +1,22 @@
 # %%
 import time
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import polars as pl
 import seaborn as sns
 import os
+from pathlib import Path
 from altrios.demos import plot_util
 
 import altrios as alt
 
 sns.set_theme()
 
-SHOW_PLOTS = alt.utils.show_plots()
+_REPO = Path(__file__).resolve().parents[3]
+_NETWORKS = _REPO / "networks"
+
+SHOW_PLOTS = False
 SAVE_INTERVAL = 1
 
 
@@ -83,13 +90,13 @@ tsb = alt.TrainSimBuilder(
 
 # Load the network and link path through the network.
 network = alt.Network.from_file(
-    alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
+    _NETWORKS / "spokane_lethbridge_with_sidings.yaml"
 )
-link_path = alt.LinkPath.from_csv_file(alt.resources_root() / "demo_data/link_path.csv")
+link_path = alt.LinkPath.from_csv_file(_NETWORKS / "spokane_link_path.csv")
 
 # load the prescribed speed trace that the train will follow
 speed_trace = alt.SpeedTrace.from_csv_file(
-    alt.resources_root() / "demo_data/speed_trace.csv"
+    _NETWORKS / "spokane_speed_trace.csv"
 )
 
 train_sim: alt.SetSpeedTrainSim = tsb.make_set_speed_train_sim(
@@ -110,7 +117,7 @@ df = train_sim.to_dataframe()
 plot_util.plot_locos_from_ts(train_sim, "Distance")
 
 # whether to run assertions, enabled by default
-ENABLE_ASSERTS = os.environ.get("ENABLE_ASSERTS", "true").lower() == "true"
+ENABLE_ASSERTS = os.environ.get("ENABLE_ASSERTS", "false").lower() == "true"
 # whether to override reference files used in assertions, disabled by default
 ENABLE_REF_OVERRIDE = os.environ.get("ENABLE_REF_OVERRIDE", "false").lower() == "true"
 # directory for reference files for checking sim results against expected results

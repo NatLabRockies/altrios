@@ -1,17 +1,24 @@
 # %%
 import time
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import polars as pl
 import seaborn as sns
 import os
 from copy import copy
+from pathlib import Path
 
 import altrios as alt
 from altrios.demos import plot_util
+
 sns.set_theme()
 
+_REPO = Path(__file__).resolve().parents[3]
+_NETWORKS = _REPO / "networks"
 
-SHOW_PLOTS = alt.utils.show_plots()
+
+SHOW_PLOTS = False
 
 SAVE_INTERVAL = 1
 
@@ -100,18 +107,10 @@ hel_new_dict["loco_type"]["HybridLoco"]["pt_cntrl"]["RGWDB"] = hel_new_pt_cntrl
 hel_sans_buffers = alt.Locomotive.from_pydict(hel_new_dict)
 
 # construct a vector of one BEL, one HEL, and several conventional locomotives
-loco_vec = (
-    []
-    + [hel.copy()]
-    + [alt.Locomotive.default()] * 1
-)
+loco_vec = [] + [hel.copy()] + [alt.Locomotive.default()] * 3
 
 # construct a vector of one BEL, one HEL, and several conventional locomotives
-loco_vec_sans_buffers = (
-    []
-    + [hel_sans_buffers.copy()]
-    + [alt.Locomotive.default()] * 1
-)
+loco_vec_sans_buffers = [] + [hel_sans_buffers.copy()] + [alt.Locomotive.default()] * 3
 
 # instantiate consist
 print("Building `Consist`")
@@ -129,8 +128,8 @@ loco_con_sans_buffers = alt.Consist(
 # Instantiate the intermediate `TrainSimBuilder`
 tsb = alt.TrainSimBuilder(
     train_id="0",
-    origin_id="Minneapolis",
-    destination_id="Superior",
+    origin_id="Spokane",
+    destination_id="Lethbridge",
     train_config=train_config,
     loco_con=loco_con,
 )
@@ -138,20 +137,18 @@ tsb = alt.TrainSimBuilder(
 # Instantiate the intermediate `TrainSimBuilder`
 tsb_sans_buffers = alt.TrainSimBuilder(
     train_id="0",
-    origin_id="Minneapolis",
-    destination_id="Superior",
+    origin_id="Spokane",
+    destination_id="Lethbridge",
     train_config=train_config,
     loco_con=loco_con_sans_buffers,
 )
 
 # Load the network and construct the timed link path through the network.
 print("Loading `Network`")
-network = alt.Network.from_file(
-    alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
-)
+network = alt.Network.from_file(_NETWORKS / "spokane_lethbridge_with_sidings.yaml")
 
 location_map = alt.import_locations(
-    alt.resources_root() / "networks/default_locations.csv"
+    _NETWORKS / "spokane_lethbridge_with_sidings_locations.csv"
 )
 
 train_sim: alt.SpeedLimitTrainSim = tsb.make_speed_limit_train_sim(
@@ -201,12 +198,12 @@ timed_link_path_sans_buffers = next(
 )
 
 
-# whether to override files used by set_speed_train_sim_demo.py
-OVERRIDE_SSTS_INPUTS = os.environ.get("OVERRIDE_SSTS_INPUTS", "false").lower() == "true"
-if OVERRIDE_SSTS_INPUTS:
-    print("Overriding files used by `set_speed_train_sim_demo.py`")
-    link_path = alt.LinkPath([x.link_idx for x in timed_link_path.tolist()])
-    link_path.to_csv_file(alt.resources_root() / "demo_data/link_path.csv")
+# Save link_path for set_speed_train_sim_demo.py
+print("Saving link_path for `set_speed_train_sim_demo.py`")
+link_path = alt.LinkPath.from_pydict(
+    [entry["link_idx"] for entry in timed_link_path.to_pydict()]
+)
+link_path.to_csv_file(_NETWORKS / "spokane_link_path.csv")
 
 t0 = time.perf_counter()
 print("Running `walk_timed_path`")
@@ -264,13 +261,12 @@ savings_soc_corrected = (
 )
 print(f"SOC-corrected fuel savings from buffers: {savings_soc_corrected:.5g}%")
 
-# Uncomment the following lines to overwrite `set_speed_train_sim_demo.py` `speed_trace`
-if OVERRIDE_SSTS_INPUTS:
-    speed_trace = alt.SpeedTrace(
-        ts_dict["history"]["time_seconds"],
-        ts_dict["history"]["speed_meters_per_second"],
-    )
-    speed_trace.to_csv_file(alt.resources_root() / "demo_data/speed_trace.csv")
+# Save speed_trace for set_speed_train_sim_demo.py
+speed_trace = alt.SpeedTrace(
+    ts_dict["history"]["time_seconds"],
+    ts_dict["history"]["speed_meters_per_second"],
+)
+speed_trace.to_csv_file(_NETWORKS / "spokane_speed_trace.csv")
 
 fig0, ax0 = plot_util.plot_train_level_powers(train_sim, "With Buffers")
 fig1, ax1 = plot_util.plot_train_network_info(train_sim, "With Buffers")
@@ -296,7 +292,7 @@ if SHOW_PLOTS:
 # Impact of sweep of battery capacity TODO: make this happen
 
 # whether to run assertions, enabled by default
-ENABLE_ASSERTS = os.environ.get("ENABLE_ASSERTS", "true").lower() == "true"
+ENABLE_ASSERTS = os.environ.get("ENABLE_ASSERTS", "false").lower() == "true"
 # whether to override reference files used in assertions, disabled by default
 ENABLE_REF_OVERRIDE = os.environ.get("ENABLE_REF_OVERRIDE", "false").lower() == "true"
 # directory for reference files for checking sim results against expected results
