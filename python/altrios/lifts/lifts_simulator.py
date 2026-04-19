@@ -4,65 +4,12 @@ import polars as pl
 from altrios.lifts import utilities
 from altrios.lifts.distances import *
 from altrios.lifts.dictionary import *
-from altrios.lifts.classes import *
+from altrios.lifts.classes import LiftsState, Terminal, container, crane, hostler, truck 
 #from altrios.lifts.schedule import *
 from altrios.lifts.vehicle import record_vehicle_event
 import altrios.lifts.distances as layout
 
 state = LiftsState()
-
-class Terminal:
-    def __init__(self, env, truck_capacity, chassis_count):
-        self.env = env
-        self.tracks = simpy.Store(env, capacity=2)
-        for track_id in range(1, self.tracks.capacity + 1):
-            self.tracks.put(track_id)
-        # Example of number of cranes per track
-        self.cranes_per_track = {1: 2, 2: 2}    # user-define
-        self.cranes_by_track = {
-            track_id: simpy.Store(env, capacity=num_cranes)
-            for track_id, num_cranes in self.cranes_per_track.items()}
-        for track_id, num_cranes in self.cranes_per_track.items():
-            for crane_number in range(1, num_cranes + 1):
-                c = crane(type='Hybrid', id=crane_number, track_id=track_id)
-                self.cranes_by_track[track_id].put(c)
-
-        self.all_trucks_arrived_events = {}  # condition for train arrival
-        self.train_ic_unload_events = {}
-        self.train_ic_unload_count = {}  # condition for train_ic_picked
-        self.train_ic_picked_events = {}  # condition 1 for crane loading
-        self.train_oc_prepared_events = {}  # condition 2 for crane loading
-        self.train_start_load_events = {}  # condition 1 for train departure
-        self.train_end_load_events = {}  # condition 2 for train departure
-        self.train_departed_events = {}
-
-        self.IC_COUNT = {}
-        self.OC_COUNT = {}
-        self.total_ic = {}
-        self.total_oc = {}
-
-        self.train_pool_stores = simpy.Store(env, capacity=99)  # train queue capacity
-        self.train_ic_stores = simpy.FilterStore(env, capacity=9999)
-        self.train_oc_stores = simpy.Store(env, capacity=9999)
-        self.in_gates = simpy.Resource(env, state.IN_GATE_NUMBERS)
-        self.out_gates = simpy.Resource(env, state.OUT_GATE_NUMBERS)
-        self.oc_store = simpy.Store(env, capacity=9999)
-        self.parking_slots = simpy.FilterStore(env, capacity=9999)  # store ic and oc in the parking area
-        self.chassis = simpy.FilterStore(env, capacity=9999)
-        self.parked_hostlers = simpy.Store(env, capacity=99)
-        self.active_hostlers = simpy.Store(env, capacity=99)
-        self.truck_store = simpy.Store(env)
-
-        # Hostler setup
-        hostler_diesel = round(state.HOSTLER_NUMBER * state.HOSTLER_DIESEL_PERCENTAGE)
-        hostler_electric = state.HOSTLER_NUMBER - hostler_diesel
-        hostlers = [hostler(id=i, type="Diesel") for i in range(hostler_diesel)] + \
-                   [hostler(id=i + hostler_diesel, type="electric") for i in range(hostler_electric)]
-        for hostler_id in hostlers:
-            self.parked_hostlers.put(hostler_id)    # initialization: all hostlers parked
-
-terminal_config = utilities.load_config(utilities.resources_root() / "config.yaml")
-terminal_layout = layout.get_layout(terminal_config)
 
 # import sys
 #
@@ -71,21 +18,6 @@ terminal_layout = layout.get_layout(terminal_config)
 #
 # HOSTLER_NUMBER = int(sys.argv[1])
 # CRANE_NUMBER = int(sys.argv[2])
-
-def record_event(container_id, event_type, timestamp):
-    '''
-    The simulation record logs for each container, including timestamps for arrival, loading, unloading, and departure.
-    This data is used to calculate average processing times for inbound and outbound containers.
-    When the function is called, it will record container_id and corresponding handling time.
-    It is saved as an Excel file.
-    '''
-    global state
-    if container_id is None:
-        x = 5
-    if container_id not in state.container_events:
-        state.container_events[container_id] = {}
-    state.container_events[container_id][event_type] = timestamp
-
 
 def handle_truck_arrivals(env, in_gate_resource):
     '''
@@ -163,12 +95,12 @@ def handle_container(env, truck_id):
     if container_id is None:
         x = 5
     state.outbound_container_id_counter += 1
-    record_event(container_id, 'truck_arrival', env.now)
+    utilities.record_container_event(terminal, container_id, 'truck_arrival', env.now)
 
     d_t_dist = create_triang_distribution(d_t_min, d_t_avg, d_t_max).rvs()
     yield env.timeout(d_t_dist / (2 * state.TRUCK_SPEED_LIMIT))
 
-    record_event(container_id, 'truck_drop_off', env.now)
+    utilities.record_container_event(terminal, container_id, 'truck_drop_off', env.now)
     # print(f"{env.now}: Truck {truck_id} drops outbound container {container_id}.")
     state.last_leave_time = env.now
 
@@ -186,62 +118,58 @@ def empty_truck(env, truck_id):
     state.last_leave_time = env.now
 
 
-def train_arrival(env, train_timetable, train_processing, cranes, hostlers, chassis, in_gate_resource, outbound_containers_store, truck_store, out_gate_resource):
-    '''
-    Trains arrive according to the timetable schedule.
-    '''
-    global state
+def process_train_arrival(env, terminal, train_schedule):
+    train_id = train_schedule["train_id"]
+    arrival_time = train_schedule["arrival_time"]
+    terminal.all_trucks_arrived_events[train_schedule['train_id']] = env.event() # condition for train arrival
 
-    for i, train in enumerate(train_timetable):
-        state.TRAIN_ARRIVAL_HR = train['arrival_time']
-        state.TRAIN_DEPARTURE_HR = train['departure_time']
-        state.INBOUND_CONTAINER_NUMBER = train['full_cars']
-        state.OUTBOUND_CONTAINER_NUMBER = train['oc_number']
-        state.TRUCK_NUMBERS = train['truck_number']
-        state.TRAIN_ID = train['train_id']
+    # Initialize dictionary
+    delay_list = {}
 
-        print(f"---------- Next Train {state.TRAIN_ID} Is On the  Way ----------")
-        print(f"IC {state.INBOUND_CONTAINER_NUMBER}")
-        print(f"OC {state.OUTBOUND_CONTAINER_NUMBER}")
+    # Initialize IC & OC count (generating container ID)
+    terminal.IC_COUNT[train_id] = 1
+    terminal.OC_COUNT[train_id] = 1
 
-        outbound_containers_store.items.clear()
-        for oc in range(state.record_oc_label, state.record_oc_label + state.OUTBOUND_CONTAINER_NUMBER):  # from 10001 to 10001 + OC
-            # print("oc_number", oc)
-            outbound_containers_store.put(oc)
-            # yield outbound_containers_store.put(oc)
-            # print(f"Current store contents after putting {oc}: {outbound_containers_store.items}")
+    # All trucks arrive before train arrives
+    env.process(truck_arrival(env, terminal, train_schedule))
 
-        # print("outbound_containers_store is:", outbound_containers_store.items)
+    # Train arrival
+    yield terminal.all_trucks_arrived_events[train_schedule['train_id']]
+    if env.now <= arrival_time:
+        yield env.timeout(arrival_time - env.now)
+        print(f"Time {env.now:.3f}: [In Time] Train {train_schedule['train_id']}.")
+        delay_time = 0
+    else:
+        delay_time = env.now - arrival_time
+        if f"train_id_{train_id}" not in delay_list:
+            delay_list[f"train_id_{train_id}"] = {}
+        delay_list[f"train_id_{train_id}"]["arrival"] = delay_time
+        print(f"Time {env.now:.3f}: [DELAYED] Train {train_schedule['train_id']} has been delayed for {delay_time} hours.")
+    terminal.train_delay_time[train_schedule['train_id']] = delay_time
+    terminal.train_pool_stores.put(train_schedule['train_id'])
 
-        # Trucks enter until the precious train departs, if not the first truck
-        state.previous_train_departure = train_timetable[i-1]['departure_time'] if i > 0 else 0
-        print(f"Schedule {state.TRUCK_NUMBERS} Trucks arriving between previous train departure at {state.previous_train_departure} and current train arrival at {state.TRAIN_ARRIVAL_HR}")
-        env.process(handle_truck_arrivals(env, in_gate_resource))
+    # Track assignment
+    track_id = yield terminal.tracks.get()
+    if track_id is None:
+        print(f"Time {env.now:.3f}: Train {train_id} is waiting for a next available track.")
+        return
+    else:
+        train_id = yield terminal.train_pool_stores.get()
+        print(f"Time {env.now:.3f}: Train {train_id} has been assigned to track {track_id}.")
 
-        # Trains arrive according to the timetable, fix negative delay bug
-        delay = state.TRAIN_ARRIVAL_HR - env.now
-        if delay <= 0:
-            yield env.timeout(0)
-        else:
-            yield env.timeout(delay)
+        # Initialize train with loaded ICs
+        ic_num = terminal.IC_COUNT[train_schedule['train_id']]
+        for ic_id in range(ic_num, ic_num + train_schedule['full_cars']):
+            ic = container(type='Inbound', id=ic_id, train_id=train_schedule['train_id'])
+            terminal.train_ic_stores.put(ic)
+            utilities.record_container_event(terminal, ic.to_string(), 'train_arrival_expected', train_schedule['arrival_time'])
+            utilities.record_container_event(terminal, ic.to_string(), 'train_arrival_actual', env.now)
 
-        train_id = state.train_id_counter
-        print(f"Train {state.TRAIN_ID} ({train_id} in the dictionary) arrives at {env.now}")
+        # Initialize events for each train
+        utilities.initialize_train_events(env, terminal, train_id)
+        # Train processed separately on each track
+        env.process(train_process_per_track(env, terminal, track_id, train_schedule, train_id, arrival_time))
 
-        # for container_id in range(inbound_container_id_counter, inbound_container_id_counter + INBOUND_CONTAINER_NUMBER):
-        for container_id in range(int(state.inbound_container_id_counter), int(state.inbound_container_id_counter) + int(state.INBOUND_CONTAINER_NUMBER)):  # fix float error
-
-            record_event(container_id, 'train_arrival', env.now)
-
-        with train_processing.request() as request:
-            yield request
-            state.oc_chassis_filled_event = env.event()
-            yield env.process(process_train(env, train_id, cranes, hostlers, chassis, in_gate_resource, outbound_containers_store, truck_store, train_processing, state.oc_chassis_filled_event, out_gate_resource))
-            state.train_id_counter += 1
-
-        state.record_oc_label += state.OUTBOUND_CONTAINER_NUMBER
-        # print("record_oc_label", record_oc_label)
-        # print("oc_variance in train_process:", oc_variance)
 
 
 def process_train(env, train_id, cranes, hostlers, chassis, in_gate_resource, outbound_containers_store, truck_store, train_processing, oc_chassis_filled_event, out_gate_resource):
@@ -325,7 +253,7 @@ def crane_and_chassis(env, train_id, action, cranes, hostlers, chassis, truck_st
         for container_id in range(int(state.inbound_container_id_counter), int(state.inbound_container_id_counter) + int(state.INBOUND_CONTAINER_NUMBER)):  # fix float error
             # print("container_id now:", container_id)
             yield env.timeout(state.CRANE_UNLOAD_CONTAINER_TIME_MEAN + random.uniform(0, state.CRANE_MOVE_DEV_TIME))
-            record_event(container_id, 'crane_unload', env.now)
+            utilities.record_container_event(terminal, container_id, 'crane_unload', env.now)
             # print(f"Crane {crane_id} unloads inbound container {inbound_container_id_counter} from train {train_id} at {env.now}")
 
     # if action == 'load':
@@ -333,7 +261,7 @@ def crane_and_chassis(env, train_id, action, cranes, hostlers, chassis, truck_st
     #         yield env.timeout(CRANE_LOAD_CONTAINER_TIME_MEAN + random.uniform(0, CRANE_MOVE_DEV_TIME))
     #         chassis_status[chassis_id - 1] = -1
     #         # print(f"Crane {crane_id} loads outbound container {container_id} to train {TRAIN_ID} at {env.now}")
-    #         record_event(container_id, 'crane_load', env.now)
+    #         utilities.record_container_event(terminal, container_id, 'crane_load', env.now)
 
     with cranes.request() as request:
         yield request
@@ -384,13 +312,13 @@ def crane_and_chassis(env, train_id, action, cranes, hostlers, chassis, truck_st
             # yield env.timeout(CRANE_LOAD_CONTAINER_TIME_MEAN + random.uniform(0, CRANE_MOVE_DEV_TIME))
             # chassis_status[chassis_id - 1] = -1
             # print(f"Crane {crane_id} loads outbound container {container_id} from chassis {chassis_id} to train {TRAIN_ID} at {env.now}")
-            # record_event(container_id, 'crane_load', env.now)
+            # utilities.record_container_event(terminal, container_id, 'crane_load', env.now)
 
             for container_id in range(state.record_oc_label, state.record_oc_label + state.OUTBOUND_CONTAINER_NUMBER):
                 yield env.timeout(state.CRANE_LOAD_CONTAINER_TIME_MEAN + random.uniform(0, state.CRANE_MOVE_DEV_TIME))
                 # chassis_status[chassis_id - 1] = -1
                 # print(f"Crane {crane_id} loads outbound container {container_id} to train {TRAIN_ID} at {env.now}")
-                record_event(container_id, 'crane_load', env.now)
+                utilities.record_container_event(terminal, container_id, 'crane_load', env.now)
 
         # # At this point, the crane resource should be released
         # print(f"[{env.now}] Crane {crane_id_counter} has released crane resource. Available cranes: {cranes.count}/{cranes.capacity}")
@@ -423,7 +351,7 @@ def hostler_transfer(env, hostlers, container_type, chassis, chassis_id, contain
                 state.HOSTLER_TRANSPORT_CONTAINER_TIME = d_h_dist / (2 * state.HOSTLER_SPEED_LIMIT)
                 print(f"Hostler pick-up time is:{state.HOSTLER_TRANSPORT_CONTAINER_TIME}")
                 yield env.timeout(state.HOSTLER_TRANSPORT_CONTAINER_TIME)
-                record_event(container_id, 'hostler_pickup', env.now)
+                utilities.record_container_event(terminal, container_id, 'hostler_pickup', env.now)
                 print(f"Hostler {hostler_id} picks up inbound container {container_id} from chassis {chassis_id} and heads to parking area at {env.now}")
 
                 state.chassis_status[chassis_id - 1] = -1
@@ -435,7 +363,7 @@ def hostler_transfer(env, hostlers, container_type, chassis, chassis_id, contain
                 yield env.timeout(state.HOSTLER_TRANSPORT_CONTAINER_TIME)
                 if container_id is None:
                     x =5
-                record_event(container_id, 'hostler_dropoff', env.now)
+                utilities.record_container_event(terminal, container_id, 'hostler_dropoff', env.now)
                 print(f"Hostler {hostler_id} drops off inbound container {container_id} from chassis {chassis_id} and moves toward the assigned outbound container at {env.now}")
 
                 end_time = env.now
@@ -491,14 +419,14 @@ def hostler_transfer_IC_single_loop(env, hostlers, container_type, chassis, chas
                 yield env.timeout(state.HOSTLER_TRANSPORT_CONTAINER_TIME)
                 # hostler picks up the rest of IC from the chassis
                 # chassis_status[chassis_id - 1] = -1
-                record_event(container_id, 'hostler_pickup', env.now)
+                utilities.record_container_event(terminal, container_id, 'hostler_pickup', env.now)
                 print(f"Hostler {hostler_id} picks up inbound container {container_id} from chassis {chassis_id} to parking area at {env.now}")
 
                 # hostler drops off the IC
                 d_h_dist = create_triang_distribution(d_h_min, d_h_avg, d_h_max).rvs()
                 state.HOSTLER_TRANSPORT_CONTAINER_TIME = d_h_dist / (2 * state.HOSTLER_SPEED_LIMIT)
                 yield env.timeout(state.HOSTLER_TRANSPORT_CONTAINER_TIME)
-                record_event(container_id, 'hostler_dropoff', env.now)
+                utilities.record_container_event(terminal, container_id, 'hostler_dropoff', env.now)
                 print(f"Hostler {hostler_id} drops off inbound container {container_id} from chassis {chassis_id} to parking area at {env.now}")
 
                 # Check if all chassis filled
@@ -581,12 +509,12 @@ def handle_outbound_container(env, hostler_id, chassis_id, outbound_container_id
     state.HOSTLER_FIND_CONTAINER_TIME = d_r_dist / (2 * state.TRUCK_SPEED_LIMIT)
     yield env.timeout(state.HOSTLER_FIND_CONTAINER_TIME)
 
-    record_event(outbound_container_id, 'hostler_pickup', env.now)
+    utilities.record_container_event(terminal, outbound_container_id, 'hostler_pickup', env.now)
     print(f"Hostler {hostler_id} picks up outbound container {outbound_container_id} from parking area to chassis {chassis_id} at {env.now}")
 
     yield env.timeout(state.HOSTLER_TRANSPORT_CONTAINER_TIME)
 
-    record_event(outbound_container_id, 'hostler_dropoff', env.now)
+    utilities.record_container_event(terminal, outbound_container_id, 'hostler_dropoff', env.now)
     print(f"Hostler {hostler_id} drops off outbound container {outbound_container_id} to chassis {chassis_id} at {env.now}")
 
 
@@ -614,7 +542,7 @@ def truck_transfer(env, truck_id, container_id, out_gate_resource):
 
     # Truck moves to the parking area
     yield env.timeout(state.TRUCK_TO_PARKING)
-    record_event(container_id, 'truck_pickup', env.now)
+    utilities.record_container_event(terminal, container_id, 'truck_pickup', env.now)
     print(f"Truck {truck_id} picks up inbound container {container_id} at {env.now}")
 
     # Calculate the transport time for the truck
@@ -628,7 +556,7 @@ def truck_transfer(env, truck_id, container_id, out_gate_resource):
 
         # Simulate the time it takes for the truck to pass through the gate
         yield env.timeout(state.TRUCK_OUTGATE_TIME + random.uniform(0,state.TRUCK_OUTGATE_TIME_DEV))
-        record_event(container_id, 'truck_exit', env.now)
+        utilities.record_container_event(terminal, container_id, 'truck_exit', env.now)
         print(f"Truck {truck_id} exits gate with inbound container {container_id} at {env.now}")
 
     # End performance recording
@@ -648,7 +576,7 @@ def train_departure(env, train_id):
     print(f"Train {state.TRAIN_ID_FIXED} ({train_id} in the dictionary) departs at {env.now}")
 
     for container_id in range(state.record_oc_label - state.OUTBOUND_CONTAINER_NUMBER, state.record_oc_label):
-        record_event(container_id, 'train_depart', env.now)
+        utilities.record_container_event(terminal, container_id, 'train_depart', env.now)
 
 
 def run_simulation(
@@ -662,85 +590,96 @@ def run_simulation(
     state.terminal = terminal
     state.train_consist_plan = train_consist_plan
     state.initialize()
+    
+    terminal_config = utilities.load_config(utilities.resources_root() / "config.yaml")
+    terminal_layout = layout.get_layout(terminal_config)
 
     random.seed(42)
     
     # REAL TEST
-    train_timetable = altrios.lifts.utilities.build_train_timetable(train_consist_plan, terminal, as_dicts = True)
+    train_timetable = utilities.build_train_timetable(train_consist_plan, terminal, as_dicts = True)
     truck_number = max([entry['truck_number'] for entry in train_timetable])
     chassis_count = max([entry['empty_cars'] + entry['full_cars'] for entry in train_timetable])
     env = simpy.Environment()
 
-    terminal = Terminal(env, truck_capacity=truck_number, chassis_count=chassis_count)
-    # Resources
-    train_processing = simpy.Resource(env, capacity=1)
-    cranes = simpy.Resource(env, capacity=state.CRANE_NUMBER)
-    chassis = simpy.Resource(env, capacity=chassis_count)
-    hostlers = simpy.Resource(env, capacity=state.HOSTLER_NUMBER)
-    in_gate_resource = simpy.Resource(env, capacity=state.IN_GATE_NUMBERS)
-    out_gate_resource = simpy.Resource(env, capacity=state.OUT_GATE_NUMBERS)
-    outbound_containers_store = simpy.Store(env)
-    truck_store = simpy.Store(env, capacity=truck_number)
+    terminal = Terminal(env, 
+        config=terminal_config,
+        layout=terminal_layout, 
+        truck_capacity=truck_number, 
+        chassis_count=chassis_count)
 
-    # Initialize trucks
-    truck_store.items.clear()
-    # print("TRUCK_NUMBERS:",  TRUCK_NUMBERS)
-    for truck_id in range(1, truck_number + 1):
-        truck_store.put(truck_id)
-    # print("TRUCK_STORE:", truck_store.items)
+    print("\nTrain timetable:")
+    for schedule in train_timetable:
+        print(schedule)
+        env.process(process_train_arrival(env, terminal, schedule))
 
-    state.all_trucks_ready_event = env.event()
-    # env.process(train_arrival(env, train_processing, cranes, in_gate_resource, outbound_containers_store, truck_store, train_timetable))
-    env.process(train_arrival(env, train_timetable, train_processing, cranes, hostlers, chassis, in_gate_resource,
-                  outbound_containers_store, truck_store, out_gate_resource))
+    num_tracks = terminal.track_number
+    num_cranes = num_tracks * terminal.cranes_per_track
+    num_hostlers = terminal.hostler_number
 
-    env.run(until=state.sim_time)
+    print("*" * 50)
+    print(f"Tracks: {num_tracks}; Cranes: {num_cranes}; Hostlers: {num_hostlers}")
+    print("*" * 50)
 
-    # Performance Matrix: train processing time
-    avg_time_per_train = sum(state.time_per_train) / len(state.time_per_train)
-    print(f"Average train processing time: {sum(state.time_per_train) / len(state.time_per_train) if state.time_per_train else 0:.2f}")
-    print("Simulation completed. ")
-    with open("avg_time_per_train.txt", "w") as f:
-        f.write(str(avg_time_per_train))
+    env.run(until=terminal_config["simulation"]["length"])
 
     # Create DataFrame for container events
     container_data = (
         pl.from_dicts(
-            [dict(event, **{'container_id': container_id}) for container_id, event in state.container_events.items()]
+            [dict(event, **{'container_id': container_id}) for container_id, event in terminal.container_events.items()],
+            infer_schema_length=None
         )
-        .with_columns(
-            pl.when(pl.col("container_id") < 10001).then(pl.lit("inbound")).otherwise(pl.lit("outbound")).alias("container_type")
-        )
-        .with_columns(
-            pl.when(
-                pl.col("container_type") == pl.lit("inbound"),
-                pl.col("truck_exit").is_not_null(),
-                pl.col("train_arrival").is_not_null()
-            )
-            .then(
-                pl.col("truck_exit") - pl.col("train_arrival")
-            )
-            .when(
-                pl.col("container_type") == pl.lit("outbound"),
-                pl.col("train_depart").is_not_null(),
-                pl.col("truck_drop_off").is_not_null()
-            )
-            .then(
-                pl.col("train_depart") - pl.col("truck_drop_off")
-            )
-            .otherwise(None)
-            .alias("container_processing_time")
-        )
+        .lazy()
         .sort("container_id")
-        .select(pl.col("container_id", "container_type"), pl.all().exclude("container_id", "container_type"))
+        .select(pl.col("container_id"), pl.exclude("container_id"))
+        .with_columns(
+            pl.when(pl.col("truck_exit").is_not_null() & pl.col("train_arrival_expected").is_not_null())
+                .then(pl.col("truck_exit") - pl.col("train_arrival_expected"))
+                .when(pl.col("train_depart").is_not_null())
+                .then(pl.col("crane_load") - pl.col("truck_arrival"))
+                .otherwise(None)
+                .alias("container_processing_time"),
+            pl.col("container_id").str.extract(r"Train-(\d+)").cast(pl.Int64).alias("train_id"),
+            pl.col("container_id").str.starts_with("IC").alias("is_ic")
+        )
     )
+
+    # OC train actual arrival time
+    train_arrival_df = (container_data
+        .filter(
+            pl.col("is_ic"),
+            pl.col("train_arrival_actual").is_not_null()
+        )
+        .group_by("train_id")
+        .agg(pl.col("train_arrival_actual").mean())
+    )
+    # OC train expected arrival time
+    train_arrival_expected_df = (container_data
+        .filter(
+            pl.col("is_ic"),
+            pl.col("train_arrival_expected").is_not_null()
+        )
+        .group_by("train_id")
+        .agg(pl.col("train_arrival_expected").mean())
+    )
+    container_data = (container_data
+        .join(train_arrival_df, on="train_id", how="left")
+        .join(train_arrival_expected_df, on="train_id", how="left")
+        .rename({
+            "train_arrival_actual_right": "train_arrival_actual_oc",
+            "train_arrival_expected_right": "train_arrival_expected_oc"
+        })
+        .drop("is_oc", "is_ic", "train_id")
+    ).collect()
+
+
     if out_path is not None:
-        container_data.write_excel(out_path / f"simulation_crane_{state.CRANE_NUMBER}_hostler_{state.HOSTLER_NUMBER}.xlsx")
-
-    save_vehicle_logs()
-
-    print("Done!")
+        emission_records_df = pl.DataFrame(emission_records)
+        daily_throughput = 2 * terminal.train_batch_size * terminal.track_number
+        container_data.write_excel(out_path / f"simulation_container_{daily_throughput}_track_{num_tracks}_crane_{num_cranes}_hostler_{num_hostlers}_results.xlsx")
+        utilities.save_emission_results(emission_records_df, out_path / f"emission_container_{daily_throughput}_track_{num_tracks}_crane_{num_cranes}_hostler_{num_hostlers}_results.xlsx", filetype="xlsx")
     return container_data
+
 
 
 if __name__ == "__main__":

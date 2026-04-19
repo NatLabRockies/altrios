@@ -1,4 +1,5 @@
 import polars as pl
+import simpy
 from dataclasses import dataclass, field
 from enum import IntEnum
 from altrios.lifts.utilities import load_config
@@ -53,6 +54,124 @@ class hostler:
         return f'{self.id}-{self.type}'
 
 
+class Terminal:
+    def __init__(self, env, config, layout, truck_capacity, chassis_count):
+        self.env = env
+        self.config = config
+
+        sim_cfg = config['simulation']
+        yard_cfg = config["yard"]
+        term_cfg = config["terminal"]
+        gate_cfg = config["gates"]
+        ems_cfg = config["emissions"]
+
+        # simulation
+        self.simulation_length = sim_cfg["length"]
+        self.observation_start = sim_cfg["analyze_start"]
+        self.observation_end = sim_cfg["analyze_end"]
+        self.train_per_day = sim_cfg["train_number"]
+        self.train_batch_size = sim_cfg["train_batch_size"]
+
+        # yard
+        self.yard_type = yard_cfg.get("yard_type")
+        self.track_number = int(yard_cfg.get("track_number"))
+        self.receiving_track_numbers = int(yard_cfg.get("receiving_track_numbers"))
+        self.railcar_length = float(yard_cfg.get("railcar_length"))
+        self.d_f = float(yard_cfg.get("d_f"))
+        self.d_x = float(yard_cfg.get("d_x"))
+
+        # terminal
+        self.cranes_per_track = int(term_cfg.get("cranes_per_track"))
+        self.hostler_number = int(term_cfg.get("hostler_number"))
+        self.hostler_diesel_percentage = float(term_cfg.get("hostler_diesel_percentage"))
+
+        # gates
+        self.in_gate_numbers = int(gate_cfg.get("in_gate_numbers"))
+        self.out_gate_numbers = int(gate_cfg.get("out_gate_numbers"))
+
+        # layout
+        self.layout = layout
+        distances = calculate_distances(actual_railcars=None)
+        self.distances = distances
+        self.yard_length = distances["yard_length"]
+        self.track_capacity = distances["n_max"]
+
+        self.tracks = simpy.Store(env, capacity=self.track_number)
+        for track_id in range(1, self.tracks.capacity + 1):
+            self.tracks.put(track_id)
+
+        # cranes
+        self.cranes_on_track = {
+            track_id: term_cfg["cranes_per_track"]
+            for track_id in range(1, self.track_number + 1)
+        }
+
+        self.cranes_by_track = {
+            track_id: simpy.Store(env, capacity=num_cranes)
+            for track_id, num_cranes in self.cranes_on_track.items()
+        }
+
+        for track_id, num_cranes in self.cranes_on_track.items():
+            for crane_number in range(1, num_cranes + 1):
+                c = crane(type="Hybrid", id=crane_number, track_id=track_id)
+                self.cranes_by_track[track_id].put(c)
+
+
+        # emissions
+        self.ems = ems_cfg
+
+        self.container_events = {}
+        self.time_per_train = {}
+        self.train_delay_time = {}
+
+        self.all_trucks_arrived_events = {}  # condition for train arrival
+        self.train_ic_unload_events = {}    # condition for train_ic_picked
+        self.train_ic_picked_events = {}  # condition 1 for crane loading
+        self.train_oc_prepared_events = {}  # condition 2 for crane loading
+        self.train_start_load_events = {}  # condition 1 for train departure
+        self.train_end_load_events = {}  # condition 2 for train departure
+        self.train_departed_events = {}
+
+        self.IC_COUNT = {}
+        self.OC_COUNT = {}
+        self.total_ic = {}
+        self.total_oc = {}
+
+        self.train_pool_stores = simpy.Store(env, capacity=99999)  # train queue capacity
+        self.train_ic_stores = simpy.FilterStore(env, capacity=99999)
+        self.train_oc_stores = simpy.Store(env, capacity=99999)
+        self.in_gates = simpy.Resource(env, self.in_gate_numbers)
+        self.out_gates = simpy.Resource(env, self.out_gate_numbers)
+        self.oc_store = simpy.Store(env, capacity=99999)
+        self.parking_slots = simpy.FilterStore(env, capacity=99999)  # store ic and oc in the parking area
+        self.chassis = simpy.FilterStore(env, capacity=999999)
+        self.parked_hostlers = simpy.Store(env, capacity=99999)
+        self.active_hostlers = simpy.Store(env, capacity=99999)
+        self.truck_store = simpy.Store(env, capacity=999999999)
+
+        # hostler setup
+        hostler_total = self.hostler_number
+        hostler_diesel = round(hostler_total * self.hostler_diesel_percentage)
+        hostler_electric = hostler_total - hostler_diesel
+
+        self.parked_hostlers = simpy.Store(env, capacity=hostler_total)
+        self.active_hostlers = simpy.Store(env, capacity=hostler_total)
+
+        hostlers = [hostler(id=i, type="Diesel") for i in range(hostler_diesel)] + \
+                   [hostler(id=i + hostler_diesel, type="Electric") for i in range(hostler_electric)]
+        for hostler_id in hostlers:
+            self.parked_hostlers.put(hostler_id)
+
+        # fixed processing time
+        self.CONTAINERS_PER_CRANE_MOVE_MEAN = 2 / 60  # crane movement avg time: distance / speed = hr
+        self. CRANE_MOVE_DEV_TIME = 1 / 3600  # crane movement speed deviation value: hr
+        self.TRUCK_DIESEL_PERCENTAGE = 1
+        self.TRUCK_ARRIVAL_MEAN = 2/60
+        self.TRUCK_INGATE_TIME = 2/60
+        self.TRUCK_OUTGATE_TIME = 2/60
+        self.TRUCK_INGATE_TIME_DEV = 2/60
+        self.TRUCK_OUTGATE_TIME_DEV = 2/60
+        
 @dataclass
 class LiftsState:
     # Fixed: Simulation files and hyperparameters

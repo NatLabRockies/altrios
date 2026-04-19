@@ -125,3 +125,90 @@ def build_train_timetable(train_consist_plan, terminal_name, as_dicts, track_cou
         return df.to_dicts()
     else:
         return df
+
+
+def record_container_event(terminal, container, event_type, timestamp):
+    if type(container) is str:
+        container_string = container
+    else:
+        container_string = container.to_string()
+
+    if container_string not in terminal.container_events:
+        terminal.container_events[container_string] = {}
+    terminal.container_events[container_string][event_type] = timestamp
+
+
+def emission_calculation(terminal, status: str, move: str, vehicle: str, energy_type: str, travel_time: float) -> float:
+    ems = terminal.ems
+
+    move = move.lower()
+    status = status.lower()
+    vehicle = vehicle.lower()
+    energy_type = energy_type.capitalize()
+
+    # --- load consumption (unit: per lift)
+    if move == "load":
+        key = "crane_loaded" if status == "loaded" else "crane_idle"
+        emission_unit = ems["load_consumption"][key][energy_type]
+        emissions = emission_unit
+
+    # --- trip consumption (unit: hr × travel_time)
+    elif move == "trip":
+        key = f"{vehicle}_{status}"  # e.g. hostler_loaded / truck_empty
+        emission_unit = ems["trip_consumption"][key][energy_type]
+        emissions = emission_unit * travel_time
+
+    # --- side pick consumption (unit: per lift)
+    elif move == "side":
+        emission_unit = ems["side_pick_consumption"]["side"][energy_type]
+        emissions = emission_unit
+
+    else:
+        raise ValueError(f"Unsupported move type '{move}' for vehicle '{vehicle}'.")
+
+    return emissions
+
+
+def record_emission(emission_records: list, vehicle_type: str, resource_id: str, track_id: str, train_id: str, container_id: str, event_type: str, zone: str, emission_value: float, travel_time: float, env_now: float) -> None:
+    emission_records.append({
+        "resource_type": vehicle_type.lower(),
+        "resource_id": str(resource_id),
+        "track_id":str(track_id),
+        "train_id": str(train_id),
+        "container_id": str(container_id),
+        "event_type": event_type,
+        "zone": zone,
+        "energy_consumption(gal)": float(emission_value),
+        "load/travel_time(hr)": float(travel_time),
+        "record_timestamp": float(env_now),
+    })
+
+
+def save_emission_results(emission_records: pl.DataFrame, out_path: Path, filetype: str = "csv"):
+    if out_path is None:
+        return
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if filetype == "csv":
+        emission_records.write_csv(out_path)
+    elif filetype == "xlsx":
+        emission_records.to_pandas().to_excel(out_path, index=False)
+    else:
+        raise ValueError("filetype must be 'csv' or 'xlsx'")
+
+def initialize_train_events(env, terminal, train_id):
+    for name in [
+        "train_ic_unload_events",
+        "train_oc_prepared_events",
+        "train_ic_picked_events",
+        "train_start_load_events",
+        "train_end_load_events",
+        "train_departed_events",
+    ]:
+        if not hasattr(terminal, name):
+            setattr(terminal, name, {})
+        d = getattr(terminal, name)
+
+        if train_id not in d or d[train_id].triggered:
+            d[train_id] = env.event()
