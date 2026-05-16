@@ -3,6 +3,7 @@ import simpy
 from dataclasses import dataclass, field
 from enum import IntEnum
 from altrios.lifts.utilities import load_config
+from altrios.lifts.distances import calculate_distances
 
 class loggingLevel(IntEnum):
     NONE = 1
@@ -91,7 +92,7 @@ class Terminal:
 
         # layout
         self.layout = layout
-        distances = calculate_distances(actual_railcars=None)
+        distances = calculate_distances(config=config, config_path=None, actual_railcars=None)
         self.distances = distances
         self.yard_length = distances["yard_length"]
         self.track_capacity = distances["n_max"]

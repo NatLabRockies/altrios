@@ -39,6 +39,18 @@ def build_train_timetable(train_consist_plan, terminal_name, as_dicts, track_cou
     if track_count > 1:
         print("More than one track not yet supported!")
 
+    # Fall back to Cars_* counts (1 container per car) when explicit Containers_* columns
+    # are absent. TODO: When LIFTS handles double-stacked containers, this should be updated.
+    available_cols = set(train_consist_plan.columns)
+    if "Containers_Empty" not in available_cols:
+        train_consist_plan = train_consist_plan.with_columns(
+            pl.col("Cars_Empty").alias("Containers_Empty")
+        )
+    if "Containers_Loaded" not in available_cols:
+        train_consist_plan = train_consist_plan.with_columns(
+            pl.col("Cars_Loaded").alias("Containers_Loaded")
+        )
+
     this_terminal_trains = (train_consist_plan
         .filter(
             pl.col("Train_Type").str.starts_with(pl.lit("Intermodal"))
@@ -54,7 +66,13 @@ def build_train_timetable(train_consist_plan, terminal_name, as_dicts, track_cou
             pl.col("Containers_Loaded").alias("full_containers")
         )
         .unique()
-    ) 
+    )
+
+    if this_terminal_trains.height == 0:
+        raise ValueError(
+            "No Intermodal trains found in train_consist_plan; "
+            "build_train_timetable requires at least one row with Train_Type starting with 'Intermodal'."
+        ) 
     arrivals = (this_terminal_trains
         .filter(pl.col("Destination_ID") == pl.lit(terminal_name))
         # TODO: When LIFTS handles double-stacked containers, this should be updated accordingly.

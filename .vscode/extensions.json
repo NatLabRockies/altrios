@@ -3,5 +3,6 @@
     "rust-lang.rust-analyzer",
     "matangover.mypy",
     "charliermarsh.ruff",
+    "emeryberger.scalene",
   ]
 }
