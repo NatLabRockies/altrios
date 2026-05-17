@@ -91,8 +91,7 @@ def run_terminal_simulation(
     train_consist_plan
         Mode-specific input plan. For `intermodal_rail` this is the train
         consist plan DataFrame. Future modes may interpret this argument
-        differently or rename it; the parameter list is intentionally kept
-        compatible with the legacy `run_simulation` signature for now.
+        differently or rename it.
     terminal
         Terminal name (selects entries from the input plan).
 
@@ -272,3 +271,15 @@ register_mode(TerminalMode(
         "slots, and gantry cranes."
     ),
 ))
+
+
+if __name__ == "__main__":
+    consist_plan = (pl.read_csv(utilities.package_root() / 'resources' / 'train_consist_plan.csv')
+        .with_columns(pl.lit("Intermodal").alias("Train_Type"))
+    )
+    container_data, vehicle_log_df, terminal_obj = run_terminal_simulation(
+        mode="intermodal_rail",
+        train_consist_plan=consist_plan,
+        terminal="Allouez",
+    )
+

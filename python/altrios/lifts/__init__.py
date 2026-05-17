@@ -8,7 +8,6 @@ from altrios.lifts.classes import (
     TerminalState,
     loggingLevel,
 )
-from altrios.lifts.lifts_simulator import run_simulation
 from altrios.lifts.terminal_sim import (
     TerminalMode,
     get_mode,
@@ -25,6 +24,5 @@ __all__ = [
     "list_modes",
     "loggingLevel",
     "register_mode",
-    "run_simulation",
     "run_terminal_simulation",
 ]

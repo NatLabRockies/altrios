@@ -3,7 +3,7 @@ from altrios import sim_manager
 from altrios import utilities, defaults
 import altrios as alt
 from altrios.train_planner import planner_config
-from altrios.lifts import lifts_simulator
+from altrios.lifts import run_terminal_simulation
 import numpy as np
 import matplotlib.pyplot as plt
 import time
@@ -76,9 +76,10 @@ t0_main = time.perf_counter()
 t1_main = time.perf_counter()
 print(f"Elapsed time to run `sim_manager.main()`: {t1_main - t0_main:.3g} s")
 
-container_data, vehicle_log_df, terminal_obj = lifts_simulator.run_simulation(
-    train_consist_plan = train_consist_plan,
-    terminal = "Allouez")
+container_data, vehicle_log_df, terminal_obj = run_terminal_simulation(
+    mode="intermodal_rail",
+    train_consist_plan=train_consist_plan,
+    terminal="Allouez")
 
 t2_main = time.perf_counter()
 print(f"Elapsed time to run LIFTS simulation: {t2_main - t1_main:.3g} s")
