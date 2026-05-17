@@ -7,7 +7,7 @@ simulation:
 
 yard:
   yard_type: parallel
-  track_number: 2             # tracks to process containers
+  track_number: 5             # tracks to process containers
   receiving_track_numbers: 10 # tracks to hold decoupled railcars
   railcar_length: 60          # railcar length (joint + railcar; ft)
   d_f: 15                     # crossing offset (ft)

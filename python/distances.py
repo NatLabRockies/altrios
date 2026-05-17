@@ -73,7 +73,7 @@ def simulate_truck_travel(truck_id, train_schedule, terminal, total_lane_length,
     return truck_travel_time
 
 
-def simulate_hostler_travel(hostler_id, current_veh_num, total_lane_length, d_h_min, d_h_max):
+def simulate_hostler_track_travel(hostler_id, current_veh_num, total_lane_length, d_h_min, d_h_max):
     global state
     # Generate hostler travel distance from uniform distribution
     d_h_dist = uniform(loc=d_h_min, scale=(d_h_max - d_h_min)).rvs()
