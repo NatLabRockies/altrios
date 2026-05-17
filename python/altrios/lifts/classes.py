@@ -165,7 +165,7 @@ class Terminal:
 
         # fixed processing time
         self.CONTAINERS_PER_CRANE_MOVE_MEAN = 2 / 60  # crane movement avg time: distance / speed = hr
-        self. CRANE_MOVE_DEV_TIME = 1 / 3600  # crane movement speed deviation value: hr
+        self.CRANE_MOVE_DEV_TIME = 1 / 3600  # crane movement speed deviation value: hr
         self.TRUCK_DIESEL_PERCENTAGE = 1
         self.TRUCK_ARRIVAL_MEAN = 2/60
         self.TRUCK_INGATE_TIME = 2/60

@@ -3,7 +3,7 @@ from altrios import sim_manager
 from altrios import utilities, defaults
 import altrios as alt
 from altrios.train_planner import planner_config
-from altrios.lifts import single_track_simulation, lifts_simulator
+from altrios.lifts import lifts_simulator
 import numpy as np
 import matplotlib.pyplot as plt
 import time
@@ -76,15 +76,9 @@ t0_main = time.perf_counter()
 t1_main = time.perf_counter()
 print(f"Elapsed time to run `sim_manager.main()`: {t1_main - t0_main:.3g} s")
 
-single_track_instance = False
-if single_track_instance:
-    summary_df, energy_consumption_df, vehicle_log_df = single_track_simulation.run_simulation(
-        train_consist_plan = train_consist_plan, 
-        terminal = "Allouez")
-else:
-    summary_df, energy_consumption_df, vehicle_log_df = lifts_simulator.run_simulation(
-        train_consist_plan = train_consist_plan, 
-        terminal = "Allouez")
+summary_df, energy_consumption_df, vehicle_log_df = lifts_simulator.run_simulation(
+    train_consist_plan = train_consist_plan,
+    terminal = "Allouez")
 
 t2_main = time.perf_counter()
 print(f"Elapsed time to run LIFTS simulation: {t2_main - t1_main:.3g} s")
