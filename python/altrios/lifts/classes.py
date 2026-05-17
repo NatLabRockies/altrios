@@ -3,6 +3,7 @@ import simpy
 from dataclasses import dataclass
 from enum import IntEnum
 
+from altrios.lifts import utilities
 from altrios.lifts.distances import calculate_distances
 
 
@@ -62,8 +63,16 @@ class Terminal:
     lives on the ``state`` member (a :class:`TerminalState`).
     """
 
-    def __init__(self, env, config, layout, truck_capacity, chassis_count):
+    def __init__(self, env, config, layout, truck_capacity, chassis_count,
+                 log_level: "loggingLevel" = None):
         self.config = config
+
+        # Run-scoped log threshold. Stored on Terminal for inspection and to
+        # support future per-terminal differentiation; the utilities module
+        # also holds a synchronized copy for sites that run before Terminal
+        # construction.
+        self.log_level: loggingLevel = log_level if log_level is not None else loggingLevel.BASIC
+        utilities.set_log_level(self.log_level)
 
         sim_cfg = config["simulation"]
         yard_cfg = config["yard"]
@@ -128,6 +137,10 @@ class Terminal:
 
         # Mutable simulation state lives here.
         self.state = TerminalState(env, self)
+
+    def log(self, level: "loggingLevel", msg: str) -> None:
+        """Print msg iff its severity level is <= self.log_level."""
+        utilities.log(level, msg)
 
 
 class TerminalState:

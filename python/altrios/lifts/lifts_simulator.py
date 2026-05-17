@@ -7,13 +7,15 @@ dispatches by registered terminal mode. This module preserves the historical
 import polars as pl
 
 from altrios.lifts import utilities
+from altrios.lifts.classes import loggingLevel
 from altrios.lifts.terminal_sim import run_terminal_simulation
 
 
 def run_simulation(
         train_consist_plan: pl.DataFrame,
         terminal: str,
-        out_path=None) -> pl.DataFrame:
+        out_path=None,
+        log_level: loggingLevel = loggingLevel.BASIC) -> pl.DataFrame:
     """Run the intermodal rail terminal simulation (compat shim).
 
     New code should call `terminal_sim.run_terminal_simulation(mode=..., ...)`
@@ -24,6 +26,7 @@ def run_simulation(
         train_consist_plan=train_consist_plan,
         terminal=terminal,
         out_path=out_path,
+        log_level=log_level,
     )
 
 

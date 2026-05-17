@@ -4,6 +4,7 @@ import random
 import simpy
 
 from altrios.lifts import utilities
+from altrios.lifts.classes import loggingLevel
 from altrios.lifts.containers import container_process
 from altrios.lifts.emissions import _record_load_emissions
 
@@ -41,7 +42,7 @@ def crane_unload_process(env, terminal, train_schedule, track_id):
 
     if not terminal.state.train_ic_unload_events[train_id].triggered:
         terminal.state.train_ic_unload_events[train_id].succeed()
-        print(f"[Event] All ICs for Train-{train_id} on Track-{track_id} unloaded at {env.now:.3f}")
+        terminal.log(loggingLevel.BASIC, f"[Event] All ICs for Train-{train_id} on Track-{track_id} unloaded at {env.now:.3f}")
 
 
 def crane_load_process(env, terminal, track_id, train_schedule):
@@ -78,4 +79,4 @@ def crane_load_process(env, terminal, track_id, train_schedule):
 
     if not terminal.state.train_end_load_events[train_id].triggered:
         terminal.state.train_end_load_events[train_id].succeed()
-        print(f"[Event] All OCs for Train-{train_id} on Track-{track_id} loaded at {env.now:.3f}")
+        terminal.log(loggingLevel.BASIC, f"[Event] All OCs for Train-{train_id} on Track-{track_id} loaded at {env.now:.3f}")

@@ -6,6 +6,27 @@ import numba as nb
 import json
 import yaml
 
+# ---------------------------------------------------------------------------
+# Run-scoped log gate. Threshold semantics match loggingLevel in classes.py:
+# NONE=1 prints nothing, BASIC=2 prints BASIC, DEBUG=3 prints BASIC+DEBUG.
+# A message at level L prints iff the current threshold >= L. utilities.py
+# uses raw ints here to avoid importing classes.py (which depends on this
+# module transitively via distances.py).
+# ---------------------------------------------------------------------------
+_LOG_LEVEL: int = 2  # BASIC
+
+
+def set_log_level(level) -> None:
+    """Set the run-scoped log threshold. Accepts loggingLevel or int."""
+    global _LOG_LEVEL
+    _LOG_LEVEL = int(level)
+
+
+def log(level, msg: str) -> None:
+    """Print msg iff its severity level is <= the current threshold."""
+    if _LOG_LEVEL >= int(level):
+        print(msg)
+
 
 @nb.njit(cache=True)
 def _greedy_match_arrivals_to_departures(
@@ -149,7 +170,7 @@ def load_config(config_path: Path = CONFIG_PATH):
 
 def build_train_timetable(train_consist_plan, terminal_name, as_dicts, track_count=1, min_processing_time_hours = 5.0):
     if track_count > 1:
-        print("More than one track not yet supported!")
+        log(2, "More than one track not yet supported!")  # BASIC
 
     # Fall back to Cars_* counts (1 container per car) when explicit Containers_* columns
     # are absent. TODO: When LIFTS handles double-stacked containers, this should be updated.

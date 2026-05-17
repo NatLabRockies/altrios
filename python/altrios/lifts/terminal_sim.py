@@ -28,7 +28,7 @@ import polars as pl
 import simpy
 
 from altrios.lifts import distances, utilities
-from altrios.lifts.classes import Terminal
+from altrios.lifts.classes import Terminal, loggingLevel
 from altrios.lifts.emissions import emission_records
 from altrios.lifts.train_flow import process_train_arrival
 
@@ -81,7 +81,8 @@ def run_terminal_simulation(
         mode: str,
         train_consist_plan: pl.DataFrame,
         terminal: str,
-        out_path=None) -> pl.DataFrame:
+        out_path=None,
+        log_level: loggingLevel = loggingLevel.BASIC) -> pl.DataFrame:
     """Run a terminal simulation using the named mode.
 
     Parameters
@@ -118,20 +119,23 @@ def run_terminal_simulation(
         config=terminal_config,
         layout=terminal_layout,
         truck_capacity=truck_number,
-        chassis_count=chassis_count)
+        chassis_count=chassis_count,
+        log_level=log_level)
 
-    print("\nTrain timetable:")
+    terminal_obj.log(loggingLevel.BASIC, f"[INFO] layout: {terminal_layout}")
+    terminal_obj.log(loggingLevel.BASIC, "\nTrain timetable:")
     for schedule in train_timetable:
-        print(schedule)
+        terminal_obj.log(loggingLevel.BASIC, str(schedule))
         env.process(mode_obj.process_arrival(env, terminal_obj, schedule))
 
     num_tracks = terminal_obj.track_number
     num_cranes = num_tracks * terminal_obj.cranes_per_track
     num_hostlers = terminal_obj.hostler_number
 
-    print("*" * 50)
-    print(f"Mode: {mode_obj.name}; Tracks: {num_tracks}; Cranes: {num_cranes}; Hostlers: {num_hostlers}")
-    print("*" * 50)
+    terminal_obj.log(loggingLevel.BASIC, "*" * 50)
+    terminal_obj.log(loggingLevel.BASIC,
+        f"Mode: {mode_obj.name}; Tracks: {num_tracks}; Cranes: {num_cranes}; Hostlers: {num_hostlers}")
+    terminal_obj.log(loggingLevel.BASIC, "*" * 50)
 
     # When a train_consist_plan is supplied, simulate the entire plan regardless
     # of the config's simulation length. Otherwise honor the configured horizon.

@@ -1,6 +1,6 @@
 ﻿"""Per-train orchestration: arrival, track assignment, unload/load coordination, departure."""
 from altrios.lifts import utilities
-from altrios.lifts.classes import container
+from altrios.lifts.classes import container, loggingLevel
 from altrios.lifts.containers import handle_remaining_oc
 from altrios.lifts.cranes import crane_load_process, crane_unload_process
 from altrios.lifts.truck_gate import truck_arrival
@@ -8,12 +8,12 @@ from altrios.lifts.truck_gate import truck_arrival
 
 def handle_train_departure(env, terminal, train_schedule, train_id, track_id, arrival_time):
     if env.now < train_schedule["departure_time"]:
-        print(f"Time {env.now:.3f}: [EARLY] Train {train_id} departs from track {track_id}.")
+        terminal.log(loggingLevel.BASIC, f"Time {env.now:.3f}: [EARLY] Train {train_id} departs from track {track_id}.")
     elif env.now == train_schedule["departure_time"]:
-        print(f"Time {env.now:.3f}: [In Time] Train {train_id} departs from track {track_id}.")
+        terminal.log(loggingLevel.BASIC, f"Time {env.now:.3f}: [In Time] Train {train_id} departs from track {track_id}.")
     else:
         delay_time = env.now - train_schedule["departure_time"]
-        print(f"Time {env.now:.3f}: [DELAYED] Train {train_id} delayed {delay_time:.3f}h from track {track_id}.")
+        terminal.log(loggingLevel.BASIC, f"Time {env.now:.3f}: [DELAYED] Train {train_id} delayed {delay_time:.3f}h from track {track_id}.")
 
     oc_start = train_schedule.get("_oc_id_start", 1)
     for oc_id in range(oc_start, oc_start + train_schedule['oc_number']):
@@ -36,10 +36,10 @@ def train_process_per_track(env, terminal, track_id, train_schedule, train_id, a
     # check before crane loading
     # condition 1: all ic picked
     yield terminal.state.train_ic_picked_events[train_id]
-    print(f"[Event]: All {train_schedule['full_cars']} ICs picked for train {train_id}.")
+    terminal.log(loggingLevel.DEBUG, f"[Event]: All {train_schedule['full_cars']} ICs picked for train {train_id}.")
     # condition 2 & 3: no OCs on parking slots - OCs remaining -> process rest OCs; all OC prepared
     oc_in_parking = terminal.state.parking_oc_count_by_train.get(train_id, 0)
-    print(f"check # OCs on parking slots: {oc_in_parking}")
+    terminal.log(loggingLevel.DEBUG, f"check # OCs on parking slots: {oc_in_parking}")
     if oc_in_parking >= 0:
 	    env.process(handle_remaining_oc(env, terminal, train_schedule))
 	    
@@ -74,22 +74,22 @@ def process_train_arrival(env, terminal, train_schedule):
     yield terminal.state.all_trucks_arrived_events[train_id]
     if env.now <= arrival_time:
         yield env.timeout(arrival_time - env.now)
-        print(f"Time {env.now:.3f}: [In Time] Train {train_id}.")
+        terminal.log(loggingLevel.BASIC, f"Time {env.now:.3f}: [In Time] Train {train_id}.")
         delay_time = 0
     else:
         delay_time = env.now - arrival_time
-        print(f"Time {env.now:.3f}: [DELAYED] Train {train_id} delayed {delay_time:.3f}h.")
+        terminal.log(loggingLevel.BASIC, f"Time {env.now:.3f}: [DELAYED] Train {train_id} delayed {delay_time:.3f}h.")
     terminal.state.train_delay_time[train_id] = delay_time
     terminal.state.train_pool_stores.put(train_id)
 
     # Track assignment
     track_id = yield terminal.state.tracks.get()
     if track_id is None:
-        print(f"Time {env.now:.3f}: Train {train_id} waiting for an available track.")
+        terminal.log(loggingLevel.BASIC, f"Time {env.now:.3f}: Train {train_id} waiting for an available track.")
         return
 
     assigned_train_id = yield terminal.state.train_pool_stores.get()
-    print(f"Time {env.now:.3f}: Train {assigned_train_id} assigned to track {track_id}.")
+    terminal.log(loggingLevel.DEBUG, f"Time {env.now:.3f}: Train {assigned_train_id} assigned to track {track_id}.")
 
     # Stage ICs on this train into the per-train IC store
     ic_start = terminal.state.IC_COUNT[train_id]

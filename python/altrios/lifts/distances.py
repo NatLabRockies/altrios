@@ -47,7 +47,6 @@ def get_layout(config):
             "P": int(layout_cfg.get("P", 10)),
             "mode": "fixed"
         }
-    print(f"[INFO] layout: {layout}")
     return layout
 
 
@@ -155,13 +154,11 @@ def calculate_distances(config_path="input/config.yaml", config=None, actual_rai
         "d_tr_min": d_tr_min, "d_tr_mean": d_tr_mean, "d_tr_max": d_tr_max
     }
 
-
 def ugly_sigma(x):
     total_sum = 0
     for i in range(1, x):
         total_sum += 2 * i * (x - i)
     return total_sum / (x ** 2)
-
 
 def speed_density(avg_density, vehicle_type, N):
     if vehicle_type == 'hostler':

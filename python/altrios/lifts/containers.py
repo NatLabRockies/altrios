@@ -2,6 +2,7 @@
 import random
 
 from altrios.lifts import distances, utilities
+from altrios.lifts.classes import loggingLevel
 from altrios.lifts.emissions import (
     _record_side_emissions,
     _record_trip_emissions,
@@ -162,7 +163,7 @@ def handle_remaining_oc(env, terminal, train_schedule):
         chassis_remaining = state.chassis_oc_count_by_train.get(train_id, 0)
 
         if outbound_remaining == 0 and chassis_remaining == train_schedule['oc_number']:
-            print(f"Time {env.now:.3f}: All OC handled for train {train_id}.")
+            terminal.log(loggingLevel.DEBUG, f"Time {env.now:.3f}: All OC handled for train {train_id}.")
             if not state.train_oc_prepared_events[train_id].triggered:
                 state.train_oc_prepared_events[train_id].succeed()
             return
