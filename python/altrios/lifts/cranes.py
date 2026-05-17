@@ -9,27 +9,31 @@ from altrios.lifts.emissions import _record_load_emissions
 
 
 def crane_unload_process(env, terminal, train_schedule, track_id):
-    """Drain all ICs for this train from train_ic_stores onto the chassis FilterStore."""
+    """Drain all ICs for this train from the per-train IC store onto the shared chassis IC store."""
     train_id = train_schedule['train_id']
+    state = terminal.state
+    ic_store = state.train_ic_store(train_id)
 
     def unload_crane_worker(env):
-        crane_obj = yield terminal.state.cranes_by_track[track_id].get()
+        crane_obj = yield state.cranes_by_track[track_id].get()
         try:
             while True:
-                ic_items = terminal.state.train_ic_stores.items
-                if not any(item.train_id == train_id for item in ic_items):
+                if not ic_store.items:
                     break
-                ic = yield terminal.state.train_ic_stores.get(lambda x: x.train_id == train_id)
+                ic = yield ic_store.get()
                 crane_unload_time = (terminal.CONTAINERS_PER_CRANE_MOVE_MEAN +
                                      random.uniform(0, terminal.CRANE_MOVE_DEV_TIME))
                 yield env.timeout(crane_unload_time)
-                yield terminal.state.chassis.put(ic)
+                yield state.chassis_ic_store.put(ic)
+                state.chassis_ic_count_by_train[train_id] = (
+                    state.chassis_ic_count_by_train.get(train_id, 0) + 1
+                )
                 utilities.record_container_event(terminal, ic.to_string(), 'crane_unload', env.now)
                 _record_load_emissions(terminal, crane_obj, "loaded", train_id,
                                        ic.to_string(), "crane_unload", env.now, track_id)
                 env.process(container_process(env, terminal, train_schedule))
         finally:
-            yield terminal.state.cranes_by_track[track_id].put(crane_obj)
+            yield state.cranes_by_track[track_id].put(crane_obj)
 
     num_cranes = terminal.cranes_on_track[track_id]
     unload_processes = [env.process(unload_crane_worker(env)) for _ in range(num_cranes)]
@@ -43,30 +47,30 @@ def crane_unload_process(env, terminal, train_schedule, track_id):
 def crane_load_process(env, terminal, track_id, train_schedule):
     """Wait for OCs to be staged on chassis, then load them onto the train."""
     train_id = train_schedule['train_id']
-    yield terminal.state.train_start_load_events[train_id]
+    state = terminal.state
+    yield state.train_start_load_events[train_id]
+
+    oc_store = state.chassis_oc_store(train_id)
 
     def load_crane_worker(env):
-        crane_obj = yield terminal.state.cranes_by_track[track_id].get()
+        crane_obj = yield state.cranes_by_track[track_id].get()
         try:
             while True:
-                chassis_items = terminal.state.chassis.items
-                if not any(
-                    (item.type == 'Outbound' and item.train_id == train_id)
-                    for item in chassis_items
-                ):
+                if not oc_store.items:
                     break
-                oc = yield terminal.state.chassis.get(
-                    lambda x: x.type == 'Outbound' and x.train_id == train_id
+                oc = yield oc_store.get()
+                state.chassis_oc_count_by_train[train_id] = (
+                    state.chassis_oc_count_by_train.get(train_id, 0) - 1
                 )
                 crane_load_time = (terminal.CONTAINERS_PER_CRANE_MOVE_MEAN +
                                    random.uniform(0, terminal.CRANE_MOVE_DEV_TIME))
                 yield env.timeout(crane_load_time)
-                yield terminal.state.train_oc_stores.put(oc)
+                yield state.train_oc_stores.put(oc)
                 utilities.record_container_event(terminal, oc.to_string(), 'crane_load', env.now)
                 _record_load_emissions(terminal, crane_obj, "loaded", train_id,
                                        oc.to_string(), "crane_load", env.now, track_id)
         finally:
-            yield terminal.state.cranes_by_track[track_id].put(crane_obj)
+            yield state.cranes_by_track[track_id].put(crane_obj)
 
     num_cranes = terminal.cranes_on_track[track_id]
     load_processes = [env.process(load_crane_worker(env)) for _ in range(num_cranes)]

@@ -17,7 +17,10 @@ def truck_entry(env, terminal, truck_obj, oc, train_schedule):
 
     utilities.record_container_event(terminal, oc.to_string(), 'truck_arrival', env.now)
     utilities.record_container_event(terminal, oc.to_string(), 'truck_dropoff', env.now)
-    yield terminal.state.parking_slots.put(oc)
+    yield terminal.state.parking_oc_store.put(oc)
+    terminal.state.parking_oc_count_by_train[oc.train_id] = (
+        terminal.state.parking_oc_count_by_train.get(oc.train_id, 0) + 1
+    )
     _record_trip_emissions(terminal, truck_obj, "truck", "loaded", train_id,
                            oc.to_string(), "truck_entry", travel_time, env.now)
 

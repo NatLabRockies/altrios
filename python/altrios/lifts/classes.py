@@ -164,12 +164,32 @@ class TerminalState:
 
         # Container/queue stores
         self.train_pool_stores = simpy.Store(env, capacity=99999)
-        self.train_ic_stores = simpy.FilterStore(env, capacity=99999)
         self.train_oc_stores = simpy.Store(env, capacity=99999)
         self.oc_store = simpy.Store(env, capacity=99999)
-        self.parking_slots = simpy.FilterStore(env, capacity=99999)
-        self.chassis = simpy.FilterStore(env, capacity=999999)
         self.truck_store = simpy.Store(env, capacity=999999999)
+
+        # ----- Containers in flight: keyed dict-of-Store, NOT FilterStore -----
+        # FilterStore.get(lambda ...) is O(N) per call; with thousands of
+        # containers in flight this dominates runtime. Splitting by the keys
+        # the filters were checking (train_id, type) reduces each get/put to
+        # O(1). Counters track per-train totals where consumers pull "any"
+        # item but need a per-train completion check.
+
+        # ICs awaiting crane unload, one Store per train.
+        self.train_ic_stores: dict = {}
+
+        # Chassis: IC side is shared (container_process pulls any Inbound);
+        # OC side is per-train (load_crane_worker pulls by train_id).
+        self.chassis_ic_store = simpy.Store(env)
+        self.chassis_oc_stores: dict = {}
+        self.chassis_ic_count_by_train: dict = {}
+        self.chassis_oc_count_by_train: dict = {}
+
+        # Parking slots: IC side is per-train (truck pulls by train_id);
+        # OC side is shared (hostler pulls any Outbound, regardless of train).
+        self.parking_ic_stores: dict = {}
+        self.parking_oc_store = simpy.Store(env)
+        self.parking_oc_count_by_train: dict = {}
 
         # Hostlers: split into parked/active pools
         hostler_total = terminal.hostler_number
@@ -206,3 +226,28 @@ class TerminalState:
         self.container_events: list = []
         self.time_per_train: dict = {}
         self.train_delay_time: dict = {}
+
+    # ----- Per-train Store accessors (lazy creation) ----------------------
+    # Using helpers rather than dict.setdefault(...) avoids constructing a
+    # throwaway simpy.Store every call when the key already exists.
+
+    def train_ic_store(self, train_id):
+        s = self.train_ic_stores.get(train_id)
+        if s is None:
+            s = simpy.Store(self.env)
+            self.train_ic_stores[train_id] = s
+        return s
+
+    def chassis_oc_store(self, train_id):
+        s = self.chassis_oc_stores.get(train_id)
+        if s is None:
+            s = simpy.Store(self.env)
+            self.chassis_oc_stores[train_id] = s
+        return s
+
+    def parking_ic_store(self, train_id):
+        s = self.parking_ic_stores.get(train_id)
+        if s is None:
+            s = simpy.Store(self.env)
+            self.parking_ic_stores[train_id] = s
+        return s

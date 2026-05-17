@@ -38,8 +38,9 @@ def train_process_per_track(env, terminal, track_id, train_schedule, train_id, a
     yield terminal.state.train_ic_picked_events[train_id]
     print(f"[Event]: All {train_schedule['full_cars']} ICs picked for train {train_id}.")
     # condition 2 & 3: no OCs on parking slots - OCs remaining -> process rest OCs; all OC prepared
-    print(f"check # OCs on parking slots: {sum((item.type == 'Outbound') and (item.train_id == train_id) for item in terminal.state.parking_slots.items)}")
-    if sum((item.type == 'Outbound') and (item.train_id == train_id) for item in terminal.state.parking_slots.items) >= 0:
+    oc_in_parking = terminal.state.parking_oc_count_by_train.get(train_id, 0)
+    print(f"check # OCs on parking slots: {oc_in_parking}")
+    if oc_in_parking >= 0:
 	    env.process(handle_remaining_oc(env, terminal, train_schedule))
 	    
     yield terminal.state.train_oc_prepared_events[train_id]
@@ -92,9 +93,10 @@ def process_train_arrival(env, terminal, train_schedule):
 
     # Stage ICs on this train into the per-train IC store
     ic_start = terminal.state.IC_COUNT[train_id]
+    ic_store = terminal.state.train_ic_store(train_id)
     for ic_id in range(ic_start, ic_start + train_schedule['full_cars']):
         ic = container(type='Inbound', id=ic_id, train_id=train_id)
-        terminal.state.train_ic_stores.put(ic)
+        ic_store.put(ic)
         utilities.record_container_event(terminal, ic.to_string(), 'train_arrival_expected', arrival_time)
         utilities.record_container_event(terminal, ic.to_string(), 'train_arrival_actual', env.now)
     terminal.state.IC_COUNT[train_id] = ic_start + train_schedule['full_cars']
