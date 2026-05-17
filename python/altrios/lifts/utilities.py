@@ -311,8 +311,13 @@ def record_container_event(terminal, container, event_type, timestamp):
     terminal.state.container_events.append((container_string, event_type, timestamp))
 
 
-def emission_calculation(terminal, status: str, move: str, vehicle: str, energy_type: str, travel_time: float) -> float:
-    ems = terminal.ems
+def compute_energy_use(terminal, status: str, move: str, vehicle: str, energy_type: str, travel_time: float) -> float:
+    """Return the per-event energy use for one resource action.
+
+    The returned value is in the native unit of the configured
+    ``*_consumption`` block: gallons for Diesel/Hybrid, kWh for Electric.
+    """
+    cfg = terminal.energy_use_config
 
     move = move.lower()
     status = status.lower()
@@ -322,52 +327,40 @@ def emission_calculation(terminal, status: str, move: str, vehicle: str, energy_
     # --- load consumption (unit: per lift)
     if move == "load":
         key = "crane_loaded" if status == "loaded" else "crane_idle"
-        emission_unit = ems["load_consumption"][key][energy_type]
-        emissions = emission_unit
+        unit = cfg["load_consumption"][key][energy_type]
+        energy_use = unit
 
     # --- trip consumption (unit: hr × travel_time)
     elif move == "trip":
         key = f"{vehicle}_{status}"  # e.g. hostler_loaded / truck_empty
-        emission_unit = ems["trip_consumption"][key][energy_type]
-        emissions = emission_unit * travel_time
+        unit = cfg["trip_consumption"][key][energy_type]
+        energy_use = unit * travel_time
 
     # --- side pick consumption (unit: per lift)
     elif move == "side":
-        emission_unit = ems["side_pick_consumption"]["side"][energy_type]
-        emissions = emission_unit
+        unit = cfg["side_pick_consumption"]["side"][energy_type]
+        energy_use = unit
 
     else:
         raise ValueError(f"Unsupported move type '{move}' for vehicle '{vehicle}'.")
 
-    return emissions
+    return energy_use
 
 
-def record_emission(emission_records: list, vehicle_type: str, resource_id: str, track_id: str, train_id: str, container_id: str, event_type: str, zone: str, emission_value: float, travel_time: float, env_now: float) -> None:
-    emission_records.append({
+def record_energy_use(energy_use_records: list, vehicle_type: str, fuel_type: str, resource_id: str, track_id: str, train_id: str, container_id: str, event_type: str, zone: str, energy_value: float, travel_time: float, env_now: float) -> None:
+    energy_use_records.append({
         "resource_type": vehicle_type.lower(),
+        "fuel_type": fuel_type,
         "resource_id": str(resource_id),
         "track_id":str(track_id),
         "train_id": str(train_id),
         "container_id": str(container_id),
         "event_type": event_type,
         "zone": zone,
-        "energy_consumption(gal)": float(emission_value),
+        "energy_consumption(gal_or_kWh)": float(energy_value),
         "load/travel_time(hr)": float(travel_time),
         "record_timestamp": float(env_now),
     })
-
-def save_emission_results(emission_records: pl.DataFrame, out_path: Path, filetype: str = "csv"):
-    if out_path is None:
-        return
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if filetype == "csv":
-        emission_records.write_csv(out_path)
-    elif filetype == "xlsx":
-        emission_records.to_pandas().to_excel(out_path, index=False)
-    else:
-        raise ValueError("filetype must be 'csv' or 'xlsx'")
 
 def initialize_train_events(env, terminal, train_id):
     # Event dicts are pre-created on TerminalState, so no hasattr/setattr

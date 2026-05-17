@@ -14,7 +14,7 @@ yard:
   d_x: 15                     # track spacing (ft)
 
 terminal:
-  cranes_per_track: 4           # assume evenly distributed cranes on tracks
+  cranes_per_track: 4           # int (broadcast to every track) or list of ints (one entry per track)
   hostler_number: 36            # all hostlers are shared between tracks
   hostler_diesel_percentage: 1  # percentage of diesel hostlers (decimal between 0 to 1)
 
@@ -33,8 +33,9 @@ layout:
   n_p: 2       # parking aisles per group
   n_r: 20      # pairs of parking slots
 
-# Fixed emission matrix (ZANZEFF reports, 2022)
-emissions:
+# Per-event energy use rates (ZANZEFF reports, 2022).
+# Diesel/Hybrid values are in gallons; Electric values are in kWh.
+energy_use:
   load_consumption:
     crane_loaded:
       Diesel: 0.26    # kWh per load

@@ -76,7 +76,7 @@ t0_main = time.perf_counter()
 t1_main = time.perf_counter()
 print(f"Elapsed time to run `sim_manager.main()`: {t1_main - t0_main:.3g} s")
 
-summary_df, energy_consumption_df, vehicle_log_df = lifts_simulator.run_simulation(
+container_data, vehicle_log_df, terminal_obj = lifts_simulator.run_simulation(
     train_consist_plan = train_consist_plan,
     terminal = "Allouez")
 

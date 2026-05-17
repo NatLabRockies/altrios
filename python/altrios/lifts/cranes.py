@@ -1,4 +1,4 @@
-﻿"""Crane unload/load SimPy processes."""
+"""Crane unload/load SimPy processes."""
 import random
 
 import simpy
@@ -6,7 +6,7 @@ import simpy
 from altrios.lifts import utilities
 from altrios.lifts.classes import loggingLevel
 from altrios.lifts.containers import container_process
-from altrios.lifts.emissions import _record_load_emissions
+from altrios.lifts.energy_use import _record_load_energy
 
 
 def crane_unload_process(env, terminal, train_schedule, track_id):
@@ -30,7 +30,7 @@ def crane_unload_process(env, terminal, train_schedule, track_id):
                     state.chassis_ic_count_by_train.get(train_id, 0) + 1
                 )
                 utilities.record_container_event(terminal, ic.to_string(), 'crane_unload', env.now)
-                _record_load_emissions(terminal, crane_obj, "loaded", train_id,
+                _record_load_energy(terminal, crane_obj, "loaded", train_id,
                                        ic.to_string(), "crane_unload", env.now, track_id)
                 env.process(container_process(env, terminal, train_schedule))
         finally:
@@ -68,7 +68,7 @@ def crane_load_process(env, terminal, track_id, train_schedule):
                 yield env.timeout(crane_load_time)
                 yield state.train_oc_stores.put(oc)
                 utilities.record_container_event(terminal, oc.to_string(), 'crane_load', env.now)
-                _record_load_emissions(terminal, crane_obj, "loaded", train_id,
+                _record_load_energy(terminal, crane_obj, "loaded", train_id,
                                        oc.to_string(), "crane_load", env.now, track_id)
         finally:
             yield state.cranes_by_track[track_id].put(crane_obj)

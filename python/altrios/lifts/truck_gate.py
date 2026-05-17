@@ -1,9 +1,9 @@
-﻿"""Truck-side processes: gate ingress/egress and per-train truck spawning."""
+"""Truck-side processes: gate ingress/egress and per-train truck spawning."""
 import random
 
 from altrios.lifts import utilities
 from altrios.lifts.classes import container, truck
-from altrios.lifts.emissions import _record_trip_emissions
+from altrios.lifts.energy_use import _record_trip_energy
 
 
 def truck_entry(env, terminal, truck_obj, oc, train_schedule):
@@ -21,7 +21,7 @@ def truck_entry(env, terminal, truck_obj, oc, train_schedule):
     terminal.state.parking_oc_count_by_train[oc.train_id] = (
         terminal.state.parking_oc_count_by_train.get(oc.train_id, 0) + 1
     )
-    _record_trip_emissions(terminal, truck_obj, "truck", "loaded", train_id,
+    _record_trip_energy(terminal, truck_obj, "truck", "loaded", train_id,
                            oc.to_string(), "truck_entry", travel_time, env.now)
 
 
@@ -32,7 +32,7 @@ def empty_truck(env, terminal, truck_obj):
     travel_time = terminal.TRUCK_INGATE_TIME + random.uniform(0, terminal.TRUCK_INGATE_TIME_DEV)
     yield env.timeout(travel_time)
     terminal.state.in_gates.release(ingate_request)
-    _record_trip_emissions(terminal, truck_obj, "truck", "empty",
+    _record_trip_energy(terminal, truck_obj, "truck", "empty",
                            getattr(truck_obj, "train_id", ""), "",
                            "empty_truck_entry", travel_time, env.now)
 
@@ -88,7 +88,7 @@ def truck_exit(env, terminal, truck_obj, ic, train_schedule):
     yield env.timeout(travel_time)
     terminal.state.out_gates.release(out_gate_request)
     utilities.record_container_event(terminal, ic.to_string(), 'truck_exit', env.now)
-    _record_trip_emissions(terminal, truck_obj, "truck", "loaded",
+    _record_trip_energy(terminal, truck_obj, "truck", "loaded",
                            train_id, ic.to_string(), "truck_exit",
                            travel_time, env.now)
     yield terminal.state.truck_store.put(truck_obj)

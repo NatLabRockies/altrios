@@ -74,35 +74,19 @@ class Terminal:
         self.log_level: loggingLevel = log_level if log_level is not None else loggingLevel.BASIC
         utilities.set_log_level(self.log_level)
 
-        sim_cfg = config["simulation"]
         yard_cfg = config["yard"]
         term_cfg = config["terminal"]
         gate_cfg = config["gates"]
-        ems_cfg = config["emissions"]
+        energy_use_cfg = config["energy_use"]
 
-        # simulation
-        self.simulation_length = sim_cfg["length"]
-        self.observation_start = sim_cfg["analyze_start"]
-        self.observation_end = sim_cfg["analyze_end"]
-        self.train_per_day = sim_cfg["train_number"]
-        self.train_batch_size = sim_cfg["train_batch_size"]
-
-        # yard
-        self.yard_type = yard_cfg.get("yard_type")
-        self.track_number = int(yard_cfg.get("track_number"))
-        self.receiving_track_numbers = int(yard_cfg.get("receiving_track_numbers"))
-        self.railcar_length = float(yard_cfg.get("railcar_length"))
-        self.d_f = float(yard_cfg.get("d_f"))
-        self.d_x = float(yard_cfg.get("d_x"))
-
-        # terminal
-        self.cranes_per_track = int(term_cfg.get("cranes_per_track"))
-        self.hostler_number = int(term_cfg.get("hostler_number"))
-        self.hostler_diesel_percentage = float(term_cfg.get("hostler_diesel_percentage"))
-
-        # gates
-        self.in_gate_numbers = int(gate_cfg.get("in_gate_numbers"))
-        self.out_gate_numbers = int(gate_cfg.get("out_gate_numbers"))
+        # Only fields that are read from other modules, or needed below to
+        # size SimPy resources, are pulled out as flat attributes. Everything
+        # else stays accessible via ``self.config``.
+        self.track_number = yard_cfg["track_number"]
+        self.hostler_number = term_cfg["hostler_number"]
+        self.hostler_diesel_percentage = term_cfg["hostler_diesel_percentage"]
+        self.in_gate_numbers = gate_cfg["in_gate_numbers"]
+        self.out_gate_numbers = gate_cfg["out_gate_numbers"]
 
         # layout
         self.layout = layout
@@ -111,15 +95,27 @@ class Terminal:
         self.yard_length = distances["yard_length"]
         self.track_capacity = distances["n_max"]
 
-        # cranes per track (static map; the SimPy stores holding the crane
-        # objects themselves live on ``state.cranes_by_track``)
-        self.cranes_on_track = {
-            track_id: term_cfg["cranes_per_track"]
-            for track_id in range(1, self.track_number + 1)
-        }
+        # Cranes per track. The YAML's ``cranes_per_track`` may be either a
+        # scalar (broadcast to every track) or a list of length
+        # ``track_number`` (one entry per track, 1-indexed in the resulting
+        # map). The SimPy stores holding the crane objects themselves live on
+        # ``state.cranes_by_track``.
+        cpt_cfg = term_cfg["cranes_per_track"]
+        if isinstance(cpt_cfg, (list, tuple)):
+            if len(cpt_cfg) != self.track_number:
+                raise ValueError(
+                    f"cranes_per_track has {len(cpt_cfg)} entries but "
+                    f"track_number is {self.track_number}"
+                )
+            self.cranes_on_track = {i + 1: int(n) for i, n in enumerate(cpt_cfg)}
+        else:
+            self.cranes_on_track = {
+                track_id: int(cpt_cfg)
+                for track_id in range(1, self.track_number + 1)
+            }
 
-        # emissions config
-        self.ems = ems_cfg
+        # energy-use config (per-event diesel/electric consumption rates)
+        self.energy_use_config = energy_use_cfg
 
         # sizing inputs (informational; live stores sized from these on state)
         self.truck_capacity = truck_capacity

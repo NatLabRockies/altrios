@@ -1,11 +1,11 @@
-﻿"""Container-level IC/OC handling: the IC->parking->truck loop and OC->chassis staging."""
+"""Container-level IC/OC handling: the IC->parking->truck loop and OC->chassis staging."""
 import random
 
 from altrios.lifts import distances, utilities
 from altrios.lifts.classes import loggingLevel
-from altrios.lifts.emissions import (
-    _record_side_emissions,
-    _record_trip_emissions,
+from altrios.lifts.energy_use import (
+    _record_side_energy,
+    _record_trip_energy,
 )
 from altrios.lifts.hostlers import get_hostler, return_hostler
 from altrios.lifts.truck_gate import truck_exit
@@ -42,7 +42,7 @@ def handle_oc(env, terminal, train_schedule):
     )
     yield env.timeout(hostler_reposition_travel_time)
     utilities.record_container_event(terminal, oc.to_string(), 'hostler_pickup', env.now)
-    _record_trip_emissions(terminal, assigned_hostler, "hostler", "empty",
+    _record_trip_energy(terminal, assigned_hostler, "hostler", "empty",
                            train_id, oc.to_string(), "hostler_pickup",
                            hostler_reposition_travel_time, env.now,
                            track_id="parking_slots")
@@ -52,9 +52,9 @@ def handle_oc(env, terminal, train_schedule):
     yield env.timeout(side_pick_unload_time)  # side-pick
     # TODO mbruchon: this should instantiate a side loader crane
     # Qianqian's code:
-    # side_pick_ems = emission_calculation(terminal, "loaded", "side", "side_loading_crane", "Diesel", travel_time=side_pick_unload_time)
-    # record_emission(emission_records, "side_loading_crane", 'N/A', 'N/A', str(train_schedule['train_id']), oc,"side_unload", "truck_parking", side_pick_ems, side_pick_unload_time, env.now)
-    #_record_trip_emissions(terminal, assigned_hostler, "hostler", "empty",
+    # side_pick_ems = compute_energy_use(terminal, "loaded", "side", "side_loading_crane", "Diesel", travel_time=side_pick_unload_time)
+    # record_energy_use(energy_use_records, "side_loading_crane", 'N/A', 'N/A', str(train_schedule['train_id']), oc,"side_unload", "truck_parking", side_pick_ems, side_pick_unload_time, env.now)
+    #_record_trip_energy(terminal, assigned_hostler, "hostler", "empty",
     #                       train_id, oc.to_string(), "hostler_to_parking_oc",
     #                       to_parking_time, env.now)
 
@@ -68,7 +68,7 @@ def handle_oc(env, terminal, train_schedule):
         state.chassis_oc_count_by_train.get(oc.train_id, 0) + 1
     )
     utilities.record_container_event(terminal, oc.to_string(), 'hostler_dropoff', env.now)
-    _record_trip_emissions(terminal, assigned_hostler, "hostler", "loaded",
+    _record_trip_energy(terminal, assigned_hostler, "hostler", "loaded",
                             train_id, oc.to_string(), "hostler_to_chassis_oc",
                             to_chassis_time, env.now)
 
@@ -105,7 +105,7 @@ def container_process(env, terminal, train_schedule):
         assigned_hostler, current_veh_num, params=terminal.distances
     )
     yield env.timeout(pickup_time)
-    _record_trip_emissions(terminal, assigned_hostler, "hostler", "empty",
+    _record_trip_energy(terminal, assigned_hostler, "hostler", "empty",
                            train_id, ic.to_string(), "hostler_to_chassis",
                            pickup_time, env.now)
 
@@ -117,7 +117,7 @@ def container_process(env, terminal, train_schedule):
     yield env.timeout(dropoff_time)
     yield state.parking_ic_store(ic.train_id).put(ic)
     utilities.record_container_event(terminal, ic.to_string(), 'hostler_pickup', env.now)
-    _record_trip_emissions(terminal, assigned_hostler, "hostler", "loaded",
+    _record_trip_energy(terminal, assigned_hostler, "hostler", "loaded",
                            train_id, ic.to_string(), "hostler_to_parking",
                            dropoff_time, env.now)
 
@@ -127,7 +127,7 @@ def container_process(env, terminal, train_schedule):
     side_pick_unload_time = 1 / 60 + random.uniform(0, 1 / 600)
     yield env.timeout(side_pick_unload_time)
     utilities.record_container_event(terminal, ic.to_string(), 'hostler_dropoff', env.now)
-    _record_side_emissions(terminal, assigned_hostler, train_id, ic.to_string(), env.now)
+    _record_side_energy(terminal, assigned_hostler, train_id, ic.to_string(), env.now)
 
     yield from return_hostler(env, terminal, assigned_hostler,
                               travel_time_to_active=0,
@@ -143,7 +143,7 @@ def container_process(env, terminal, train_schedule):
     yield env.timeout(truck_travel_time)
     ic = yield state.parking_ic_store(train_id).get()
     utilities.record_container_event(terminal, ic.to_string(), 'truck_pickup', env.now)
-    _record_trip_emissions(terminal, assigned_truck, "truck", "empty",
+    _record_trip_energy(terminal, assigned_truck, "truck", "empty",
                            train_id, ic.to_string(), "truck_to_parking",
                            truck_travel_time, env.now)
     env.process(truck_exit(env, terminal, assigned_truck, ic, train_schedule))
@@ -183,7 +183,7 @@ def handle_remaining_oc(env, terminal, train_schedule):
             assigned_hostler, current_veh_num, params=terminal.distances
         )
         yield env.timeout(to_parking_time)
-        _record_trip_emissions(terminal, assigned_hostler, "hostler", "empty",
+        _record_trip_energy(terminal, assigned_hostler, "hostler", "empty",
                                train_id, oc.to_string(), "hostler_to_parking_oc",
                                to_parking_time, env.now)
 
@@ -192,9 +192,9 @@ def handle_remaining_oc(env, terminal, train_schedule):
         yield env.timeout(side_pick_unload_time)  # side-pick
         # TODO mbruchon: this should instantiate a side loader crane
         # Qianqian's code:
-        # side_pick_ems = emission_calculation(terminal, "loaded", "side", "side_loading_crane", "Diesel", travel_time=side_pick_unload_time)
-        # record_emission(emission_records, "side_loading_crane", 'N/A', 'N/A', str(train_schedule['train_id']), oc,"side_unload", "truck_parking", side_pick_ems, side_pick_unload_time, env.now)
-        #_record_trip_emissions(terminal, assigned_hostler, "hostler", "empty",
+        # side_pick_ems = compute_energy_use(terminal, "loaded", "side", "side_loading_crane", "Diesel", travel_time=side_pick_unload_time)
+        # record_energy_use(energy_use_records, "side_loading_crane", 'N/A', 'N/A', str(train_schedule['train_id']), oc,"side_unload", "truck_parking", side_pick_ems, side_pick_unload_time, env.now)
+        #_record_trip_energy(terminal, assigned_hostler, "hostler", "empty",
         #                       train_id, oc.to_string(), "hostler_to_parking_oc",
         #                       to_parking_time, env.now)
 
@@ -208,7 +208,7 @@ def handle_remaining_oc(env, terminal, train_schedule):
             state.chassis_oc_count_by_train.get(oc.train_id, 0) + 1
         )
         utilities.record_container_event(terminal, oc.to_string(), 'hostler_dropoff', env.now)
-        _record_trip_emissions(terminal, assigned_hostler, "hostler", "loaded",
+        _record_trip_energy(terminal, assigned_hostler, "hostler", "loaded",
                                train_id, oc.to_string(), "hostler_to_chassis_oc",
                                to_chassis_time, env.now)
 

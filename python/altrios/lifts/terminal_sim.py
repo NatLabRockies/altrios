@@ -29,7 +29,7 @@ import simpy
 
 from altrios.lifts import distances, utilities
 from altrios.lifts.classes import Terminal, loggingLevel
-from altrios.lifts.emissions import emission_records
+from altrios.lifts.energy_use import energy_use_records, CO2_KG_PER_UNIT
 from altrios.lifts.train_flow import process_train_arrival
 
 
@@ -81,8 +81,7 @@ def run_terminal_simulation(
         mode: str,
         train_consist_plan: pl.DataFrame,
         terminal: str,
-        out_path=None,
-        log_level: loggingLevel = loggingLevel.BASIC) -> pl.DataFrame:
+        log_level: loggingLevel = loggingLevel.BASIC) -> tuple[pl.DataFrame, pl.DataFrame, Terminal]:
     """Run a terminal simulation using the named mode.
 
     Parameters
@@ -96,14 +95,23 @@ def run_terminal_simulation(
         compatible with the legacy `run_simulation` signature for now.
     terminal
         Terminal name (selects entries from the input plan).
-    out_path
-        Optional output directory; if provided, container event and emission
-        results are written there.
+
+    Returns
+    -------
+    container_data
+        One row per container with arrival/handling/departure timestamps.
+    vehicle_log
+        One row per resource event (crane/hostler/truck), including an
+        `energy_consumption(gal)` column for that event.
+    terminal_obj
+        The fully-populated `Terminal` (config + layout + resource counts +
+        post-run state) used for the simulation. Callers can read its
+        attributes to recover the parameters that were actually used.
     """
     mode_obj = get_mode(mode)
 
-    # Reset the module-level emissions buffer so repeat invocations are clean
-    emission_records.clear()
+    # Reset the module-level energy-use buffer so repeat invocations are clean
+    energy_use_records.clear()
 
     terminal_config = utilities.load_config(utilities.resources_root() / "config.yaml")
     terminal_layout = distances.get_layout(terminal_config)
@@ -129,7 +137,7 @@ def run_terminal_simulation(
         env.process(mode_obj.process_arrival(env, terminal_obj, schedule))
 
     num_tracks = terminal_obj.track_number
-    num_cranes = num_tracks * terminal_obj.cranes_per_track
+    num_cranes = sum(terminal_obj.cranes_on_track.values())
     num_hostlers = terminal_obj.hostler_number
 
     terminal_obj.log(loggingLevel.BASIC, "*" * 50)
@@ -219,32 +227,31 @@ def run_terminal_simulation(
         .drop("is_ic", "train_id")
     ).collect()
 
-    if out_path is not None:
-        out_path.mkdir(parents=True, exist_ok=True)
-        daily_throughput = 2 * terminal_obj.train_batch_size * terminal_obj.track_number
-        container_data.write_excel(out_path / f"simulation_container_{daily_throughput}_track_{num_tracks}_crane_{num_cranes}_hostler_{num_hostlers}_results.xlsx")
-        if emission_records:
-            emission_records_df = pl.DataFrame(
-                emission_records,
-                schema={
-                    "resource_type": pl.Utf8,
-                    "resource_id": pl.Utf8,
-                    "track_id": pl.Utf8,
-                    "train_id": pl.Utf8,
-                    "container_id": pl.Utf8,
-                    "event_type": pl.Utf8,
-                    "zone": pl.Utf8,
-                    "energy_consumption(gal)": pl.Float64,
-                    "load/travel_time(hr)": pl.Float64,
-                    "record_timestamp": pl.Float64,
-                },
-            )
-            utilities.save_emission_results(
-                emission_records_df,
-                out_path / f"emission_container_{daily_throughput}_track_{num_tracks}_crane_{num_cranes}_hostler_{num_hostlers}_results.xlsx",
-                filetype="xlsx",
-            )
-    return container_data
+    vehicle_log = pl.DataFrame(
+        energy_use_records,
+        schema={
+            "resource_type": pl.Utf8,
+            "fuel_type": pl.Utf8,
+            "resource_id": pl.Utf8,
+            "track_id": pl.Utf8,
+            "train_id": pl.Utf8,
+            "container_id": pl.Utf8,
+            "event_type": pl.Utf8,
+            "zone": pl.Utf8,
+            "energy_consumption(gal_or_kWh)": pl.Float64,
+            "load/travel_time(hr)": pl.Float64,
+            "record_timestamp": pl.Float64,
+        },
+    ).with_columns(
+        # Coarse CO2-equivalent emissions, computed at end-of-sim from the
+        # static per-fuel factors in energy_use.CO2_KG_PER_UNIT. Unknown fuel
+        # types yield NaN so they're easy to spot.
+        (
+            pl.col("energy_consumption(gal_or_kWh)")
+            * pl.col("fuel_type").replace_strict(CO2_KG_PER_UNIT, default=float("nan"))
+        ).alias("emissions(kgCO2)")
+    )
+    return container_data, vehicle_log, terminal_obj
 
 
 # ---------------------------------------------------------------------------
