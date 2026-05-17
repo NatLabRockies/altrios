@@ -143,7 +143,7 @@ def run_terminal_simulation(
     # Create DataFrame for container events
     container_data = (
         pl.from_dicts(
-            [dict(event, **{'container_id': container_id}) for container_id, event in terminal_obj.container_events.items()],
+            [dict(event, **{'container_id': container_id}) for container_id, event in terminal_obj.state.container_events.items()],
             infer_schema_length=None
         )
         .lazy()

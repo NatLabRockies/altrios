@@ -1,4 +1,4 @@
-from scipy.stats import triang, uniform
+﻿from scipy.stats import triang, uniform
 import math
 import yaml
 import pandas as pd
@@ -179,7 +179,7 @@ def simulate_truck_travel(truck_id, train_schedule, terminal, config=None, confi
     d_t_min, d_t_max = params["d_t_min"], params["d_t_max"]
 
     d_t_dist = 3.28 * uniform(loc=d_t_min, scale=(d_t_max - d_t_min)).rvs()
-    current_veh_num = train_schedule["truck_number"] - len(terminal.truck_store.items)
+    current_veh_num = train_schedule["truck_number"] - len(terminal.state.truck_store.items)
     veh_density = current_veh_num / total_lane_length
     truck_speed = speed_density(veh_density, 'truck', N)
     truck_travel_time = d_t_dist / (2 * truck_speed * 3600)

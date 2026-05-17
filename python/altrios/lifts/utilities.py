@@ -273,7 +273,6 @@ def build_train_timetable(train_consist_plan, terminal_name, as_dicts, track_cou
         )
     )
 
-
     if as_dicts:
         return df.to_dicts()
     else:
@@ -286,9 +285,9 @@ def record_container_event(terminal, container, event_type, timestamp):
     else:
         container_string = container.to_string()
 
-    if container_string not in terminal.container_events:
-        terminal.container_events[container_string] = {}
-    terminal.container_events[container_string][event_type] = timestamp
+    if container_string not in terminal.state.container_events:
+        terminal.state.container_events[container_string] = {}
+    terminal.state.container_events[container_string][event_type] = timestamp
 
 
 def emission_calculation(terminal, status: str, move: str, vehicle: str, energy_type: str, travel_time: float) -> float:
@@ -351,6 +350,7 @@ def save_emission_results(emission_records: pl.DataFrame, out_path: Path, filety
         raise ValueError("filetype must be 'csv' or 'xlsx'")
 
 def initialize_train_events(env, terminal, train_id):
+    state = terminal.state
     for name in [
         "train_ic_unload_events",
         "train_oc_prepared_events",
@@ -359,9 +359,9 @@ def initialize_train_events(env, terminal, train_id):
         "train_end_load_events",
         "train_departed_events",
     ]:
-        if not hasattr(terminal, name):
-            setattr(terminal, name, {})
-        d = getattr(terminal, name)
+        if not hasattr(state, name):
+            setattr(state, name, {})
+        d = getattr(state, name)
 
         if train_id not in d or d[train_id].triggered:
             d[train_id] = env.event()
