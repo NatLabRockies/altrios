@@ -22,11 +22,11 @@ def check_ic_picked_complete(env, terminal, train_schedule):
 
 
 def handle_oc(env, terminal, train_schedule):
-    '''
-    This function is called right after IC dropped off, such that accelerating container processing.
-    Note: handle_remaining_oc is designed for imbalanced container flow.
-    TODO mbruchon: consolidate with handle_remaining_oc
-    '''
+    """Eager single-OC move kicked off as soon as one IC has been dropped,
+    so OC staging can run in parallel with IC delivery instead of waiting
+    for all ICs to finish. ``handle_remaining_oc`` is the catch-up sweep
+    that drains whatever this eager path didn't get to (and also handles
+    the imbalanced-flow case where there are more OCs than ICs)."""
     train_id = train_schedule['train_id']
     state = terminal.state
     # 1) hostler transport OC from parking slots
@@ -35,8 +35,11 @@ def handle_oc(env, terminal, train_schedule):
     state.parking_oc_count_by_train[oc.train_id] = (
         state.parking_oc_count_by_train.get(oc.train_id, 0) - 1
     )
-    # TODO mbruchon: should current_veh_num come from assigned_hostler?
-    current_veh_num = len(terminal.state.parked_hostlers.items) + 1
+    # current_veh_num is a yard-wide congestion measure (hostlers in flight)
+    # feeding the hostler-speed model in distances.simulate_*; it is not a
+    # per-hostler attribute, so it intentionally doesn't come from
+    # assigned_hostler.
+    current_veh_num = state.in_flight_hostler_count()
     hostler_reposition_travel_time, _, _, _ = distances.simulate_reposition_travel(
         assigned_hostler, current_veh_num, params=terminal.distances
     )
@@ -47,16 +50,11 @@ def handle_oc(env, terminal, train_schedule):
                            hostler_reposition_travel_time, env.now,
                            track_id="parking_slots")
 
-    # 2) side-pick loads an OC
+    # 2) side-pick loads an OC (charged to the assigned hostler; no separate
+    # side-loader resource exists yet).
     side_pick_unload_time = 1 / 60 + random.uniform(0, 1 / 600)
-    yield env.timeout(side_pick_unload_time)  # side-pick
-    # TODO mbruchon: this should instantiate a side loader crane
-    # Qianqian's code:
-    # side_pick_ems = compute_energy_use(terminal, "loaded", "side", "side_loading_crane", "Diesel", travel_time=side_pick_unload_time)
-    # record_energy_use(energy_use_records, "side_loading_crane", 'N/A', 'N/A', str(train_schedule['train_id']), oc,"side_unload", "truck_parking", side_pick_ems, side_pick_unload_time, env.now)
-    #_record_trip_energy(terminal, assigned_hostler, "hostler", "empty",
-    #                       train_id, oc.to_string(), "hostler_to_parking_oc",
-    #                       to_parking_time, env.now)
+    yield env.timeout(side_pick_unload_time)
+    _record_side_energy(terminal, assigned_hostler, train_id, oc.to_string(), env.now)
 
     # 4) hostler loaded with an OC goes from parking -> chassis
     to_chassis_time, _, _, _ = distances.simulate_hostler_track_travel(
@@ -100,7 +98,7 @@ def container_process(env, terminal, train_schedule):
     assigned_hostler = yield get_hostler(terminal)
 
     # 2) Empty hostler travels to the chassis
-    current_veh_num = len(terminal.state.parked_hostlers.items) + 1
+    current_veh_num = state.in_flight_hostler_count()
     pickup_time, _, _, _ = distances.simulate_hostler_track_travel(
         assigned_hostler, current_veh_num, params=terminal.distances
     )
@@ -110,7 +108,7 @@ def container_process(env, terminal, train_schedule):
                            pickup_time, env.now)
 
     # 3) Loaded hostler travels to parking slot
-    current_veh_num = len(terminal.state.parked_hostlers.items) + 1
+    current_veh_num = state.in_flight_hostler_count()
     dropoff_time, _, _, _ = distances.simulate_hostler_track_travel(
         assigned_hostler, current_veh_num, params=terminal.distances
     )
@@ -178,7 +176,7 @@ def handle_remaining_oc(env, terminal, train_schedule):
 
 
         # 3) assign an empty-loaded hostler
-        current_veh_num = len(state.parked_hostlers.items) + 1
+        current_veh_num = state.in_flight_hostler_count()
         to_parking_time, _, _, _ = distances.simulate_hostler_track_travel(
             assigned_hostler, current_veh_num, params=terminal.distances
         )
@@ -187,16 +185,11 @@ def handle_remaining_oc(env, terminal, train_schedule):
                                train_id, oc.to_string(), "hostler_to_parking_oc",
                                to_parking_time, env.now)
 
-        # 4) side-pick loads an OC
+        # 4) side-pick loads an OC (charged to the assigned hostler; no
+        # separate side-loader resource exists yet).
         side_pick_unload_time = 1 / 60 + random.uniform(0, 1 / 600)
-        yield env.timeout(side_pick_unload_time)  # side-pick
-        # TODO mbruchon: this should instantiate a side loader crane
-        # Qianqian's code:
-        # side_pick_ems = compute_energy_use(terminal, "loaded", "side", "side_loading_crane", "Diesel", travel_time=side_pick_unload_time)
-        # record_energy_use(energy_use_records, "side_loading_crane", 'N/A', 'N/A', str(train_schedule['train_id']), oc,"side_unload", "truck_parking", side_pick_ems, side_pick_unload_time, env.now)
-        #_record_trip_energy(terminal, assigned_hostler, "hostler", "empty",
-        #                       train_id, oc.to_string(), "hostler_to_parking_oc",
-        #                       to_parking_time, env.now)
+        yield env.timeout(side_pick_unload_time)
+        _record_side_energy(terminal, assigned_hostler, train_id, oc.to_string(), env.now)
 
         # 5) hostler loaded with an OC -> chassis
         to_chassis_time, _, _, _ = distances.simulate_hostler_track_travel(

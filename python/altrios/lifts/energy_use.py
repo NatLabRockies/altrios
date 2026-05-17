@@ -87,7 +87,17 @@ def _record_load_energy(terminal, crane_obj, status, train_id, container_id,
 
 
 def _record_side_energy(terminal, hostler_obj, train_id, container_id, env_now):
-    """Helper to compute + append a side-pick energy-use record."""
+    """Helper to compute + append a side-pick energy-use record.
+
+    The side-pick is logically performed by a side-loading crane, but no
+    such resource type exists in the simulation yet (TODO: add a per-yard
+    or per-track side_loading_crane store with its own pool, fuel mix, and
+    energy-use config block; until then, the assigned hostler stands in
+    as the actor). The record's ``resource_type`` is set to
+    ``"side_loading_crane"`` so the event is visible as such in
+    ``vehicle_log_df``; ``resource_id`` / ``fuel_type`` are still taken
+    from the hostler so the per-event energy use uses a real fuel type.
+    """
     energy_type = _energy_type_for(hostler_obj)
     energy_value = utilities.compute_energy_use(
         terminal, status="loaded", move="side", vehicle="hostler",
@@ -95,7 +105,7 @@ def _record_side_energy(terminal, hostler_obj, train_id, container_id, env_now):
     )
     utilities.record_energy_use(
         energy_use_records,
-        vehicle_type="hostler",
+        vehicle_type="side_loading_crane",
         fuel_type=energy_type,
         resource_id=getattr(hostler_obj, "id", ""),
         track_id="",

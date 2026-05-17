@@ -149,6 +149,7 @@ class TerminalState:
 
     def __init__(self, env, terminal: "Terminal"):
         self.env = env
+        self._terminal = terminal
 
         # Track availability (one slot per track id)
         self.tracks = simpy.Store(env, capacity=terminal.track_number)
@@ -259,3 +260,15 @@ class TerminalState:
             s = simpy.Store(self.env)
             self.parking_ic_stores[train_id] = s
         return s
+
+    def in_flight_hostler_count(self) -> int:
+        """Hostlers currently checked out (neither idling in the parked pool
+        nor sitting in the active pool waiting to be re-dispatched). This
+        is the yard-wide congestion measure used by the hostler-speed model
+        in :mod:`altrios.lifts.distances`; it is the hostler analog of
+        ``simulate_truck_travel``'s ``truck_number - truck_store.items``."""
+        return (
+            self._terminal.hostler_number
+            - len(self.parked_hostlers.items)
+            - len(self.active_hostlers.items)
+        )
