@@ -1,4 +1,5 @@
-﻿import simpy
+﻿"""Core LIFTS data model: Terminal config, mutable TerminalState, and small dataclasses (container/crane/truck/hostler) plus the loggingLevel enum."""
+import simpy
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -9,7 +10,6 @@ class loggingLevel(IntEnum):
     NONE = 1
     BASIC = 2
     DEBUG = 3
-
 
 @dataclass
 class container:
@@ -25,7 +25,6 @@ class container:
         else:
             prefix = 'C'
         return f"{prefix}-{self.id}-Train-{self.train_id}"
-
 
 @dataclass
 class crane:

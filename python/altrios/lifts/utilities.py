@@ -335,7 +335,6 @@ def record_emission(emission_records: list, vehicle_type: str, resource_id: str,
         "record_timestamp": float(env_now),
     })
 
-
 def save_emission_results(emission_records: pl.DataFrame, out_path: Path, filetype: str = "csv"):
     if out_path is None:
         return

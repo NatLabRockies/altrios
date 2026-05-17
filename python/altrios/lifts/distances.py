@@ -1,4 +1,5 @@
-﻿from scipy.stats import triang, uniform
+﻿"""Yard geometry and travel-time/speed sampling for trucks and hostlers."""
+from scipy.stats import triang, uniform
 import math
 import yaml
 import pandas as pd
@@ -80,8 +81,8 @@ def calculate_distances(config_path="input/config.yaml", config=None, actual_rai
     P = 10
     BL_l = 10 * n_r
     BL_w = 80
-    A_yard = M * 10 * n_r + (M + 1) * n_p * P  # yard length
-    B_yard = N * 80 + (N + 1) * n_p * P        # yard width
+    A_yard = M * BL_l + (M + 1) * n_p * P  # yard length
+    B_yard = N * BL_w + (N + 1) * n_p * P        # yard width
     total_lane_length = A_yard * (N + 1) + B_yard * (M + 1)
 
     # --- geometry from yard config ---
