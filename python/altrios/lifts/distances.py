@@ -227,34 +227,6 @@ def simulate_reposition_travel(hostler_id, current_veh_num, config=None, config_
     hostler_reposition_travel_time = d_r_dist / (hostler_speed * 3600)
     return hostler_reposition_travel_time, d_r_dist, hostler_speed, veh_density
 
-def simulate_hostler_track_travel(hostler_id, current_veh_num, config=None, config_path="input/config.yaml", params=None):
-    """
-    Multitrack call this function for distance calculations:
-    1. inter-track distance
-    2. hostler travel distance
-    """
-    if params is None:
-        params = calculate_distances(config=config, config_path=config_path)
-    total_lane_length, N = params["total_lane_length"]/3.28, params["N"]    # 1 meter = 3.28 ft
-    d_tr_min, d_tr_mean, d_tr_max = params["d_tr_min"]/3.28, params["d_tr_mean"]/3.28, params["d_tr_max"]/3.28
-
-    # sanity check
-    if d_tr_max <= d_tr_min:
-        raise ValueError(f"Invalid distance range: d_tr_max={d_tr_max} meters, d_tr_min={d_tr_min} meters")
-    if not (d_tr_min <= d_tr_mean <= d_tr_max):
-        raise ValueError(f"d_tr_mean ({d_tr_mean}) must be between min ({d_tr_min}) meters and max ({d_tr_max}) meters")
-
-    # normalized c (ensure 0 < c < 1)
-    c = (d_tr_mean - d_tr_min) / (d_tr_max - d_tr_min)
-    c = min(max(c, 1e-6), 1 - 1e-6)  # avoid exactly 0 or 1
-
-    d_tr_dist = triang(c, loc=d_tr_min, scale=d_tr_max - d_tr_min).rvs()
-    veh_density = current_veh_num / total_lane_length
-    hostler_speed = speed_density(veh_density, 'hostler', N)
-    hostler_travel_time = d_tr_dist / (hostler_speed * 3600)    # 1 hr = 3,600 s
-
-    return hostler_travel_time, d_tr_dist, hostler_speed, veh_density
-
 # # test
 # if __name__ == "__main__":
 #     total = calculate_distances("input/config.yaml")
