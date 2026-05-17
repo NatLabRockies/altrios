@@ -123,9 +123,9 @@ def run_terminal_simulation(
         log_level=log_level)
 
     terminal_obj.log(loggingLevel.BASIC, f"[INFO] layout: {terminal_layout}")
-    terminal_obj.log(loggingLevel.BASIC, "\nTrain timetable:")
+    terminal_obj.log(loggingLevel.DEBUG, "\nTrain timetable:")
     for schedule in train_timetable:
-        terminal_obj.log(loggingLevel.BASIC, str(schedule))
+        terminal_obj.log(loggingLevel.DEBUG, str(schedule))
         env.process(mode_obj.process_arrival(env, terminal_obj, schedule))
 
     num_tracks = terminal_obj.track_number

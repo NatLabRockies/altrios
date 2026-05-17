@@ -4,9 +4,8 @@ import math
 import yaml
 import pandas as pd
 from pathlib import Path
-import altrios.lifts.utilities
 
-layout_static = pd.read_excel(altrios.lifts.utilities.resources_root() / "multiple_layout.xlsx")
+from altrios.lifts.utilities import resources_root
 
 def get_layout(config):
     """
@@ -22,7 +21,7 @@ def get_layout(config):
     if mode == "adaptive":
         layout_path = Path(layout_cfg["file_path"])
         batch_size = config["simulation"]["train_batch_size"]
-        df = layout_static #pd.read_excel(layout_path)
+        df = pd.read_excel(resources_root() / "multiple_layout.xlsx")
         capacity = batch_size * num_tracks * 2  # IC&OC for each track
         row = df.loc[df["train batch (k)"] == capacity]
         if row.empty:
@@ -66,7 +65,7 @@ def calculate_distances(config_path="input/config.yaml", config=None, actual_rai
     # --- layout (adaptive or fixed) ---
     mode = layout_cfg.get("mode", "adaptive").lower()
     if mode == "adaptive":
-        df = layout_static#pd.read_excel(Path(layout_cfg["file_path"]))
+        df = pd.read_excel(resources_root() / "multiple_layout.xlsx")
         batch_size = config["simulation"]["train_batch_size"]
         row = df.loc[df["train batch (k)"] == batch_size]
         if row.empty:
