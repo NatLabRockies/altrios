@@ -16,7 +16,8 @@ def crane_unload_process(env, terminal, train_schedule, track_id):
         crane_obj = yield terminal.state.cranes_by_track[track_id].get()
         try:
             while True:
-                if not any(item.train_id == train_id for item in terminal.state.train_ic_stores.items):
+                ic_items = terminal.state.train_ic_stores.items
+                if not any(item.train_id == train_id for item in ic_items):
                     break
                 ic = yield terminal.state.train_ic_stores.get(lambda x: x.train_id == train_id)
                 crane_unload_time = (terminal.CONTAINERS_PER_CRANE_MOVE_MEAN +
@@ -48,9 +49,10 @@ def crane_load_process(env, terminal, track_id, train_schedule):
         crane_obj = yield terminal.state.cranes_by_track[track_id].get()
         try:
             while True:
+                chassis_items = terminal.state.chassis.items
                 if not any(
                     (item.type == 'Outbound' and item.train_id == train_id)
-                    for item in terminal.state.chassis.items
+                    for item in chassis_items
                 ):
                     break
                 oc = yield terminal.state.chassis.get(

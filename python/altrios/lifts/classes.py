@@ -199,7 +199,10 @@ class TerminalState:
         self.total_ic: dict = {}
         self.total_oc: dict = {}
 
-        # Records accumulated as the simulation runs
-        self.container_events: dict = {}
+        # Records accumulated as the simulation runs.
+        # container_events is a flat list of (container_id, event_type, timestamp)
+        # tuples; it is pivoted to a wide DataFrame at end-of-sim. Keeping it
+        # flat avoids per-event dict-of-dict insertions in the hot path.
+        self.container_events: list = []
         self.time_per_train: dict = {}
         self.train_delay_time: dict = {}

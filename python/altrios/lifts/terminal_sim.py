@@ -140,12 +140,38 @@ def run_terminal_simulation(
     else:
         env.run(until=terminal_config["simulation"]["length"])
 
-    # Create DataFrame for container events
-    container_data = (
-        pl.from_dicts(
-            [dict(event, **{'container_id': container_id}) for container_id, event in terminal_obj.state.container_events.items()],
-            infer_schema_length=None
+    # Create DataFrame for container events. container_events is a flat list of
+    # (container_id, event_type, timestamp) tuples; pivot it once to wide form
+    # here rather than building a dict-of-dicts during the run.
+    _CONTAINER_EVENT_TYPES = [
+        "train_arrival_expected", "train_arrival_actual",
+        "crane_unload", "hostler_pickup", "hostler_dropoff",
+        "truck_arrival", "truck_dropoff", "truck_pickup", "truck_exit",
+        "crane_load", "train_depart",
+    ]
+    events_long = pl.DataFrame(
+        terminal_obj.state.container_events,
+        schema={"container_id": pl.Utf8, "event_type": pl.Utf8, "timestamp": pl.Float64},
+        orient="row",
+    )
+    if events_long.height == 0:
+        container_data = pl.DataFrame(
+            schema={"container_id": pl.Utf8, **{t: pl.Float64 for t in _CONTAINER_EVENT_TYPES}}
         )
+    else:
+        container_data = events_long.pivot(
+            values="timestamp", index="container_id", on="event_type",
+            aggregate_function="last",
+        )
+    # Ensure all known event-type columns exist even if some never fired,
+    # so downstream column references below don't blow up on small runs.
+    missing = [t for t in _CONTAINER_EVENT_TYPES if t not in container_data.columns]
+    if missing:
+        container_data = container_data.with_columns(
+            [pl.lit(None, dtype=pl.Float64).alias(t) for t in missing]
+        )
+    container_data = (
+        container_data
         .lazy()
         .sort("container_id")
         .select(pl.col("container_id"), pl.exclude("container_id"))
@@ -194,7 +220,21 @@ def run_terminal_simulation(
         daily_throughput = 2 * terminal_obj.train_batch_size * terminal_obj.track_number
         container_data.write_excel(out_path / f"simulation_container_{daily_throughput}_track_{num_tracks}_crane_{num_cranes}_hostler_{num_hostlers}_results.xlsx")
         if emission_records:
-            emission_records_df = pl.DataFrame(emission_records)
+            emission_records_df = pl.DataFrame(
+                emission_records,
+                schema={
+                    "resource_type": pl.Utf8,
+                    "resource_id": pl.Utf8,
+                    "track_id": pl.Utf8,
+                    "train_id": pl.Utf8,
+                    "container_id": pl.Utf8,
+                    "event_type": pl.Utf8,
+                    "zone": pl.Utf8,
+                    "energy_consumption(gal)": pl.Float64,
+                    "load/travel_time(hr)": pl.Float64,
+                    "record_timestamp": pl.Float64,
+                },
+            )
             utilities.save_emission_results(
                 emission_records_df,
                 out_path / f"emission_container_{daily_throughput}_track_{num_tracks}_crane_{num_cranes}_hostler_{num_hostlers}_results.xlsx",

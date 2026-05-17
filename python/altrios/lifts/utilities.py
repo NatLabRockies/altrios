@@ -285,9 +285,9 @@ def record_container_event(terminal, container, event_type, timestamp):
     else:
         container_string = container.to_string()
 
-    if container_string not in terminal.state.container_events:
-        terminal.state.container_events[container_string] = {}
-    terminal.state.container_events[container_string][event_type] = timestamp
+    # Flat append is much cheaper in the hot path than the previous
+    # dict-of-dict setdefault+assignment; the consumer pivots at end-of-sim.
+    terminal.state.container_events.append((container_string, event_type, timestamp))
 
 
 def emission_calculation(terminal, status: str, move: str, vehicle: str, energy_type: str, travel_time: float) -> float:
@@ -350,18 +350,17 @@ def save_emission_results(emission_records: pl.DataFrame, out_path: Path, filety
         raise ValueError("filetype must be 'csv' or 'xlsx'")
 
 def initialize_train_events(env, terminal, train_id):
+    # Event dicts are pre-created on TerminalState, so no hasattr/setattr
+    # guards are needed here.
     state = terminal.state
-    for name in [
-        "train_ic_unload_events",
-        "train_oc_prepared_events",
-        "train_ic_picked_events",
-        "train_start_load_events",
-        "train_end_load_events",
-        "train_departed_events",
-    ]:
-        if not hasattr(state, name):
-            setattr(state, name, {})
-        d = getattr(state, name)
-
-        if train_id not in d or d[train_id].triggered:
+    for d in (
+        state.train_ic_unload_events,
+        state.train_oc_prepared_events,
+        state.train_ic_picked_events,
+        state.train_start_load_events,
+        state.train_end_load_events,
+        state.train_departed_events,
+    ):
+        existing = d.get(train_id)
+        if existing is None or existing.triggered:
             d[train_id] = env.event()

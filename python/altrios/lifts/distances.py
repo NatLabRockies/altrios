@@ -172,8 +172,9 @@ def speed_density(avg_density, vehicle_type, N):
     return speed
 
 
-def simulate_truck_travel(truck_id, train_schedule, terminal, config=None, config_path="input/config.yaml"):
-    params = calculate_distances(config = config, config_path = config_path)
+def simulate_truck_travel(truck_id, train_schedule, terminal, config=None, config_path="input/config.yaml", params=None):
+    if params is None:
+        params = calculate_distances(config=config, config_path=config_path)
     N = params["N"]
     total_lane_length = params["total_lane_length"]
     d_t_min, d_t_max = params["d_t_min"], params["d_t_max"]
@@ -186,13 +187,14 @@ def simulate_truck_travel(truck_id, train_schedule, terminal, config=None, confi
     return truck_travel_time, d_t_dist, truck_speed, veh_density
 
 
-def simulate_hostler_track_travel(hostler_id, current_veh_num, config=None, config_path="input/config.yaml"):
+def simulate_hostler_track_travel(hostler_id, current_veh_num, config=None, config_path="input/config.yaml", params=None):
     """
     Multitrack call this function for distance calculations:
     1. inter-track distance
     2. hostler travel distance
     """
-    params = calculate_distances(config = config, config_path = config_path)
+    if params is None:
+        params = calculate_distances(config=config, config_path=config_path)
     total_lane_length, N = params["total_lane_length"]/3.28, params["N"]    # 1 meter = 3.28 ft
     d_tr_min, d_tr_mean, d_tr_max = params["d_tr_min"]/3.28, params["d_tr_mean"]/3.28, params["d_tr_max"]/3.28
 
@@ -213,8 +215,9 @@ def simulate_hostler_track_travel(hostler_id, current_veh_num, config=None, conf
 
     return hostler_travel_time, d_tr_dist, hostler_speed, veh_density
 
-def simulate_reposition_travel(hostler_id, current_veh_num, config=None, config_path="input/config.yaml"):
-    params = calculate_distances(config = config, config_path = config_path)
+def simulate_reposition_travel(hostler_id, current_veh_num, config=None, config_path="input/config.yaml", params=None):
+    if params is None:
+        params = calculate_distances(config=config, config_path=config_path)
     total_lane_length, N = params["total_lane_length"]/3.28, params["N"]
     d_r_min, d_r_max = params["d_r_min"]/3.28, params["d_r_max"]/3.28
 
@@ -224,13 +227,14 @@ def simulate_reposition_travel(hostler_id, current_veh_num, config=None, config_
     hostler_reposition_travel_time = d_r_dist / (hostler_speed * 3600)
     return hostler_reposition_travel_time, d_r_dist, hostler_speed, veh_density
 
-def simulate_hostler_track_travel(hostler_id, current_veh_num, config=None, config_path="input/config.yaml"):
+def simulate_hostler_track_travel(hostler_id, current_veh_num, config=None, config_path="input/config.yaml", params=None):
     """
     Multitrack call this function for distance calculations:
     1. inter-track distance
     2. hostler travel distance
     """
-    params = calculate_distances(config = config, config_path = config_path)
+    if params is None:
+        params = calculate_distances(config=config, config_path=config_path)
     total_lane_length, N = params["total_lane_length"]/3.28, params["N"]    # 1 meter = 3.28 ft
     d_tr_min, d_tr_mean, d_tr_max = params["d_tr_min"]/3.28, params["d_tr_mean"]/3.28, params["d_tr_max"]/3.28
 
