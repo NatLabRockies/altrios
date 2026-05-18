@@ -48,6 +48,7 @@ dependencies = [
     "PyYAML==6.0.2",
     "simpy",
     "msgpack==1.1.0",
+    "numba",
     "ipykernel~=6.29",
     "executing~=2.0",
     "pip",
