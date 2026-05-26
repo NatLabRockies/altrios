@@ -1236,3 +1236,4 @@ applications/network_builder/orm_data_route
 applications/network_builder/results/
 /osmium_cache
 networks/spokane_lethbridge_local.osm.pbf
+/.venv311

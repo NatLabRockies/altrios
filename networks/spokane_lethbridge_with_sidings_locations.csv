@@ -1,5 +1,3 @@
 Location ID,Link Index,Offset (m),Is Front End,Grid Emissions Region,Electricity Price Region,Liquid Fuel Price Region
 Spokane,1,0,FALSE,WECC,WA,WA
-Spokane,2,0,FALSE,WECC,WA,WA
-Lethbridge,21023,0,FALSE,WECC,ab,ab
-Lethbridge,21024,0,FALSE,WECC,ab,ab
+Lethbridge,15987,0,FALSE,WECC,ab,ab

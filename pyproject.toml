@@ -51,6 +51,10 @@ dependencies = [
     "ipykernel~=6.29",
     "executing~=2.0",
     "pip",
+    # Network builder workflow deps
+    "shapely>=2.0",
+    "networkx>=3.0",
+    "scipy>=1.10",
 ]
 
 [project.urls]

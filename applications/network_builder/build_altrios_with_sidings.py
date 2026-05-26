@@ -1,7 +1,7 @@
 """
 Build an ALTRIOS network YAML from local OSM XML, including siding branches.
 
-This script extends build_altrios_from_local.py by:
+Builds an ALTRIOS network YAML from a local OSM XML extract:
   1. Finding the mainline shortest-path as before.
   2. Detecting siding ways (service=siding, etc.) that share nodes with the mainline.
   3. Emitting siding links with proper idx_next_alt / idx_prev_alt topology
@@ -57,55 +57,67 @@ MAX_GRADE = 0.04
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def smooth_elevation_savgol(elevations, distances, window_length=200, order=3, segment_length=50):
+
+def smooth_elevation_savgol(
+    elevations, distances, window_length=200, order=3, segment_length=50
+):
     """
     Apply Savitzky-Golay filter to smooth elevations, similar to network_builder.py.
     This helps eliminate grade spikes from noisy elevation data.
-    
+
     Args:
         elevations: List of elevation values in meters
         distances: Cumulative distances along the path (for proper interpolation)
         window_length: Window size for the Savgol filter
         order: Polynomial order for the filter
         segment_length: Resample interval in meters
-    
+
     Returns:
         Smoothed elevation values
     """
     if len(elevations) < 5:
         return elevations
-    
+
     elevations = np.array(elevations)
     distances = np.array(distances)
-    
+
     # Resample to evenly spaced points for the filter
     total_dist = distances[-1]
     n_segments = max(int(total_dist / segment_length), len(elevations))
     interp_distances = np.linspace(0, total_dist, n_segments)
-    
+
     # Interpolate elevations to even spacing
-    f = interpolate.interp1d(distances, elevations, kind='linear', fill_value='extrapolate')
+    f = interpolate.interp1d(
+        distances, elevations, kind="linear", fill_value="extrapolate"
+    )
     interp_elevs = f(interp_distances)
-    
+
     # Apply Savitzky-Golay filter
     effective_window = min(len(interp_elevs), window_length)
     if effective_window % 2 == 0:
         effective_window -= 1
     effective_window = max(effective_window, order + 2)
-    
+
     if len(interp_elevs) > effective_window:
-        smoothed_interp = savgol_filter(interp_elevs, effective_window, min(order, effective_window - 1), mode='nearest')
+        smoothed_interp = savgol_filter(
+            interp_elevs,
+            effective_window,
+            min(order, effective_window - 1),
+            mode="nearest",
+        )
     else:
         smoothed_interp = interp_elevs
-    
+
     # Interpolate back to original distances
-    f2 = interpolate.interp1d(interp_distances, smoothed_interp, kind='linear', fill_value='extrapolate')
+    f2 = interpolate.interp1d(
+        interp_distances, smoothed_interp, kind="linear", fill_value="extrapolate"
+    )
     smoothed = f2(distances)
-    
+
     # Preserve original endpoints
     smoothed[0] = elevations[0]
     smoothed[-1] = elevations[-1]
-    
+
     return list(smoothed)
 
 
@@ -114,45 +126,48 @@ def filter_grade_spikes(elevations, distances, max_grade=MAX_GRADE, edge_buffer_
     Filter out grade spikes that exceed the maximum allowable grade.
     Uses the approach from network_builder.py: exclude points near edges
     and cap grades that exceed the threshold.
-    
+
     Args:
         elevations: List of elevation values in meters
         distances: Cumulative distances along the path
         max_grade: Maximum allowed grade as decimal (0.04 = 4%)
         edge_buffer_m: Buffer distance from edges to exclude (meters)
-    
+
     Returns:
         Filtered elevation values with grade spikes removed
     """
     if len(elevations) < 3:
         return elevations
-    
+
     elevations = np.array(elevations, dtype=float)
     distances = np.array(distances, dtype=float)
     total_length = distances[-1]
-    
+
     # Calculate grades between consecutive points
     for i in range(1, len(elevations)):
-        dist_diff = distances[i] - distances[i-1]
+        dist_diff = distances[i] - distances[i - 1]
         if dist_diff < 1.0:
             continue
-            
-        elev_diff = elevations[i] - elevations[i-1]
+
+        elev_diff = elevations[i] - elevations[i - 1]
         grade = abs(elev_diff / dist_diff)
-        
+
         # Skip edge points (within buffer of start/end)
-        if distances[i] < edge_buffer_m or (total_length - distances[i]) < edge_buffer_m:
+        if (
+            distances[i] < edge_buffer_m
+            or (total_length - distances[i]) < edge_buffer_m
+        ):
             continue
-        
+
         # If grade exceeds max, interpolate to cap it
         if grade > max_grade:
             # Cap the elevation change to max_grade
             max_elev_change = max_grade * dist_diff
             if elev_diff > 0:
-                elevations[i] = elevations[i-1] + max_elev_change
+                elevations[i] = elevations[i - 1] + max_elev_change
             else:
-                elevations[i] = elevations[i-1] - max_elev_change
-    
+                elevations[i] = elevations[i - 1] - max_elev_change
+
     return list(elevations)
 
 
@@ -211,22 +226,24 @@ def haversine_distance(lon1, lat1, lon2, lat2):
     lon1, lat1, lon2, lat2 = map(math.radians, [lon1, lat1, lon2, lat2])
     dlon = lon2 - lon1
     dlat = lat2 - lat1
-    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    )
     return 2 * math.asin(math.sqrt(a)) * R_EARTH
 
 
 def get_bearing(lat1, lon1, lat2, lon2):
     lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
     dlon = lon2 - lon1
-    dphi = math.log(
-        math.tan(lat2 / 2 + math.pi / 4) / math.tan(lat1 / 2 + math.pi / 4)
-    )
+    dphi = math.log(math.tan(lat2 / 2 + math.pi / 4) / math.tan(lat1 / 2 + math.pi / 4))
     if abs(dlon) > math.pi:
         dlon = -(2 * math.pi - dlon) if dlon > 0 else 2 * math.pi + dlon
     return (math.degrees(math.atan2(dlon, dphi)) + 360) % 360
 
 
 # ── OSM parse ────────────────────────────────────────────────────────────────
+
 
 def parse_osm_xml_to_graph(xml_file):
     """Parse OSM XML → NetworkX graph.  Preserves *all* rail edges so sidings
@@ -255,8 +272,10 @@ def parse_osm_xml_to_graph(xml_file):
             u, v = nd_refs[i], nd_refs[i + 1]
             if u in nodes and v in nodes:
                 d = haversine_distance(
-                    nodes[u]["lon"], nodes[u]["lat"],
-                    nodes[v]["lon"], nodes[v]["lat"],
+                    nodes[u]["lon"],
+                    nodes[u]["lat"],
+                    nodes[v]["lon"],
+                    nodes[v]["lat"],
                 )
                 # Keep first edge only (simple graph)
                 if not G.has_edge(u, v):
@@ -276,6 +295,7 @@ def find_nearest_node(G, lat, lon):
 
 
 # ── siding detection ─────────────────────────────────────────────────────────
+
 
 def _identify_sidings(G, mainline_nodes):
     """Return a list of siding *segments* that branch off the mainline.
@@ -305,7 +325,9 @@ def _identify_sidings(G, mainline_nodes):
     for u, v, data in siding_edges:
         S.add_edge(u, v, **data)
 
-    logger.info(f"Siding sub-graph: {S.number_of_nodes()} nodes, {S.number_of_edges()} edges")
+    logger.info(
+        f"Siding sub-graph: {S.number_of_nodes()} nodes, {S.number_of_edges()} edges"
+    )
 
     # Find connected components in the siding graph
     sidings = []
@@ -322,7 +344,8 @@ def _identify_sidings(G, mainline_nodes):
 
         # Order junction nodes by their position along the mainline
         junction_list = sorted(
-            junction_nodes, key=lambda n: mainline_nodes.index(n) if n in mainline_nodes else 999999
+            junction_nodes,
+            key=lambda n: mainline_nodes.index(n) if n in mainline_nodes else 999999,
         )
 
         # Build a path through the siding between the first and last junction node
@@ -331,7 +354,9 @@ def _identify_sidings(G, mainline_nodes):
         if len(junction_list) >= 2:
             start_j, end_j = junction_list[0], junction_list[-1]
             try:
-                siding_path = nx.shortest_path(sub, source=start_j, target=end_j, weight="weight")
+                siding_path = nx.shortest_path(
+                    sub, source=start_j, target=end_j, weight="weight"
+                )
             except nx.NetworkXNoPath:
                 # Fall back: treat as stub from the first junction node
                 siding_path = list(nx.dfs_preorder_nodes(sub, source=junction_list[0]))
@@ -349,7 +374,10 @@ def _identify_sidings(G, mainline_nodes):
 
 # ── ALTRIOS export ───────────────────────────────────────────────────────────
 
-def export_path_with_sidings(G, mainline_nodes, sidings, output_prefix, fast_mode=False):
+
+def export_path_with_sidings(
+    G, mainline_nodes, sidings, output_prefix, fast_mode=False
+):
     """Build an ALTRIOS network YAML that includes the mainline plus
     siding branches with proper idx_next_alt / idx_prev_alt wiring."""
 
@@ -369,10 +397,9 @@ def export_path_with_sidings(G, mainline_nodes, sidings, output_prefix, fast_mod
     # Calculate cumulative distances along the mainline for proper smoothing
     mainline_distances = [0.0]
     for i in range(1, len(mainline_nodes)):
-        u, v = mainline_nodes[i-1], mainline_nodes[i]
+        u, v = mainline_nodes[i - 1], mainline_nodes[i]
         d = haversine_distance(
-            G.nodes[u]["lon"], G.nodes[u]["lat"],
-            G.nodes[v]["lon"], G.nodes[v]["lat"]
+            G.nodes[u]["lon"], G.nodes[u]["lat"], G.nodes[v]["lon"], G.nodes[v]["lat"]
         )
         mainline_distances.append(mainline_distances[-1] + d)
 
@@ -380,17 +407,21 @@ def export_path_with_sidings(G, mainline_nodes, sidings, output_prefix, fast_mod
         elevations = [0.0] * len(coords)
     else:
         elevations = fetch_elevations_3dep_bulk(coords)
-    
+
     # Apply Savitzky-Golay smoothing to mainline elevations (more sophisticated than rolling mean)
-    mainline_elevs = elevations[:len(mainline_nodes)]
+    mainline_elevs = elevations[: len(mainline_nodes)]
     if len(mainline_elevs) > 5 and not fast_mode:
         logger.info("Applying Savitzky-Golay smoothing to elevations...")
-        mainline_elevs = smooth_elevation_savgol(mainline_elevs, mainline_distances, window_length=200)
-        
+        mainline_elevs = smooth_elevation_savgol(
+            mainline_elevs, mainline_distances, window_length=200
+        )
+
         # Filter out grade spikes that exceed max allowable grade
-        logger.info(f"Filtering grade spikes (max grade: {MAX_GRADE*100:.1f}%)...")
-        mainline_elevs = filter_grade_spikes(mainline_elevs, mainline_distances, max_grade=MAX_GRADE)
-        
+        logger.info(f"Filtering grade spikes (max grade: {MAX_GRADE * 100:.1f}%)...")
+        mainline_elevs = filter_grade_spikes(
+            mainline_elevs, mainline_distances, max_grade=MAX_GRADE
+        )
+
         # Update the elevations list with smoothed mainline values
         for i in range(len(mainline_nodes)):
             elevations[i] = mainline_elevs[i]
@@ -417,29 +448,45 @@ def export_path_with_sidings(G, mainline_nodes, sidings, output_prefix, fast_mod
     geometry = []  # for JSON
 
     # Dummy link 0 - speed_set must be None (null/~) for ALTRIOS to parse correctly
-    links.append({
-        "idx_curr": 0, "idx_flip": 0,
-        "idx_next": 0, "idx_next_alt": 0,
-        "idx_prev": 0, "idx_prev_alt": 0,
-        "osm_id": 0, "length_meters": 0.0,
-        "elevs": [], "headings": [],
-        "speed_set": None,
-        "cat_power_limits": [], "link_idxs_lockout": [],
-    })
+    links.append(
+        {
+            "idx_curr": 0,
+            "idx_flip": 0,
+            "idx_next": 0,
+            "idx_next_alt": 0,
+            "idx_prev": 0,
+            "idx_prev_alt": 0,
+            "osm_id": 0,
+            "length_meters": 0.0,
+            "elevs": [],
+            "headings": [],
+            "speed_set": None,
+            "cat_power_limits": [],
+            "link_idxs_lockout": [],
+        }
+    )
 
     # ────── Helper to make a link pair for an edge u→v ──────
     def make_link_pair(u, v, osm_tags, fwd_idx, rev_idx):
         u_d, v_d = G.nodes[u], G.nodes[v]
-        length = max(haversine_distance(u_d["lon"], u_d["lat"], v_d["lon"], v_d["lat"]), 1.0)
-        heading_rad = math.radians(get_bearing(u_d["lat"], u_d["lon"], v_d["lat"], v_d["lon"]))
+        length = max(
+            haversine_distance(u_d["lon"], u_d["lat"], v_d["lon"], v_d["lat"]), 1.0
+        )
+        heading_rad = math.radians(
+            get_bearing(u_d["lat"], u_d["lon"], v_d["lat"], v_d["lon"])
+        )
         u_e, v_e = elev_of(u), elev_of(v)
 
         fwd = {
-            "idx_curr": fwd_idx, "idx_flip": rev_idx,
+            "idx_curr": fwd_idx,
+            "idx_flip": rev_idx,
             "osm_tags": osm_tags,
-            "length_meters": length, "osm_id": G[u][v].get("osm_way_id", "siding"),
-            "idx_next": 0, "idx_next_alt": 0,
-            "idx_prev": 0, "idx_prev_alt": 0,
+            "length_meters": length,
+            "osm_id": G[u][v].get("osm_way_id", "siding"),
+            "idx_next": 0,
+            "idx_next_alt": 0,
+            "idx_prev": 0,
+            "idx_prev_alt": 0,
             "elevs": [
                 {"offset_meters": 0.0, "elev_meters": u_e},
                 {"offset_meters": length, "elev_meters": v_e},
@@ -448,15 +495,21 @@ def export_path_with_sidings(G, mainline_nodes, sidings, output_prefix, fast_mod
                 {"offset_meters": 0.0, "heading_radians": heading_rad},
                 {"offset_meters": length, "heading_radians": heading_rad},
             ],
-            "speed_set": [], "cat_power_limits": [], "link_idxs_lockout": [],
+            "speed_set": [],
+            "cat_power_limits": [],
+            "link_idxs_lockout": [],
         }
         rev_heading = (heading_rad + math.pi) % (2 * math.pi)
         rev = {
-            "idx_curr": rev_idx, "idx_flip": fwd_idx,
+            "idx_curr": rev_idx,
+            "idx_flip": fwd_idx,
             "osm_tags": osm_tags,
-            "length_meters": length, "osm_id": G[u][v].get("osm_way_id", "siding"),
-            "idx_next": 0, "idx_next_alt": 0,
-            "idx_prev": 0, "idx_prev_alt": 0,
+            "length_meters": length,
+            "osm_id": G[u][v].get("osm_way_id", "siding"),
+            "idx_next": 0,
+            "idx_next_alt": 0,
+            "idx_prev": 0,
+            "idx_prev_alt": 0,
             "elevs": [
                 {"offset_meters": 0.0, "elev_meters": v_e},
                 {"offset_meters": length, "elev_meters": u_e},
@@ -465,10 +518,22 @@ def export_path_with_sidings(G, mainline_nodes, sidings, output_prefix, fast_mod
                 {"offset_meters": 0.0, "heading_radians": rev_heading},
                 {"offset_meters": length, "heading_radians": rev_heading},
             ],
-            "speed_set": [], "cat_power_limits": [], "link_idxs_lockout": [],
+            "speed_set": [],
+            "cat_power_limits": [],
+            "link_idxs_lockout": [],
         }
-        geometry.append({"link_idx": fwd_idx, "coordinates": [[u_d["lon"], u_d["lat"]], [v_d["lon"], v_d["lat"]]]})
-        geometry.append({"link_idx": rev_idx, "coordinates": [[v_d["lon"], v_d["lat"]], [u_d["lon"], u_d["lat"]]]})
+        geometry.append(
+            {
+                "link_idx": fwd_idx,
+                "coordinates": [[u_d["lon"], u_d["lat"]], [v_d["lon"], v_d["lat"]]],
+            }
+        )
+        geometry.append(
+            {
+                "link_idx": rev_idx,
+                "coordinates": [[v_d["lon"], v_d["lat"]], [u_d["lon"], u_d["lat"]]],
+            }
+        )
         return fwd, rev
 
     # ────── Build mainline links ──────
@@ -476,7 +541,7 @@ def export_path_with_sidings(G, mainline_nodes, sidings, output_prefix, fast_mod
     # connectivity later.  Pre-allocate indices for the start buffer,
     # each mainline segment, and the end buffer.
 
-    buf_fwd, buf_rev = alloc_pair()       # start buffer: 1, 2
+    buf_fwd, buf_rev = alloc_pair()  # start buffer: 1, 2
     n_main_edges = len(mainline_nodes) - 1
 
     mainline_indices = []  # [(fwd_idx, rev_idx), …]
@@ -498,37 +563,63 @@ def export_path_with_sidings(G, mainline_nodes, sidings, output_prefix, fast_mod
     # ── Start buffer ──
     start_elev = elev_of(mainline_nodes[0])
     sbl = 3000.0
-    links.append({
-        "idx_curr": buf_fwd, "idx_flip": buf_rev,
-        "osm_tags": {"note": "start_buffer"},
-        "length_meters": sbl, "osm_id": "start_buffer_fwd",
-        "idx_next": mainline_indices[0][0], "idx_next_alt": 0,
-        "idx_prev": 0, "idx_prev_alt": 0,
-        "elevs": [{"offset_meters": 0.0, "elev_meters": start_elev},
-                   {"offset_meters": sbl, "elev_meters": start_elev}],
-        "headings": [{"offset_meters": 0.0, "heading_radians": 0.0},
-                     {"offset_meters": sbl, "heading_radians": 0.0}],
-        "speed_set": [], "cat_power_limits": [], "link_idxs_lockout": [],
-    })
-    links.append({
-        "idx_curr": buf_rev, "idx_flip": buf_fwd,
-        "osm_tags": {"note": "start_buffer"},
-        "length_meters": sbl, "osm_id": "start_buffer_rev",
-        "idx_next": 0, "idx_next_alt": 0,
-        "idx_prev": mainline_indices[0][1], "idx_prev_alt": 0,
-        "elevs": [{"offset_meters": 0.0, "elev_meters": start_elev},
-                   {"offset_meters": sbl, "elev_meters": start_elev}],
-        "headings": [{"offset_meters": 0.0, "heading_radians": 0.0},
-                     {"offset_meters": sbl, "heading_radians": 0.0}],
-        "speed_set": [], "cat_power_limits": [], "link_idxs_lockout": [],
-    })
+    links.append(
+        {
+            "idx_curr": buf_fwd,
+            "idx_flip": buf_rev,
+            "osm_tags": {"note": "start_buffer"},
+            "length_meters": sbl,
+            "osm_id": "start_buffer_fwd",
+            "idx_next": mainline_indices[0][0],
+            "idx_next_alt": 0,
+            "idx_prev": 0,
+            "idx_prev_alt": 0,
+            "elevs": [
+                {"offset_meters": 0.0, "elev_meters": start_elev},
+                {"offset_meters": sbl, "elev_meters": start_elev},
+            ],
+            "headings": [
+                {"offset_meters": 0.0, "heading_radians": 0.0},
+                {"offset_meters": sbl, "heading_radians": 0.0},
+            ],
+            "speed_set": [],
+            "cat_power_limits": [],
+            "link_idxs_lockout": [],
+        }
+    )
+    links.append(
+        {
+            "idx_curr": buf_rev,
+            "idx_flip": buf_fwd,
+            "osm_tags": {"note": "start_buffer"},
+            "length_meters": sbl,
+            "osm_id": "start_buffer_rev",
+            "idx_next": 0,
+            "idx_next_alt": 0,
+            "idx_prev": mainline_indices[0][1],
+            "idx_prev_alt": 0,
+            "elevs": [
+                {"offset_meters": 0.0, "elev_meters": start_elev},
+                {"offset_meters": sbl, "elev_meters": start_elev},
+            ],
+            "headings": [
+                {"offset_meters": 0.0, "heading_radians": 0.0},
+                {"offset_meters": sbl, "heading_radians": 0.0},
+            ],
+            "speed_set": [],
+            "cat_power_limits": [],
+            "link_idxs_lockout": [],
+        }
+    )
 
     # Start buffer geometry
     u0, u1 = mainline_nodes[0], mainline_nodes[1]
     p0 = (G.nodes[u0]["lon"], G.nodes[u0]["lat"])
     p1 = (G.nodes[u1]["lon"], G.nodes[u1]["lat"])
     p_buf = add_endpoint_buffer([p1, p0], sbl)[-1]
-    geometry.append({"link_idx": buf_fwd, "coordinates": [[p_buf[0], p_buf[1]], [p0[0], p0[1]]]})
+    geometry.append(
+        {"link_idx": buf_fwd, "coordinates": [[p_buf[0], p_buf[1]], [p0[0], p0[1]]]}
+    )
 
     # ── Mainline links ──
     for i in range(n_main_edges):
@@ -542,9 +633,13 @@ def export_path_with_sidings(G, mainline_nodes, sidings, output_prefix, fast_mod
 
         # Chain connectivity along mainline
         fwd_link["idx_prev"] = mainline_indices[i - 1][0] if i > 0 else buf_fwd
-        fwd_link["idx_next"] = mainline_indices[i + 1][0] if i < n_main_edges - 1 else endbuf_fwd
+        fwd_link["idx_next"] = (
+            mainline_indices[i + 1][0] if i < n_main_edges - 1 else endbuf_fwd
+        )
 
-        rev_link["idx_prev"] = mainline_indices[i + 1][1] if i < n_main_edges - 1 else endbuf_rev
+        rev_link["idx_prev"] = (
+            mainline_indices[i + 1][1] if i < n_main_edges - 1 else endbuf_rev
+        )
         rev_link["idx_next"] = mainline_indices[i - 1][1] if i > 0 else buf_rev
 
         links.append(fwd_link)
@@ -567,10 +662,18 @@ def export_path_with_sidings(G, mainline_nodes, sidings, output_prefix, fast_mod
                 # Nodes exist but direct edge may not – synthesize
                 edge_data = {"tags": {"service": "siding"}}
                 d = haversine_distance(
-                    G.nodes[u]["lon"], G.nodes[u]["lat"],
-                    G.nodes[v]["lon"], G.nodes[v]["lat"],
+                    G.nodes[u]["lon"],
+                    G.nodes[u]["lat"],
+                    G.nodes[v]["lon"],
+                    G.nodes[v]["lat"],
                 )
-                G.add_edge(u, v, weight=d, osm_way_id="siding_synth", tags={"service": "siding"})
+                G.add_edge(
+                    u,
+                    v,
+                    weight=d,
+                    osm_way_id="siding_synth",
+                    tags={"service": "siding"},
+                )
 
             tags = edge_data.get("tags", {})
             # Make sure tags mark this as siding (for speed limit)
@@ -595,30 +698,54 @@ def export_path_with_sidings(G, mainline_nodes, sidings, output_prefix, fast_mod
     last_main_fwd = mainline_indices[-1][0]
     last_main_rev = mainline_indices[-1][1]
 
-    links.append({
-        "idx_curr": endbuf_fwd, "idx_flip": endbuf_rev,
-        "osm_tags": {"note": "end_buffer"},
-        "length_meters": ebl, "osm_id": "end_buffer_fwd",
-        "idx_next": 0, "idx_next_alt": 0,
-        "idx_prev": last_main_fwd, "idx_prev_alt": 0,
-        "elevs": [{"offset_meters": 0.0, "elev_meters": end_elev},
-                   {"offset_meters": ebl, "elev_meters": end_elev}],
-        "headings": [{"offset_meters": 0.0, "heading_radians": 0.0},
-                     {"offset_meters": ebl, "heading_radians": 0.0}],
-        "speed_set": [], "cat_power_limits": [], "link_idxs_lockout": [],
-    })
-    links.append({
-        "idx_curr": endbuf_rev, "idx_flip": endbuf_fwd,
-        "osm_tags": {"note": "end_buffer"},
-        "length_meters": ebl, "osm_id": "end_buffer_rev",
-        "idx_next": last_main_rev, "idx_next_alt": 0,
-        "idx_prev": 0, "idx_prev_alt": 0,
-        "elevs": [{"offset_meters": 0.0, "elev_meters": end_elev},
-                   {"offset_meters": ebl, "elev_meters": end_elev}],
-        "headings": [{"offset_meters": 0.0, "heading_radians": 0.0},
-                     {"offset_meters": ebl, "heading_radians": 0.0}],
-        "speed_set": [], "cat_power_limits": [], "link_idxs_lockout": [],
-    })
+    links.append(
+        {
+            "idx_curr": endbuf_fwd,
+            "idx_flip": endbuf_rev,
+            "osm_tags": {"note": "end_buffer"},
+            "length_meters": ebl,
+            "osm_id": "end_buffer_fwd",
+            "idx_next": 0,
+            "idx_next_alt": 0,
+            "idx_prev": last_main_fwd,
+            "idx_prev_alt": 0,
+            "elevs": [
+                {"offset_meters": 0.0, "elev_meters": end_elev},
+                {"offset_meters": ebl, "elev_meters": end_elev},
+            ],
+            "headings": [
+                {"offset_meters": 0.0, "heading_radians": 0.0},
+                {"offset_meters": ebl, "heading_radians": 0.0},
+            ],
+            "speed_set": [],
+            "cat_power_limits": [],
+            "link_idxs_lockout": [],
+        }
+    )
+    links.append(
+        {
+            "idx_curr": endbuf_rev,
+            "idx_flip": endbuf_fwd,
+            "osm_tags": {"note": "end_buffer"},
+            "length_meters": ebl,
+            "osm_id": "end_buffer_rev",
+            "idx_next": last_main_rev,
+            "idx_next_alt": 0,
+            "idx_prev": 0,
+            "idx_prev_alt": 0,
+            "elevs": [
+                {"offset_meters": 0.0, "elev_meters": end_elev},
+                {"offset_meters": ebl, "elev_meters": end_elev},
+            ],
+            "headings": [
+                {"offset_meters": 0.0, "heading_radians": 0.0},
+                {"offset_meters": ebl, "heading_radians": 0.0},
+            ],
+            "speed_set": [],
+            "cat_power_limits": [],
+            "link_idxs_lockout": [],
+        }
+    )
 
     # End buffer geometry
     last_u = mainline_nodes[-2]
@@ -626,7 +753,12 @@ def export_path_with_sidings(G, mainline_nodes, sidings, output_prefix, fast_mod
     p_b = (G.nodes[last_u]["lon"], G.nodes[last_u]["lat"])
     p_l = (G.nodes[last_v]["lon"], G.nodes[last_v]["lat"])
     p_end = add_endpoint_buffer([p_b, p_l], ebl)[-1]
-    geometry.append({"link_idx": endbuf_fwd, "coordinates": [[p_l[0], p_l[1]], [p_end[0], p_end[1]]]})
+    geometry.append(
+        {
+            "link_idx": endbuf_fwd,
+            "coordinates": [[p_l[0], p_l[1]], [p_end[0], p_end[1]]],
+        }
+    )
 
     # ─── Wire siding branches to mainline via idx_next_alt / idx_prev_alt ───
     #
@@ -749,9 +881,11 @@ def export_path_with_sidings(G, mainline_nodes, sidings, output_prefix, fast_mod
 
     logger.info(f"Saving {loc_path}")
     with open(loc_path, "w") as f:
-        f.write("Location ID,Link Index,Offset (m),Is Front End,"
-                "Grid Emissions Region,Electricity Price Region,"
-                "Liquid Fuel Price Region\n")
+        f.write(
+            "Location ID,Link Index,Offset (m),Is Front End,"
+            "Grid Emissions Region,Electricity Price Region,"
+            "Liquid Fuel Price Region\n"
+        )
         f.write(f"Spokane,{buf_fwd},0,FALSE,WECC,WA,WA\n")
         f.write(f"Lethbridge,{last_main_fwd},0,FALSE,WECC,ab,ab\n")
 
@@ -765,6 +899,7 @@ def export_path_with_sidings(G, mainline_nodes, sidings, output_prefix, fast_mod
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
+
 
 def main():
     import argparse
@@ -782,9 +917,9 @@ def main():
     start_pt = (47.668505, -117.342123)
     end_pt = (49.698540, -112.796653)
     waypoints = [
-        (48.282, -116.561),   # Sandpoint
-        (49.000, -116.180),   # Kingsgate
-        (49.636, -114.682),   # Crowsnest
+        (48.282, -116.561),  # Sandpoint
+        (49.000, -116.180),  # Kingsgate
+        (49.636, -114.682),  # Crowsnest
     ]
 
     logger.info("Finding nearest graph nodes…")
