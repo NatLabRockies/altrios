@@ -90,20 +90,30 @@ def run_simulation(network_file: str, show_plots: bool = False):
 
     # 4. Build Simulation
     print("Building simulation...")
-    # We need a dummy location map because our generated network doesn't have named locations yet
-    # The demo uses `default_locations.csv`, but that won't match our node IDs.
-    # We'll create a simple dummy LocationMap.
+    # Load this network's own locations.csv (e.g. spokane_lethbridge_with_sidings_locations.csv)
+    # which contains the named endpoints (Spokane / Lethbridge) emitted by the
+    # build step. Fall back to ALTRIOS's bundled default_locations.csv only if
+    # the network-specific file is absent.
+    network_path = Path(network_file)
+    locations_csv = network_path.with_name(network_path.stem + "_locations.csv")
+    if not locations_csv.exists():
+        locations_csv = alt.resources_root() / "networks/default_locations.csv"
+    print(f"Using location map: {locations_csv}")
+    location_map = alt.import_locations(str(locations_csv))
 
-    # However, make_speed_limit_train_sim REQUIRES a location map.
-    # Let's try to load the default one, but it might not be used if we don't reference the locations in a path.
-    location_map = alt.import_locations(
-        alt.resources_root() / "networks/default_locations.csv"
-    )
+    # Pick origin/destination: prefer Spokane → Lethbridge if available,
+    # otherwise fall back to first → last entry in the location map.
+    loc_ids = list(location_map.keys())
+    if "Spokane" in loc_ids and "Lethbridge" in loc_ids:
+        origin_id, destination_id = "Spokane", "Lethbridge"
+    else:
+        origin_id, destination_id = loc_ids[0], loc_ids[-1]
+    print(f"Origin: {origin_id}  |  Destination: {destination_id}")
 
     tsb = alt.TrainSimBuilder(
         train_id="TestTrain",
-        origin_id="Origin",
-        destination_id="Destination",
+        origin_id=origin_id,
+        destination_id=destination_id,
         train_config=train_config,
         loco_con=loco_con,
     )
