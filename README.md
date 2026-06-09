@@ -1,19 +1,19 @@
 # ALTRIOS
 
-![Altrios Logo](https://raw.githubusercontent.com/NREL/altrios/main/.github/images/ALTRIOS-logo-web.png)
+![Altrios Logo](https://raw.githubusercontent.com/NatLabRockies/altrios/main/.github/images/ALTRIOS-logo-web.png)
 
 [![homepage](https://img.shields.io/badge/homepage-altrios-blue)](https://www.nrel.gov/transportation/altrios.html) [![rust-tests](https://github.com/NREL/altrios/actions/workflows/rust-tests.yaml/badge.svg)](https://github.com/NREL/altrios/actions/workflows/rust-tests.yaml) [![py-tests](https://github.com/NREL/altrios/actions/workflows/py-tests.yaml/badge.svg)](https://github.com/NREL/altrios/actions/workflows/py-tests.yaml) [![wheels](https://github.com/NREL/altrios/actions/workflows/wheels.yaml/badge.svg)](https://github.com/NREL/altrios/actions/workflows/wheels.yaml?event=release) [![Python](https://img.shields.io/badge/python-3.9%20%7C%203.10-blue)](https://pypi.org/project/altrios/) [![Documentation](https://img.shields.io/badge/doc-mdBook-blue.svg)](https://nrel.github.io/altrios/) [![GitHub](https://img.shields.io/badge/GitHub-altrios-blue.svg)](https://github.com/NREL/altrios)
 
 
-![Model Framework Schematic](https://raw.githubusercontent.com/NREL/altrios/main/.github/images/ALTRIOS_schematic.png)
+![Model Framework Schematic](https://raw.githubusercontent.com/NatLabRockies/altrios/main/.github/images/ALTRIOS_schematic.png)
 
-The Advanced Locomotive Technology and Rail Infrastructure Optimization System ([ALTRIOS](https://www.nrel.gov/transportation/altrios.html)) is a unique, fully integrated, open-source software tool to evaluate strategies for deploying advanced locomotive technologies and associated infrastructure. ALTRIOS simulates freight-demand driven train scheduling, mainline meet-pass planning, locomotive dynamics, train dynamics, energy conversion efficiencies, and energy storage dynamics of line-haul train operations. Because new locomotives represent a significant long-term capital investment and new technologies must be thoroughly demonstrated before deployment, this tool provides guidance on the risk/reward tradeoffs of different technology rollout strategies. An open, integrated simulation tool is invaluable for identifying future research needs and making decisions on technology development, routes, and train selection. ALTRIOS was developed as part of a collaborative effort by a team comprising the National Laboratory of the Rockies (NLR), the University of Texas at Austin (UT Austin), Southwest Research Institute (SwRI), and BNSF Railway.
+The Advanced Locomotive Technology and Rail Infrastructure Optimization System ([ALTRIOS](https://www.nlr.gov/transportation/altrios.html)) is a unique, fully integrated, open-source software tool to evaluate strategies for deploying advanced locomotive technologies and associated infrastructure. ALTRIOS simulates freight-demand driven train scheduling, mainline meet-pass planning, locomotive dynamics, train dynamics, energy conversion efficiencies, and energy storage dynamics of line-haul train operations. Because new locomotives represent a significant long-term capital investment and new technologies must be thoroughly demonstrated before deployment, this tool provides guidance on the risk/reward tradeoffs of different technology rollout strategies. An open, integrated simulation tool is invaluable for identifying future research needs and making decisions on technology development, routes, and train selection. ALTRIOS was developed as part of a collaborative effort by a team comprising the National Laboratory of the Rockies (NLR), the University of Texas at Austin (UT Austin), Southwest Research Institute (SwRI), and BNSF Railway.
 
 Much of the core code in ALTRIOS is written in the [Rust Programming Language](https://www.rust-lang.org/) to ensure excellent computational performance and robustness, but we've built ALTRIOS with the intent of users interacting with the code through our feature-rich [Python](https://www.python.org/) interface.  
 
 ## Installation
 
-If you are an ALTRIOS developer, see [Developer Documentation](https://nrel.github.io/altrios/developers.html).  Otherwise, read on.  
+If you are an ALTRIOS developer, see [Developer Documentation](https://NatLabRockies.github.io/altrios/developers.html).  Otherwise, read on.  
 
 ### Python Setup
 
