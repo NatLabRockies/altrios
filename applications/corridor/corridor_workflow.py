@@ -13,11 +13,20 @@ Once a corridor is selected from these statistics, build a routable ALTRIOS
 network for it with the network builder
 (applications/network_builder/network_builder_demo.py).
 
+Drop an enhanced-stats JSON under applications/corridor/demo_data/ (gitignored,
+so real RailState data stays local) and you can regenerate the selection CSVs
+from it directly — no rollup/metadata/stats rerun needed.
+
 Usage (uv-managed environment):
     # One-time setup: sync deps + build altrios (auto-selects Python 3.10/3.11):
     uv sync
 
-    # Full pipeline (rollup + metadata + stats + csv):
+    # Build the selection CSVs straight from an existing enhanced-stats JSON
+    # (e.g. one kept locally under demo_data/, no RailState input needed):
+    uv run python applications/corridor/corridor_workflow.py --steps csv \
+        --stats-json applications/corridor/demo_data/<your_enhanced_stats>.json
+
+    # Full pipeline on real RailState data (rollup + metadata + stats + csv):
     uv run python applications/corridor/corridor_workflow.py
 
     # All US states (not just border states):
@@ -894,6 +903,14 @@ def main():
         default=None,
         help="Run only specific steps (default: rollup metadata stats csv)",
     )
+    parser.add_argument(
+        "--stats-json",
+        default=None,
+        help="Feed the csv step an existing enhanced-stats JSON instead of the "
+        "one produced this run — rebuilds the selection CSVs without rerunning "
+        "rollup/metadata/stats (e.g. from a JSON kept locally under "
+        "applications/corridor/demo_data/, which is gitignored).",
+    )
 
     args = parser.parse_args()
 
@@ -936,7 +953,7 @@ def main():
         step_stats(monthly_path, totals_path, stats_path)
 
     if "csv" in steps:
-        step_csv(stats_path, csv_dir)
+        step_csv(args.stats_json or stats_path, csv_dir)
 
     logger.info("=" * 70)
     logger.info("Workflow complete!")
