@@ -898,29 +898,37 @@ def export_path_with_sidings(
     )
 
 
-# ── main ─────────────────────────────────────────────────────────────────────
+# ── build entry point ────────────────────────────────────────────────────────
+
+# Default demo corridor: Spokane → Sandpoint → Kingsgate → Crowsnest → Lethbridge
+DEFAULT_START_PT = (47.668505, -117.342123)
+DEFAULT_END_PT = (49.698540, -112.796653)
+DEFAULT_WAYPOINTS = [
+    (48.282, -116.561),  # Sandpoint
+    (49.000, -116.180),  # Kingsgate
+    (49.636, -114.682),  # Crowsnest
+]
 
 
-def main():
-    import argparse
+def build_network(
+    input_xml,
+    output_prefix,
+    start_pt=DEFAULT_START_PT,
+    end_pt=DEFAULT_END_PT,
+    waypoints=DEFAULT_WAYPOINTS,
+    fast=False,
+):
+    """Build an ALTRIOS network (mainline + sidings) from a local OSM XML extract.
 
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--fast", action="store_true", help="Skip elevation fetch")
-    args = parser.parse_args()
+    Parses ``input_xml`` into a rail graph, finds the shortest mainline path from
+    ``start_pt`` through ``waypoints`` to ``end_pt``, detects sidings, and writes
+    ``{output_prefix}.yaml``, ``{output_prefix}_geometry.json`` and
+    ``{output_prefix}_locations.csv``. Set ``fast=True`` to skip the elevation
+    fetch (no network access required).
 
-    input_xml = os.path.join("networks", "spokane_lethbridge_local.osm.xml")
-    output_prefix = os.path.join("networks", "spokane_lethbridge_with_sidings")
-
+    Returns the path to the written ``.yaml`` file.
+    """
     G = parse_osm_xml_to_graph(input_xml)
-
-    # Route: Spokane → Sandpoint → Kingsgate → Crowsnest → Lethbridge
-    start_pt = (47.668505, -117.342123)
-    end_pt = (49.698540, -112.796653)
-    waypoints = [
-        (48.282, -116.561),  # Sandpoint
-        (49.000, -116.180),  # Kingsgate
-        (49.636, -114.682),  # Crowsnest
-    ]
 
     logger.info("Finding nearest graph nodes…")
     start_node, d0 = find_nearest_node(G, *start_pt)
@@ -930,7 +938,7 @@ def main():
     # Compute mainline path through waypoints
     current = start_node
     full_path = [current]
-    for pt in waypoints + [end_pt]:
+    for pt in list(waypoints) + [end_pt]:
         target, _ = find_nearest_node(G, pt[0], pt[1])
         seg = nx.shortest_path(G, source=current, target=target, weight="weight")
         full_path.extend(seg[1:])
@@ -942,7 +950,28 @@ def main():
     sidings = _identify_sidings(G, full_path)
 
     # Export
-    export_path_with_sidings(G, full_path, sidings, output_prefix, fast_mode=args.fast)
+    export_path_with_sidings(G, full_path, sidings, output_prefix, fast_mode=fast)
+    return output_prefix + ".yaml"
+
+
+# ── main ─────────────────────────────────────────────────────────────────────
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--fast", action="store_true", help="Skip elevation fetch")
+    args = parser.parse_args()
+
+    here = os.path.dirname(os.path.abspath(__file__))  # applications/network_builder
+    repo_root = os.path.dirname(os.path.dirname(here))
+    input_xml = os.path.join(
+        repo_root, "networks", "spokane_lethbridge_local.osm.xml"
+    )
+    output_prefix = os.path.join(here, "results", "spokane_lethbridge_with_sidings")
+
+    build_network(input_xml, output_prefix, fast=args.fast)
 
 
 if __name__ == "__main__":

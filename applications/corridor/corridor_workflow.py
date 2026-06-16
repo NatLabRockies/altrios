@@ -2,13 +2,16 @@
 """
 Unified Corridor Workflow
 
-Single script that processes RailState sensor data through the full pipeline:
+Single script that processes RailState sensor data through the corridor-selection
+pipeline:
   1. Rollup:   Parse JSONL sightings → monthly averages + actual totals (parquet)
   2. Metadata: Enrich parquet files with lat/lng, country, region from sensors_overview
   3. Stats:    Generate enhanced JSON statistics (per-sensor, per-province, loaded/empty)
   4. CSV:      Export statistics to multiple CSV files for analysis
-  5. Network:  Build ALTRIOS network from OSM data (optional)
-  6. Simulate: Run SpeedLimitTrainSim on the built corridor (optional)
+
+Once a corridor is selected from these statistics, build a routable ALTRIOS
+network for it with the network builder
+(applications/network_builder/network_builder_demo.py).
 
 Usage (uv-managed environment):
     # One-time setup: sync deps + build altrios (auto-selects Python 3.10/3.11):
@@ -16,9 +19,6 @@ Usage (uv-managed environment):
 
     # Full pipeline (rollup + metadata + stats + csv):
     uv run python applications/corridor/corridor_workflow.py
-
-    # Include network build + simulation:
-    uv run python applications/corridor/corridor_workflow.py --with-sim
 
     # All US states (not just border states):
     uv run python applications/corridor/corridor_workflow.py --all-states
@@ -36,7 +36,6 @@ import polars as pl
 import logging
 import json
 import argparse
-import subprocess
 import sys
 import datetime
 from pathlib import Path
@@ -857,38 +856,10 @@ def _write_csv(path: Path, rows: list) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Step 5 & 6: Network build + simulation (optional)
-# ---------------------------------------------------------------------------
-
-
-def step_network_and_sim(workspace_root: str) -> None:
-    """Build network from OSM and run simulation."""
-    logger.info("=" * 70)
-    logger.info("STEP 5: Build network + simulate")
-    logger.info("=" * 70)
-
-    scripts = [
-        ("Build network", "applications/network_builder/build_altrios_with_sidings.py"),
-        ("Plot geometry", "applications/network_builder/plot_altrios_path.py"),
-        ("Run simulation", "applications/corridor/run_spokane_sim.py"),
-    ]
-
-    for label, rel_path in scripts:
-        script = Path(workspace_root) / rel_path
-        if not script.exists():
-            logger.warning(f"  Skipping {label}: {script} not found")
-            continue
-        logger.info(f"  {label}: {rel_path}")
-        subprocess.run([sys.executable, str(script)], check=True)
-
-    logger.info("  ✓ Network + simulation complete")
-
-
-# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-ALL_STEPS = ["rollup", "metadata", "stats", "csv", "sim"]
+ALL_STEPS = ["rollup", "metadata", "stats", "csv"]
 
 
 def main():
@@ -903,8 +874,8 @@ def main():
     )
     parser.add_argument(
         "--output-dir",
-        default=str(Path(__file__).resolve().parent),
-        help="Directory for output files (default: applications/corridor/)",
+        default=str(Path(__file__).resolve().parent / "results"),
+        help="Directory for output files (default: applications/corridor/results/)",
     )
     parser.add_argument(
         "--sensors-overview",
@@ -917,28 +888,18 @@ def main():
         help="Include all 50 US states (default: border states only)",
     )
     parser.add_argument(
-        "--with-sim",
-        action="store_true",
-        help="Also run network build + simulation",
-    )
-    parser.add_argument(
         "--steps",
         nargs="+",
         choices=ALL_STEPS,
         default=None,
         help="Run only specific steps (default: rollup metadata stats csv)",
     )
-    parser.add_argument(
-        "--workspace-root",
-        default=str(Path(__file__).resolve().parent.parent.parent),
-        help="Workspace root for network/sim scripts",
-    )
 
     args = parser.parse_args()
 
     steps = set(args.steps) if args.steps else {"rollup", "metadata", "stats", "csv"}
-    if args.with_sim:
-        steps.add("sim")
+
+    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
     suffix = "all_states" if args.all_states else "border_states"
     monthly_path = str(
@@ -976,9 +937,6 @@ def main():
 
     if "csv" in steps:
         step_csv(stats_path, csv_dir)
-
-    if "sim" in steps:
-        step_network_and_sim(args.workspace_root)
 
     logger.info("=" * 70)
     logger.info("Workflow complete!")
