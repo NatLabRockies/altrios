@@ -51,10 +51,6 @@ dependencies = [
     "ipykernel~=6.29",
     "executing~=2.0",
     "pip",
-    # Network builder workflow deps
-    "shapely>=2.0",
-    "networkx>=3.0",
-    "scipy>=1.10",
 ]
 
 [project.urls]
@@ -70,6 +66,10 @@ dev = [
     "pylsp-mypy~=0.7.0",
     "memory_profiler~=0.61.0",
     "mypy>=1.15.0",
+    # Network builder + corridor workflow deps
+    "shapely>=2.0",
+    "networkx>=3.0",
+    "scipy>=1.10",
 ]
 [dependency-groups]
 dev = [

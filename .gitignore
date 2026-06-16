@@ -1227,6 +1227,9 @@ hostler_work_log.txt
 # Corridor workflow results (RailState rollups / stats / CSV exports)
 applications/corridor/results/
 
+# Corridor demo input (real RailState summaries — kept local, never published)
+applications/corridor/demo_data/
+
 # Network builder results (built networks, geometry, plots)
 applications/network_builder/results/
 
