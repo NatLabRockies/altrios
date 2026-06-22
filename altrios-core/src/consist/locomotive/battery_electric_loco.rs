@@ -178,6 +178,7 @@ impl LocoTrait for BatteryElectricLoco {
             chrg_buffer,
         )?;
         self.edrv.set_cur_pwr_max_out(
+            // TODO: pipe in catenary power limit here
             *self.res.state.pwr_prop_max.get_fresh(|| format_dbg!())?,
             None,
         )?;

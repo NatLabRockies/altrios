@@ -97,7 +97,7 @@ def dispatch(
                 message = (
                     message
                     + f"""
-                {row["Node"]}: {row["count"]}"""
+                    {row["Node"]}: {row["count"]}"""
                 )
         else:
             # Show counts of locomotives servicing or refueling at the origin
@@ -596,7 +596,9 @@ def run_train_planner(
         rv_dict = rv.to_pydict()
         # Check for duplicate mappings (should not happen)
         if rv_dict["freight_type"] in freight_type_to_car_type:
-            assert f"More than one rail vehicle car type for freight type {rv_dict['freight_type']}"
+            raise Exception(
+                f"More than one rail vehicle car type for freight type {rv_dict['freight_type']}"
+            )
         else:
             # Map this freight type to its car type
             freight_type_to_car_type[rv_dict["freight_type"]] = rv_dict["car_type"]

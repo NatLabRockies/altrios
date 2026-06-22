@@ -317,6 +317,7 @@ impl ElectricMachine for ElectricDrivetrain {
         pwr_in_max: si::Power,
         pwr_aux: Option<si::Power>,
     ) -> anyhow::Result<()> {
+        // TODO: pipe in catenary power limit here
         ensure!(pwr_aux.is_none(), format_dbg!(pwr_aux.is_none()));
         if self.pwr_in_frac_interp.is_empty() {
             self.set_pwr_in_frac_interp()?;

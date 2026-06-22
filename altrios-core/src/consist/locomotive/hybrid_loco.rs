@@ -171,6 +171,7 @@ impl LocoTrait for Box<HybridLoco> {
         )?;
 
         self.edrv.set_cur_pwr_max_out(
+            // TODO: pipe in catenary power limit here
             *self
                 .gen
                 .state

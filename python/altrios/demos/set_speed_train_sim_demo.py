@@ -1,11 +1,12 @@
 # %%
+import os
 import time
+
 import polars as pl
 import seaborn as sns
-import os
-from altrios.demos import plot_util
 
 import altrios as alt
+from altrios.demos import plot_util
 
 sns.set_theme()
 
@@ -15,10 +16,10 @@ SAVE_INTERVAL = 1
 
 # Build the train config
 rail_vehicle_loaded = alt.RailVehicle.from_file(
-    alt.resources_root() / "rolling_stock/Manifest_Loaded.yaml"
+    alt.resources_root() / "rolling_stock/Manifest_Loaded.yaml",
 )
 rail_vehicle_empty = alt.RailVehicle.from_file(
-    alt.resources_root() / "rolling_stock/Manifest_Empty.yaml"
+    alt.resources_root() / "rolling_stock/Manifest_Empty.yaml",
 )
 
 # https://docs.rs/altrios-core/latest/altrios_core/train/struct.TrainConfig.html
@@ -37,7 +38,7 @@ train_config = alt.TrainConfig(
 # https://docs.rs/altrios-core/latest/altrios_core/consist/locomotive/powertrain/reversible_energy_storage/struct.ReversibleEnergyStorage.html#
 res = alt.ReversibleEnergyStorage.from_file(
     alt.resources_root()
-    / "powertrains/reversible_energy_storages/Kokam_NMC_75Ah_flx_drive.yaml"
+    / "powertrains/reversible_energy_storages/Kokam_NMC_75Ah_flx_drive.yaml",
 )
 # instantiate electric drivetrain (motors and any gearboxes)
 # https://docs.rs/altrios-core/latest/altrios_core/consist/locomotive/powertrain/electric_drivetrain/struct.ElectricDrivetrain.html
@@ -52,7 +53,7 @@ loco_type = alt.BatteryElectricLoco.from_pydict(
     {
         "res": res.to_pydict(),
         "edrv": edrv.to_pydict(),
-    }
+    },
 )
 
 bel: alt.Locomotive = alt.Locomotive(
@@ -62,7 +63,7 @@ bel: alt.Locomotive = alt.Locomotive(
             pwr_aux_offset_watts=8.55e3,
             pwr_aux_traction_coeff_ratio=540.0e-6,
             force_max_newtons=667.2e3,
-        )
+        ),
     ),
 )
 hel: alt.Locomotive = alt.Locomotive.default_hybrid_electric_loco()
@@ -83,13 +84,13 @@ tsb = alt.TrainSimBuilder(
 
 # Load the network and link path through the network.
 network = alt.Network.from_file(
-    alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
+    alt.resources_root() / "networks/Taconite-NoBalloon.yaml",
 )
 link_path = alt.LinkPath.from_csv_file(alt.resources_root() / "demo_data/link_path.csv")
 
 # load the prescribed speed trace that the train will follow
 speed_trace = alt.SpeedTrace.from_csv_file(
-    alt.resources_root() / "demo_data/speed_trace.csv"
+    alt.resources_root() / "demo_data/speed_trace.csv",
 )
 
 train_sim: alt.SetSpeedTrainSim = tsb.make_set_speed_train_sim(
@@ -123,7 +124,7 @@ if ENABLE_REF_OVERRIDE:
 if ENABLE_ASSERTS:
     print("Checking output of `to_dataframe`")
     to_dataframe_expected = pl.scan_csv(
-        ref_dir / "to_dataframe_expected.csv"
+        ref_dir / "to_dataframe_expected.csv",
     ).collect()[-1]
     assert to_dataframe_expected.equals(train_sim.to_dataframe()[-1]), (
         f"to_dataframe_expected: \n{to_dataframe_expected}\ntrain_sim.to_dataframe()[-1]: \n{train_sim.to_dataframe()[-1]}"
