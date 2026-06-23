@@ -376,7 +376,7 @@ def _identify_sidings(G, mainline_nodes):
 
 
 def export_path_with_sidings(
-    G, mainline_nodes, sidings, output_prefix, fast_mode=False
+    G, mainline_nodes, sidings, output_prefix, fast_mode=False, max_grade=MAX_GRADE
 ):
     """Build an ALTRIOS network YAML that includes the mainline plus
     siding branches with proper idx_next_alt / idx_prev_alt wiring."""
@@ -417,9 +417,9 @@ def export_path_with_sidings(
         )
 
         # Filter out grade spikes that exceed max allowable grade
-        logger.info(f"Filtering grade spikes (max grade: {MAX_GRADE * 100:.1f}%)...")
+        logger.info(f"Filtering grade spikes (max grade: {max_grade * 100:.1f}%)...")
         mainline_elevs = filter_grade_spikes(
-            mainline_elevs, mainline_distances, max_grade=MAX_GRADE
+            mainline_elevs, mainline_distances, max_grade=max_grade
         )
 
         # Update the elevations list with smoothed mainline values
@@ -917,6 +917,7 @@ def build_network(
     end_pt=DEFAULT_END_PT,
     waypoints=DEFAULT_WAYPOINTS,
     fast=False,
+    max_grade=MAX_GRADE,
 ):
     """Build an ALTRIOS network (mainline + sidings) from a local OSM XML extract.
 
@@ -924,7 +925,8 @@ def build_network(
     ``start_pt`` through ``waypoints`` to ``end_pt``, detects sidings, and writes
     ``{output_prefix}.yaml``, ``{output_prefix}_geometry.json`` and
     ``{output_prefix}_locations.csv``. Set ``fast=True`` to skip the elevation
-    fetch (no network access required).
+    fetch (no network access required). ``max_grade`` caps the track grade
+    (decimal, e.g. 0.04 = 4%) used to smooth elevation spikes.
 
     Returns the path to the written ``.yaml`` file.
     """
@@ -950,7 +952,9 @@ def build_network(
     sidings = _identify_sidings(G, full_path)
 
     # Export
-    export_path_with_sidings(G, full_path, sidings, output_prefix, fast_mode=fast)
+    export_path_with_sidings(
+        G, full_path, sidings, output_prefix, fast_mode=fast, max_grade=max_grade
+    )
     return output_prefix + ".yaml"
 
 

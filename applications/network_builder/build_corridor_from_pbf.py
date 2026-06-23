@@ -19,11 +19,17 @@ logger = logging.getLogger(__name__)
 
 CACHE_DIR = "osmium_cache"
 NETWORKS_DIR = "networks"
-OUTPUT_NAME = "spokane_lethbridge_local"
+
+# ---------------------------------------------------------------------------
+# Default demo corridor (Spokane → Lethbridge). Override any of these by passing
+# output_name / regions / waypoints to build_corridor() — no need to edit this
+# file or keep multiple copies of it for different corridors.
+# ---------------------------------------------------------------------------
+DEFAULT_OUTPUT_NAME = "spokane_lethbridge_local"
 
 # Regions required for the route WA -> ID -> BC -> AB
 # Using Geofabrik URLs
-REGIONS = [
+DEFAULT_REGIONS = [
     {
         "name": "washington",
         "url": "https://download.geofabrik.de/north-america/us/washington-latest.osm.pbf",
@@ -43,7 +49,7 @@ REGIONS = [
 ]
 
 # Route Waypoints (Spokane → Sandpoint → Kingsgate → Crowsnest → Lethbridge)
-WAYPOINTS = [
+DEFAULT_WAYPOINTS = [
     ("Spokane", 47.666, -117.360),
     ("Sandpoint", 48.282, -116.561),
     ("Bonners Ferry", 48.692, -116.319),
@@ -119,7 +125,24 @@ def create_corridor_geojson(waypoints, output_path, buffer_deg=0.5):
     logger.info(f"Saved corridor GeoJSON to {output_path}")
 
 
-def main():
+def build_corridor(
+    output_name=DEFAULT_OUTPUT_NAME,
+    regions=DEFAULT_REGIONS,
+    waypoints=DEFAULT_WAYPOINTS,
+    networks_dir=NETWORKS_DIR,
+    cache_dir=CACHE_DIR,
+    buffer_deg=0.4,  # ~45 km radius around the waypoint line
+):
+    """Download regional OSM PBFs, clip them to a buffered corridor polygon
+    around ``waypoints``, filter to ``railway=rail``, and write
+    ``{networks_dir}/{output_name}.osm.pbf`` and ``.osm.xml``.
+
+    Pass ``output_name`` / ``regions`` / ``waypoints`` to target a different
+    corridor without editing this file. ``regions`` is a list of
+    ``{"name", "url"}`` Geofabrik PBF entries; ``waypoints`` is a list of
+    ``(name, lat, lon)`` points. Requires the osmium-tool CLI. Returns the path
+    to the written ``.osm.xml`` extract (the input to build_altrios_with_sidings).
+    """
     if not check_osmium_installed():
         logger.error("Error: 'osmium' command line tool not found.")
         logger.error(
@@ -127,30 +150,30 @@ def main():
         )
         sys.exit(1)
 
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    os.makedirs(NETWORKS_DIR, exist_ok=True)
+    os.makedirs(cache_dir, exist_ok=True)
+    os.makedirs(networks_dir, exist_ok=True)
 
     # 1. Download PBFs
     pbf_paths = []
-    for region in REGIONS:
+    for region in regions:
         filename = f"{region['name']}-latest.osm.pbf"
-        dest_path = os.path.join(CACHE_DIR, filename)
+        dest_path = os.path.join(cache_dir, filename)
         download_file(region["url"], dest_path)
         pbf_paths.append(dest_path)
 
     # 2. Generate Corridor Polygon
-    geojson_path = os.path.join(CACHE_DIR, "corridor.geojson")
-    create_corridor_geojson(WAYPOINTS, geojson_path, buffer_deg=0.4)  # ~45km radius
+    geojson_path = os.path.join(cache_dir, "corridor.geojson")
+    create_corridor_geojson(waypoints, geojson_path, buffer_deg=buffer_deg)
 
     # 3. Merge PBFs
-    merged_pbf_path = os.path.join(CACHE_DIR, "merged_region.osm.pbf")
+    merged_pbf_path = os.path.join(cache_dir, "merged_region.osm.pbf")
     logger.info("Merging PBF files...")
     # osmium merge inputs... -o output
     cmd_merge = ["osmium", "merge"] + pbf_paths + ["-o", merged_pbf_path, "--overwrite"]
     subprocess.run(cmd_merge, check=True)
 
     # 4. Extract Corridor
-    corridor_pbf_path = os.path.join(CACHE_DIR, "corridor_raw.osm.pbf")
+    corridor_pbf_path = os.path.join(cache_dir, "corridor_raw.osm.pbf")
     logger.info("Clipping to corridor polygon...")
     # osmium extract -p poly input -o output
     cmd_extract = [
@@ -166,7 +189,7 @@ def main():
     subprocess.run(cmd_extract, check=True)
 
     # 5. Filter for Rail
-    final_output_path = os.path.join(NETWORKS_DIR, f"{OUTPUT_NAME}.osm.pbf")
+    final_output_path = os.path.join(networks_dir, f"{output_name}.osm.pbf")
     logger.info("Filtering for railway=rail...")
     # osmium tags-filter input w/railway=rail -o output
     cmd_filter = [
@@ -182,8 +205,8 @@ def main():
 
     logger.info(f"Success! Final network saved to: {final_output_path}")
 
-    # Optional: Convert to XML for text processing/debugging if needed
-    final_xml_path = os.path.join(NETWORKS_DIR, f"{OUTPUT_NAME}.osm.xml")
+    # Convert to XML (the text format consumed by build_altrios_with_sidings.py)
+    final_xml_path = os.path.join(networks_dir, f"{output_name}.osm.xml")
     logger.info(f"Converting to XML: {final_xml_path}")
     cmd_xml = [
         "osmium",
@@ -198,6 +221,13 @@ def main():
     subprocess.run(cmd_xml, check=True)
 
     logger.info("Done.")
+    return final_xml_path
+
+
+def main():
+    # Builds the default demo corridor; callers wanting a different corridor
+    # should import build_corridor() and pass output_name/regions/waypoints.
+    build_corridor()
 
 
 if __name__ == "__main__":
