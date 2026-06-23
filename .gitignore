@@ -1224,3 +1224,17 @@ vehicle_average_times.txt
 avg_time_per_train.txt
 crane_work_log.txt
 hostler_work_log.txt
+# Corridor workflow results (RailState rollups / stats / CSV exports)
+applications/corridor/results/
+
+# Corridor demo input (real RailState summaries — kept local, never published)
+applications/corridor/demo_data/
+
+# Network builder results (built networks, geometry, plots)
+applications/network_builder/results/
+
+# OSM download cache + regenerated extracts (keep only the bundled demo extract)
+/osmium_cache
+/networks/*
+!/networks/spokane_lethbridge_local.osm.xml
+/.venv311
