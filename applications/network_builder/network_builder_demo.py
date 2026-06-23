@@ -44,6 +44,7 @@ REPO_ROOT = THIS_DIR.parent.parent
 # Make the sibling builder/plot modules importable regardless of cwd.
 sys.path.insert(0, str(THIS_DIR))
 
+from altrios_builder_utils import BuilderConfig  # noqa: E402
 from build_altrios_with_sidings import build_network  # noqa: E402
 from plot_altrios_path import plot_json  # noqa: E402
 
@@ -53,54 +54,24 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# CORRIDOR CONFIG -- edit this block to target a different corridor.
-# These values are passed into the workflow modules as parameters; nothing in
-# build_corridor_from_pbf.py or build_altrios_with_sidings.py needs to change.
+# CORRIDOR CONFIG -- override BuilderConfig fields here for a different corridor.
+# Defaults build the bundled Spokane -> Lethbridge demo corridor; the workflow
+# modules read these values, so they never need editing or copying.
 # ============================================================================
-
-# Basename for the built network files (written under the results dir).
-OUTPUT_NAME = "spokane_lethbridge"
-
-# Maximum track grade (decimal, e.g. 0.04 = 4%) used to smooth elevation spikes.
-MAX_GRADE = 0.04
-
-# Regional OSM PBFs (Geofabrik) covering the route -- only used with --download.
-REGIONS = [
-    {
-        "name": "washington",
-        "url": "https://download.geofabrik.de/north-america/us/washington-latest.osm.pbf",
-    },
-    {
-        "name": "idaho",
-        "url": "https://download.geofabrik.de/north-america/us/idaho-latest.osm.pbf",
-    },
-    {
-        "name": "british-columbia",
-        "url": "https://download.geofabrik.de/north-america/canada/british-columbia-latest.osm.pbf",
-    },
-    {
-        "name": "alberta",
-        "url": "https://download.geofabrik.de/north-america/canada/alberta-latest.osm.pbf",
-    },
-]
-
-# Route waypoints (name, lat, lon), ordered start -> end. These define both the
-# OSM clip area (--download) and the mainline route through the built network.
-WAYPOINTS = [
-    ("Spokane", 47.666, -117.360),
-    ("Sandpoint", 48.282, -116.561),
-    ("Bonners Ferry", 48.692, -116.319),
-    ("Kingsgate (Border)", 49.000, -116.180),
-    ("Cranbrook", 49.508, -115.747),
-    ("Fernie", 49.504, -115.063),
-    ("Crowsnest", 49.636, -114.682),
-    ("Fort Macleod", 49.725, -113.397),
-    ("Lethbridge", 49.724, -112.919),
-]
+CONFIG = BuilderConfig()
+# For a different corridor, override only the fields you need, e.g.:
+#   CONFIG = BuilderConfig(
+#       output_name="vancouver_kamloops",
+#       max_grade=0.03,
+#       regions=[{"name": "british-columbia",
+#                 "url": ".../british-columbia-latest.osm.pbf"}],
+#       waypoints=[("Vancouver", 49.28, -123.12), ("Hope", 49.38, -121.44),
+#                  ("Kamloops", 50.67, -120.33)],
+#   )
 # ============================================================================
 
 # Bundled demo extract + default (gitignored) results location.
-DEFAULT_INPUT = REPO_ROOT / "networks" / f"{OUTPUT_NAME}_local.osm.xml"
+DEFAULT_INPUT = REPO_ROOT / "networks" / f"{CONFIG.output_name}_local.osm.xml"
 DEFAULT_OUTPUT_DIR = THIS_DIR / "results"
 
 
@@ -113,10 +84,11 @@ def main(args: argparse.Namespace) -> None:
         logger.info("Downloading + clipping OSM extract for the configured corridor...")
         input_xml = Path(
             build_corridor(
-                output_name=f"{OUTPUT_NAME}_local",
-                regions=REGIONS,
-                waypoints=WAYPOINTS,
+                output_name=f"{CONFIG.output_name}_local",
+                regions=CONFIG.regions,
+                waypoints=CONFIG.waypoints,
                 networks_dir=str(REPO_ROOT / "networks"),
+                buffer_deg=CONFIG.buffer_deg,
             )
         )
     else:
@@ -128,38 +100,34 @@ def main(args: argparse.Namespace) -> None:
 
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_prefix = str(output_dir / OUTPUT_NAME)
-
-    # 2. Derive the routing from the configured waypoints (start -> ... -> end).
-    start_pt = (WAYPOINTS[0][1], WAYPOINTS[0][2])
-    end_pt = (WAYPOINTS[-1][1], WAYPOINTS[-1][2])
-    route_waypoints = [(lat, lon) for _name, lat, lon in WAYPOINTS[1:-1]]
+    output_prefix = str(output_dir / CONFIG.output_name)
 
     logger.info("=" * 70)
-    logger.info(f"Network builder demo -- {OUTPUT_NAME}")
+    logger.info(f"Network builder demo -- {CONFIG.output_name}")
     logger.info("=" * 70)
     logger.info(f"Input extract : {input_xml}")
     logger.info(f"Output dir    : {output_dir}")
-    logger.info(f"Max grade     : {MAX_GRADE * 100:.1f}%")
+    logger.info(f"Max grade     : {CONFIG.max_grade * 100:.1f}%")
     logger.info(
         f"Elevation     : {'fetched' if args.with_elevation else 'skipped (fast)'}"
     )
 
-    # 3. Build the ALTRIOS network YAML (+ geometry JSON + locations CSV).
+    # 2. Build the ALTRIOS network YAML (+ geometry JSON + locations CSV).
+    #    Routing (start -> ... -> end) is derived from CONFIG.waypoints.
     yaml_path = Path(
         build_network(
             str(input_xml),
             output_prefix,
-            start_pt=start_pt,
-            end_pt=end_pt,
-            waypoints=route_waypoints,
+            start_pt=CONFIG.start_pt,
+            end_pt=CONFIG.end_pt,
+            waypoints=CONFIG.route_waypoints,
             fast=not args.with_elevation,
-            max_grade=MAX_GRADE,
+            max_grade=CONFIG.max_grade,
         )
     )
     logger.info(f"Built network : {yaml_path}")
 
-    # 4. Plot the built geometry as an interactive HTML map.
+    # 3. Plot the built geometry as an interactive HTML map.
     if not args.no_plot:
         geom_path = output_prefix + "_geometry.json"
         html_path = output_prefix + "_plot.html"

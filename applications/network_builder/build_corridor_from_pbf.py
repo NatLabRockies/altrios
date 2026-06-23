@@ -20,46 +20,8 @@ logger = logging.getLogger(__name__)
 CACHE_DIR = "osmium_cache"
 NETWORKS_DIR = "networks"
 
-# ---------------------------------------------------------------------------
-# Default demo corridor (Spokane → Lethbridge). Override any of these by passing
-# output_name / regions / waypoints to build_corridor() — no need to edit this
-# file or keep multiple copies of it for different corridors.
-# ---------------------------------------------------------------------------
-DEFAULT_OUTPUT_NAME = "spokane_lethbridge_local"
-
-# Regions required for the route WA -> ID -> BC -> AB
-# Using Geofabrik URLs
-DEFAULT_REGIONS = [
-    {
-        "name": "washington",
-        "url": "https://download.geofabrik.de/north-america/us/washington-latest.osm.pbf",
-    },
-    {
-        "name": "idaho",
-        "url": "https://download.geofabrik.de/north-america/us/idaho-latest.osm.pbf",
-    },
-    {
-        "name": "british-columbia",
-        "url": "https://download.geofabrik.de/north-america/canada/british-columbia-latest.osm.pbf",
-    },
-    {
-        "name": "alberta",
-        "url": "https://download.geofabrik.de/north-america/canada/alberta-latest.osm.pbf",
-    },
-]
-
-# Route Waypoints (Spokane → Sandpoint → Kingsgate → Crowsnest → Lethbridge)
-DEFAULT_WAYPOINTS = [
-    ("Spokane", 47.666, -117.360),
-    ("Sandpoint", 48.282, -116.561),
-    ("Bonners Ferry", 48.692, -116.319),
-    ("Kingsgate (Border)", 49.000, -116.180),
-    ("Cranbrook", 49.508, -115.747),
-    ("Fernie", 49.504, -115.063),
-    ("Crowsnest", 49.636, -114.682),
-    ("Fort Macleod", 49.725, -113.397),
-    ("Lethbridge", 49.724, -112.919),
-]
+# The corridor (output_name / regions / waypoints) is supplied by the caller.
+# See BuilderConfig in altrios_builder_utils.py for the demo defaults.
 
 
 def check_osmium_installed():
@@ -126,9 +88,9 @@ def create_corridor_geojson(waypoints, output_path, buffer_deg=0.5):
 
 
 def build_corridor(
-    output_name=DEFAULT_OUTPUT_NAME,
-    regions=DEFAULT_REGIONS,
-    waypoints=DEFAULT_WAYPOINTS,
+    output_name,
+    regions,
+    waypoints,
     networks_dir=NETWORKS_DIR,
     cache_dir=CACHE_DIR,
     buffer_deg=0.4,  # ~45 km radius around the waypoint line
@@ -225,9 +187,20 @@ def build_corridor(
 
 
 def main():
-    # Builds the default demo corridor; callers wanting a different corridor
-    # should import build_corridor() and pass output_name/regions/waypoints.
-    build_corridor()
+    # Builds the default demo corridor from BuilderConfig; callers wanting a
+    # different corridor should pass their own output_name/regions/waypoints.
+    try:
+        from altrios_builder_utils import BuilderConfig
+    except ImportError:
+        from .altrios_builder_utils import BuilderConfig
+
+    cfg = BuilderConfig()
+    build_corridor(
+        output_name=f"{cfg.output_name}_local",
+        regions=cfg.regions,
+        waypoints=cfg.waypoints,
+        buffer_deg=cfg.buffer_deg,
+    )
 
 
 if __name__ == "__main__":

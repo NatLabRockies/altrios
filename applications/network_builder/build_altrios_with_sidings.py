@@ -31,12 +31,14 @@ import time
 
 try:
     from altrios_builder_utils import (
+        BuilderConfig,
         set_speed_limits,
         is_siding,
         add_endpoint_buffer,
     )
 except ImportError:
     from .altrios_builder_utils import (
+        BuilderConfig,
         set_speed_limits,
         is_siding,
         add_endpoint_buffer,
@@ -900,22 +902,13 @@ def export_path_with_sidings(
 
 # ── build entry point ────────────────────────────────────────────────────────
 
-# Default demo corridor: Spokane → Sandpoint → Kingsgate → Crowsnest → Lethbridge
-DEFAULT_START_PT = (47.668505, -117.342123)
-DEFAULT_END_PT = (49.698540, -112.796653)
-DEFAULT_WAYPOINTS = [
-    (48.282, -116.561),  # Sandpoint
-    (49.000, -116.180),  # Kingsgate
-    (49.636, -114.682),  # Crowsnest
-]
-
 
 def build_network(
     input_xml,
     output_prefix,
-    start_pt=DEFAULT_START_PT,
-    end_pt=DEFAULT_END_PT,
-    waypoints=DEFAULT_WAYPOINTS,
+    start_pt,
+    end_pt,
+    waypoints,
     fast=False,
     max_grade=MAX_GRADE,
 ):
@@ -975,7 +968,16 @@ def main():
     )
     output_prefix = os.path.join(here, "results", "spokane_lethbridge_with_sidings")
 
-    build_network(input_xml, output_prefix, fast=args.fast)
+    cfg = BuilderConfig()
+    build_network(
+        input_xml,
+        output_prefix,
+        start_pt=cfg.start_pt,
+        end_pt=cfg.end_pt,
+        waypoints=cfg.route_waypoints,
+        fast=args.fast,
+        max_grade=cfg.max_grade,
+    )
 
 
 if __name__ == "__main__":
