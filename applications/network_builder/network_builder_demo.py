@@ -44,7 +44,7 @@ REPO_ROOT = THIS_DIR.parent.parent
 # Make the sibling builder/plot modules importable regardless of cwd.
 sys.path.insert(0, str(THIS_DIR))
 
-from altrios_builder_utils import BuilderConfig  # noqa: E402
+from builder_config import BuilderConfig  # noqa: E402
 from build_altrios_with_sidings import build_network  # noqa: E402
 from plot_altrios_path import plot_json  # noqa: E402
 

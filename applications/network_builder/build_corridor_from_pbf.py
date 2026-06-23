@@ -190,9 +190,9 @@ def main():
     # Builds the default demo corridor from BuilderConfig; callers wanting a
     # different corridor should pass their own output_name/regions/waypoints.
     try:
-        from altrios_builder_utils import BuilderConfig
+        from builder_config import BuilderConfig
     except ImportError:
-        from .altrios_builder_utils import BuilderConfig
+        from .builder_config import BuilderConfig
 
     cfg = BuilderConfig()
     build_corridor(

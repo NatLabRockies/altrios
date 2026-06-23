@@ -30,15 +30,15 @@ import urllib3
 import time
 
 try:
+    from builder_config import BuilderConfig
     from altrios_builder_utils import (
-        BuilderConfig,
         set_speed_limits,
         is_siding,
         add_endpoint_buffer,
     )
 except ImportError:
+    from .builder_config import BuilderConfig
     from .altrios_builder_utils import (
-        BuilderConfig,
         set_speed_limits,
         is_siding,
         add_endpoint_buffer,
