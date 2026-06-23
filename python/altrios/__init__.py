@@ -1,9 +1,6 @@
-from importlib.metadata import version, PackageNotFoundError
+from importlib.metadata import version
 
-try:
-    __version__ = version("altrios")
-except PackageNotFoundError:
-    __version__ = "0.0.0-dev"
+__version__ = version("altrios")
 
 import numpy as np
 from pathlib import Path
