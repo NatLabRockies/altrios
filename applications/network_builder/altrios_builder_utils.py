@@ -6,12 +6,6 @@ import logging
 from typing import List, Optional, Union, Dict, Tuple, Any
 from pathlib import Path
 
-# Try to import altrios, but don't fail if not present (e.g. local dev without compiled lib)
-try:
-    import altrios as alt
-except ImportError:
-    alt = None
-
 logger = logging.getLogger(__name__)
 
 
