@@ -1,105 +1,202 @@
-﻿"""Per-train orchestration: arrival, track assignment, unload/load coordination, departure."""
+﻿"""Per-train orchestration for the spec-based ``truck_rail`` and
+``rail_vessel`` modes.
+
+A train arrival exchanges containers with the *main container stack* via
+the rail yard tractor pool:
+
+* Discharge: rail_track_rtg lifts IC off the train; rail_yard_tractor hauls
+  to the stack; main_stack_rtg / top_pick performs the ``stack_in``.
+* Load: ``stack_out`` pulls an OC off the stack; rail_yard_tractor hauls
+  it to the rail zone; rail_track_rtg lifts it onto the train.
+
+This module does *not* speak to drayage trucks directly. OCs arrive on the
+stack via :mod:`altrios.lifts.drayage_flow` (truck_rail mode) or
+:mod:`altrios.lifts.vessel_flow` (rail_vessel mode); ICs depart the stack
+via the same routes in reverse. The decoupling through the stack is the
+whole point of the rebuild — train and truck timelines are independent.
+"""
+from __future__ import annotations
+
+import random
+from typing import Any
+
 from altrios.lifts import utilities
 from altrios.lifts.classes import container, loggingLevel
-from altrios.lifts.containers import handle_remaining_oc
-from altrios.lifts.cranes import crane_load_process, crane_unload_process
-from altrios.lifts.truck_gate import truck_arrival
+from altrios.lifts.energy_use import _record_stack_lift_energy
+from altrios.lifts.yard_flow import stack_in, stack_out, yard_tractor_haul
 
 
-def handle_train_departure(env, terminal, train_schedule, train_id, track_id, arrival_time):
-    if env.now < train_schedule["departure_time"]:
-        terminal.log(loggingLevel.BASIC, f"Time {env.now:.3f}: [EARLY] Train {train_id} departs from track {track_id}.")
-    elif env.now == train_schedule["departure_time"]:
-        terminal.log(loggingLevel.BASIC, f"Time {env.now:.3f}: [In Time] Train {train_id} departs from track {track_id}.")
-    else:
-        delay_time = env.now - train_schedule["departure_time"]
-        terminal.log(loggingLevel.BASIC, f"Time {env.now:.3f}: [DELAYED] Train {train_id} delayed {delay_time:.3f}h from track {track_id}.")
+def _unload_one_ic(
+    env, terminal, track_id: int, train_id: int, ic,
+    done_counter: list, done_event, ic_count: int,
+):
+    """Lift one IC off the train and route it to the stack.
 
-    oc_start = train_schedule.get("_oc_id_start", 1)
-    for oc_id in range(oc_start, oc_start + train_schedule['oc_number']):
-        utilities.record_container_event(
-            terminal,
-            f"OC-{oc_id}-Train-{train_id}",
-            'train_depart',
-            env.now,
+    The rail-track RTG is held only for the lift duration; the chassis
+    haul + stack-in continue without holding the RTG so other unload
+    tasks can grab it for the next IC.
+    """
+    state = terminal.state
+    rtg_pool = state.rail_track_rtgs_by_track[track_id]
+    rtg_obj = yield rtg_pool.get()
+    try:
+        lift_time = (
+            terminal.CONTAINERS_PER_CRANE_MOVE_MEAN
+            + random.uniform(0, terminal.CRANE_MOVE_DEV_TIME)
         )
-    terminal.state.time_per_train[train_id] = env.now - arrival_time
+        yield env.timeout(lift_time)
+        utilities.record_container_event(
+            terminal, ic, "rail_track_rtg_unload", env.now,
+        )
+        _record_stack_lift_energy(
+            terminal, rtg_obj, "rail_track_rtg", status="loaded",
+            train_id=train_id, container_id=ic.to_string(),
+            event_type="rail_track_rtg_unload", env_now=env.now,
+            zone="track",
+        )
+    finally:
+        yield rtg_pool.put(rtg_obj)
 
-    if not terminal.state.train_departed_events[train_id].triggered:
-        terminal.state.train_departed_events[train_id].succeed()
+    # Now move the chassis to the stack and lift the container onto the
+    # stack. These run sequentially in this task but do not block other
+    # rail_track_rtg workers from processing more ICs.
+    yield env.process(yard_tractor_haul(
+        env, terminal, state.rail_yard_tractors,
+        ic, from_zone="rail", to_zone="stack",
+    ))
+    yield env.process(stack_in(env, terminal, ic, source_chassis=None))
 
-
-def train_process_per_track(env, terminal, track_id, train_schedule, train_id, arrival_time):
-    # Crane unload & hostler process ICs
-    env.process(crane_unload_process(env, terminal, train_schedule, track_id))
-
-    # check before crane loading
-    # condition 1: all ic picked
-    yield terminal.state.train_ic_picked_events[train_id]
-    terminal.log(loggingLevel.DEBUG, f"[Event]: All {train_schedule['full_cars']} ICs picked for train {train_id}.")
-    # condition 2 & 3: no OCs on parking slots - OCs remaining -> process rest OCs; all OC prepared
-    oc_in_parking = terminal.state.parking_oc_count_by_train.get(train_id, 0)
-    terminal.log(loggingLevel.DEBUG, f"check # OCs on parking slots: {oc_in_parking}")
-    if oc_in_parking >= 0:
-	    env.process(handle_remaining_oc(env, terminal, train_schedule))
-	    
-    yield terminal.state.train_oc_prepared_events[train_id]
-    
-    # crane loading
-    # only when 1. all_ic_picked (chassis), 2. all_oc_picked (parking slots) & 3. all_oc_prepared (chassis) satisfied -> crane loading starts
-    if not terminal.state.train_start_load_events[train_id].triggered:
-        terminal.state.train_start_load_events[train_id].succeed()
-
-    env.process(crane_load_process(env, terminal, track_id=track_id, train_schedule=train_schedule))
-    yield terminal.state.train_end_load_events[train_id]
-
-    handle_train_departure(env, terminal, train_schedule, train_id, track_id, arrival_time)
-    yield terminal.state.tracks.put(track_id)
+    done_counter[0] += 1
+    if done_counter[0] == ic_count and not done_event.triggered:
+        done_event.succeed()
 
 
-def process_train_arrival(env, terminal, train_schedule):
-    train_id = train_schedule["train_id"]
-    arrival_time = train_schedule["arrival_time"]
-    terminal.state.all_trucks_arrived_events[train_id] = env.event()
+def _load_one_oc(
+    env, terminal, track_id: int, train_id: int,
+    done_counter: list, done_event, oc_count: int,
+    loaded_ocs: list,
+):
+    """Pull one OC off the stack and load it onto the train.
 
-    # Initialize per-train counters
-    terminal.state.IC_COUNT.setdefault(train_id, 1)
-    terminal.state.OC_COUNT.setdefault(train_id, 1)
-    train_schedule["_oc_id_start"] = terminal.state.OC_COUNT[train_id]
+    The OC's identity (``to_string()``) is preserved as-is — re-tagging
+    ``train_id`` mid-flight would split the OC's container_event rows
+    across two ids (the dropoff side recorded events under the old id).
+    Train attribution is recovered post-sim by joining on the timing of
+    ``rail_track_rtg_load``.
+    """
+    state = terminal.state
+    oc = yield env.process(stack_out(env, terminal, container_obj=None))
 
-    # Trucks bring OCs before the train arrives
-    env.process(truck_arrival(env, terminal, train_schedule))
+    yield env.process(yard_tractor_haul(
+        env, terminal, state.rail_yard_tractors,
+        oc, from_zone="stack", to_zone="rail",
+    ))
 
-    # Wait for trucks, then enforce timetable arrival
-    yield terminal.state.all_trucks_arrived_events[train_id]
-    if env.now <= arrival_time:
+    rtg_pool = state.rail_track_rtgs_by_track[track_id]
+    rtg_obj = yield rtg_pool.get()
+    try:
+        lift_time = (
+            terminal.CONTAINERS_PER_CRANE_MOVE_MEAN
+            + random.uniform(0, terminal.CRANE_MOVE_DEV_TIME)
+        )
+        yield env.timeout(lift_time)
+        utilities.record_container_event(
+            terminal, oc, "rail_track_rtg_load", env.now,
+        )
+        _record_stack_lift_energy(
+            terminal, rtg_obj, "rail_track_rtg", status="loaded",
+            train_id=train_id, container_id=oc.to_string(),
+            event_type="rail_track_rtg_load", env_now=env.now,
+            zone="track",
+        )
+    finally:
+        yield rtg_pool.put(rtg_obj)
+
+    loaded_ocs.append(oc)
+    done_counter[0] += 1
+    if done_counter[0] == oc_count and not done_event.triggered:
+        done_event.succeed()
+
+
+def process_train_arrival(env, terminal, train_schedule: dict[str, Any]):
+    """SimPy generator: one train arrival.
+
+    Steps:
+
+    1. Pre-record ``train_arrival_expected`` for each IC.
+    2. Wait until ``arrival_time``.
+    3. Acquire a track from ``state.tracks``.
+    4. Spawn one ``_unload_one_ic`` task per IC; wait for all to complete.
+    5. Spawn one ``_load_one_oc`` task per OC; wait for all to complete.
+       The OCs are pulled from the main stack; the caller is responsible
+       for ensuring the stack has enough OCs by simulation time
+       (truck_rail mode auto-synthesizes a drayage schedule; rail_vessel
+       expects the vessel side to pre-stage them).
+    6. Hold the track until ``departure_time``; record ``train_depart``.
+    7. Release the track.
+    """
+    state = terminal.state
+    train_id = int(train_schedule["train_id"])
+    arrival_time = float(train_schedule["arrival_time"])
+    departure_time = float(train_schedule["departure_time"])
+    ic_count = int(train_schedule.get("full_cars") or 0)
+    oc_count = int(train_schedule.get("oc_number") or 0)
+
+    for ic_id in range(1, ic_count + 1):
+        ic_label = container(type="Inbound", id=ic_id, train_id=train_id)
+        utilities.record_container_event(
+            terminal, ic_label, "train_arrival_expected", arrival_time,
+        )
+
+    if env.now < arrival_time:
         yield env.timeout(arrival_time - env.now)
-        terminal.log(loggingLevel.BASIC, f"Time {env.now:.3f}: [In Time] Train {train_id}.")
-        delay_time = 0
-    else:
-        delay_time = env.now - arrival_time
-        terminal.log(loggingLevel.BASIC, f"Time {env.now:.3f}: [DELAYED] Train {train_id} delayed {delay_time:.3f}h.")
-    terminal.state.train_delay_time[train_id] = delay_time
-    terminal.state.train_pool_stores.put(train_id)
 
-    # Track assignment
-    track_id = yield terminal.state.tracks.get()
-    if track_id is None:
-        terminal.log(loggingLevel.BASIC, f"Time {env.now:.3f}: Train {train_id} waiting for an available track.")
-        return
+    track_id = yield state.tracks.get()
+    try:
+        terminal.log(
+            loggingLevel.BASIC,
+            f"Time {env.now:.3f}: Train {train_id} on track {track_id} "
+            f"(IC={ic_count}, OC={oc_count}).",
+        )
 
-    assigned_train_id = yield terminal.state.train_pool_stores.get()
-    terminal.log(loggingLevel.DEBUG, f"Time {env.now:.3f}: Train {assigned_train_id} assigned to track {track_id}.")
+        # ---- Unload phase ------------------------------------------------
+        if ic_count > 0:
+            ic_done = env.event()
+            ic_done_counter = [0]
+            for ic_id in range(1, ic_count + 1):
+                ic = container(type="Inbound", id=ic_id, train_id=train_id)
+                utilities.record_container_event(
+                    terminal, ic, "train_arrival_actual", env.now,
+                )
+                env.process(_unload_one_ic(
+                    env, terminal, track_id, train_id, ic,
+                    ic_done_counter, ic_done, ic_count,
+                ))
+            yield ic_done
 
-    # Stage ICs on this train into the per-train IC store
-    ic_start = terminal.state.IC_COUNT[train_id]
-    ic_store = terminal.state.train_ic_store(train_id)
-    for ic_id in range(ic_start, ic_start + train_schedule['full_cars']):
-        ic = container(type='Inbound', id=ic_id, train_id=train_id)
-        ic_store.put(ic)
-        utilities.record_container_event(terminal, ic.to_string(), 'train_arrival_expected', arrival_time)
-        utilities.record_container_event(terminal, ic.to_string(), 'train_arrival_actual', env.now)
-    terminal.state.IC_COUNT[train_id] = ic_start + train_schedule['full_cars']
+        # ---- Load phase --------------------------------------------------
+        loaded_ocs: list = []
+        if oc_count > 0:
+            oc_done = env.event()
+            oc_done_counter = [0]
+            for _ in range(oc_count):
+                env.process(_load_one_oc(
+                    env, terminal, track_id, train_id,
+                    oc_done_counter, oc_done, oc_count, loaded_ocs,
+                ))
+            yield oc_done
 
-    utilities.initialize_train_events(env, terminal, train_id)
-    env.process(train_process_per_track(env, terminal, track_id, train_schedule, train_id, arrival_time))
+        # ---- Hold and depart --------------------------------------------
+        if env.now < departure_time:
+            yield env.timeout(departure_time - env.now)
+        utilities.record_container_event(
+            terminal, f"Train-{train_id}", "train_depart", env.now,
+        )
+        for oc in loaded_ocs:
+            utilities.record_container_event(
+                terminal, oc, "train_depart", env.now,
+            )
+        state.time_per_train[train_id] = env.now - arrival_time
+        state.train_delay_time[train_id] = max(0.0, env.now - departure_time)
+    finally:
+        yield state.tracks.put(track_id)

@@ -77,7 +77,7 @@ t1_main = time.perf_counter()
 print(f"Elapsed time to run `sim_manager.main()`: {t1_main - t0_main:.3g} s")
 
 container_data, vehicle_log_df, terminal_obj = run_terminal_simulation(
-    mode="intermodal_rail",
+    mode="truck_rail",
     train_consist_plan=train_consist_plan,
     terminal="Allouez")
 

@@ -300,6 +300,262 @@ def build_train_timetable(train_consist_plan, terminal_name, as_dicts, track_cou
         return df
 
 
+# ---------------------------------------------------------------------------
+# Phase 1E: vessel and drayage schedule builders.
+#
+# These produce per-arrival event tables consumed by the new ``rail_vessel``,
+# ``vessel_truck``, and ``truck_rail`` (drayage-side) flows. They mirror
+# ``build_train_timetable`` in returning either a Polars DataFrame or a list
+# of dicts (one per arrival).
+#
+# Output column conventions (kept close to build_train_timetable):
+#   build_vessel_schedule  -> vessel_id, vessel_name, arrival_time,
+#                             departure_time, inbound_containers,
+#                             outbound_containers
+#   build_drayage_schedule -> truck_id, arrival_time, action ('dropoff' or
+#                             'pickup'), container_id (nullable str)
+#
+# Drayage rows are independent per-truck visits — no per-train batching.
+# A truck doing 'dropoff' delivers an export container (becomes OC on the
+# rail/vessel side); a truck doing 'pickup' claims an import container
+# (was IC on the rail/vessel side).
+# ---------------------------------------------------------------------------
+
+def build_vessel_schedule(vessel_call_list, terminal_name, as_dicts):
+    """Build the per-vessel-call schedule for a terminal.
+
+    Parameters
+    ----------
+    vessel_call_list : polars.DataFrame
+        Input table with columns:
+          - ``Vessel_ID`` (int)
+          - ``Vessel_Name`` (str)
+          - ``Origin_ID`` (str): terminal where vessel arrives from
+          - ``Destination_ID`` (str): terminal where vessel departs to
+          - ``Arrival_Time_Hr`` (float)
+          - ``Departure_Time_Hr`` (float)
+          - ``Inbound_Containers`` (int): containers landed at this terminal
+          - ``Outbound_Containers`` (int): containers loaded at this terminal
+
+        A vessel call appears in the schedule iff this terminal is either
+        the origin or the destination of the call.
+    terminal_name : str
+        Filter rows where ``Origin_ID == terminal_name`` or
+        ``Destination_ID == terminal_name``.
+    as_dicts : bool
+        If True, return a list of dicts; otherwise return a DataFrame.
+    """
+    required = {
+        "Vessel_ID", "Vessel_Name", "Origin_ID", "Destination_ID",
+        "Arrival_Time_Hr", "Departure_Time_Hr",
+        "Inbound_Containers", "Outbound_Containers",
+    }
+    missing = required.difference(vessel_call_list.columns)
+    if missing:
+        raise ValueError(
+            f"vessel_call_list missing required column(s): {sorted(missing)}"
+        )
+
+    df = (vessel_call_list
+        .filter(
+            (pl.col("Origin_ID") == pl.lit(terminal_name))
+            | (pl.col("Destination_ID") == pl.lit(terminal_name))
+        )
+        .select(
+            pl.col("Vessel_ID").alias("vessel_id"),
+            pl.col("Vessel_Name").alias("vessel_name"),
+            pl.col("Arrival_Time_Hr").alias("arrival_time"),
+            pl.col("Departure_Time_Hr").alias("departure_time"),
+            pl.col("Inbound_Containers").cast(pl.UInt32).alias("inbound_containers"),
+            pl.col("Outbound_Containers").cast(pl.UInt32).alias("outbound_containers"),
+        )
+        .sort("arrival_time", "vessel_id")
+    )
+
+    if df.height == 0:
+        raise ValueError(
+            f"No vessel calls found in vessel_call_list at terminal '{terminal_name}'; "
+            "build_vessel_schedule requires at least one row with Origin_ID or "
+            "Destination_ID matching the terminal."
+        )
+
+    bad = df.filter(pl.col("departure_time") <= pl.col("arrival_time"))
+    if bad.height > 0:
+        raise ValueError(
+            f"vessel_call_list has {bad.height} row(s) with "
+            "departure_time <= arrival_time (vessel must dwell at berth)."
+        )
+
+    if as_dicts:
+        return df.to_dicts()
+    return df
+
+
+def build_drayage_schedule(drayage_schedule, terminal_name, as_dicts):
+    """Build the per-truck drayage schedule for a terminal.
+
+    Parameters
+    ----------
+    drayage_schedule : polars.DataFrame
+        Input table with columns:
+          - ``Terminal_ID`` (str)
+          - ``Arrival_Time_Hr`` (float)
+          - ``Action`` (str): ``'dropoff'`` (truck delivers export container)
+            or ``'pickup'`` (truck claims import container).
+          - ``Truck_ID`` (int, optional): if missing, ids are assigned
+            sequentially in arrival order starting at 1.
+          - ``Container_ID`` (str, optional): nullable. When set, this is
+            the explicit container the truck is targeting (used by tests).
+    terminal_name : str
+        Filter rows where ``Terminal_ID == terminal_name``.
+    as_dicts : bool
+        If True, return a list of dicts; otherwise return a DataFrame.
+
+    See also :func:`build_drayage_schedule_poisson` to synthesize the input
+    table from hourly volume targets.
+    """
+    required = {"Terminal_ID", "Arrival_Time_Hr", "Action"}
+    missing = required.difference(drayage_schedule.columns)
+    if missing:
+        raise ValueError(
+            f"drayage_schedule missing required column(s): {sorted(missing)}"
+        )
+
+    df = (drayage_schedule
+        .filter(pl.col("Terminal_ID") == pl.lit(terminal_name))
+        .with_columns(pl.col("Action").str.to_lowercase().alias("Action"))
+    )
+
+    bad_action = df.filter(~pl.col("Action").is_in(["dropoff", "pickup"]))
+    if bad_action.height > 0:
+        raise ValueError(
+            f"drayage_schedule has {bad_action.height} row(s) with Action "
+            "not in {'dropoff', 'pickup'}."
+        )
+
+    select_cols = [
+        pl.col("Arrival_Time_Hr").alias("arrival_time"),
+        pl.col("Action").alias("action"),
+    ]
+    if "Container_ID" in drayage_schedule.columns:
+        select_cols.append(pl.col("Container_ID").cast(pl.Utf8).alias("container_id"))
+    else:
+        select_cols.append(pl.lit(None, dtype=pl.Utf8).alias("container_id"))
+
+    if "Truck_ID" in drayage_schedule.columns:
+        select_cols.insert(0, pl.col("Truck_ID").cast(pl.Int64).alias("truck_id"))
+        df = df.select(select_cols).sort("arrival_time", "truck_id")
+    else:
+        df = (df
+            .sort("arrival_time")
+            .with_row_index(name="truck_id", offset=1)
+            .select(
+                pl.col("truck_id").cast(pl.Int64),
+                *select_cols,
+            )
+        )
+
+    if df.height == 0:
+        raise ValueError(
+            f"No drayage rows found at terminal '{terminal_name}'; "
+            "build_drayage_schedule requires at least one row with Terminal_ID "
+            "matching the terminal."
+        )
+
+    if as_dicts:
+        return df.to_dicts()
+    return df
+
+
+def build_drayage_schedule_poisson(
+    hourly_volumes,
+    terminal_name,
+    sim_length_hr,
+    seed,
+    pickup_fraction=0.5,
+):
+    """Synthesize a drayage schedule via per-hour Poisson arrival counts.
+
+    Parameters
+    ----------
+    hourly_volumes : polars.DataFrame
+        Columns ``Terminal_ID`` (str), ``Hour`` (int, 0-based), and
+        ``Expected_Trucks`` (float). Rows with ``Terminal_ID != terminal_name``
+        are ignored. Hours not present in the table default to 0.
+    terminal_name : str
+        Filter on ``Terminal_ID``.
+    sim_length_hr : float
+        Total simulation horizon. Arrivals beyond this horizon are dropped.
+    seed : int
+        Seed for the per-call ``numpy.random.default_rng`` to keep results
+        reproducible without touching the global random state.
+    pickup_fraction : float in [0, 1]
+        Probability each generated truck is a 'pickup' (vs 'dropoff').
+
+    Returns
+    -------
+    polars.DataFrame
+        A schedule in the format expected by :func:`build_drayage_schedule`'s
+        input (columns Terminal_ID, Arrival_Time_Hr, Action, Truck_ID).
+    """
+    if not 0.0 <= pickup_fraction <= 1.0:
+        raise ValueError(
+            f"pickup_fraction must be in [0, 1]; got {pickup_fraction}."
+        )
+
+    filtered = hourly_volumes.filter(
+        pl.col("Terminal_ID") == pl.lit(terminal_name)
+    )
+    if filtered.height == 0:
+        raise ValueError(
+            f"No rows for terminal '{terminal_name}' in hourly_volumes."
+        )
+
+    rng = np.random.default_rng(seed)
+
+    arrival_times: list[float] = []
+    actions: list[str] = []
+    for row in filtered.iter_rows(named=True):
+        hour = int(row["Hour"])
+        if hour < 0 or hour >= sim_length_hr:
+            continue
+        rate = float(row["Expected_Trucks"])
+        if rate <= 0:
+            continue
+        n = int(rng.poisson(rate))
+        if n == 0:
+            continue
+        offsets = rng.uniform(0.0, 1.0, size=n)
+        for off in offsets:
+            t = hour + float(off)
+            if t >= sim_length_hr:
+                continue
+            arrival_times.append(t)
+            actions.append(
+                "pickup" if rng.random() < pickup_fraction else "dropoff"
+            )
+
+    if not arrival_times:
+        raise ValueError(
+            f"Poisson generation for terminal '{terminal_name}' produced no "
+            "trucks; check hourly_volumes rates and sim_length_hr."
+        )
+
+    df = (pl.DataFrame({
+            "Arrival_Time_Hr": arrival_times,
+            "Action": actions,
+        })
+        .sort("Arrival_Time_Hr")
+        .with_row_index(name="Truck_ID", offset=1)
+        .with_columns(
+            pl.col("Truck_ID").cast(pl.Int64),
+            pl.lit(terminal_name).alias("Terminal_ID"),
+        )
+        .select("Terminal_ID", "Truck_ID", "Arrival_Time_Hr", "Action")
+    )
+    return df
+
+
 def record_container_event(terminal, container, event_type, timestamp):
     if type(container) is str:
         container_string = container
@@ -316,6 +572,14 @@ def compute_energy_use(terminal, status: str, move: str, vehicle: str, energy_ty
 
     The returned value is in the native unit of the configured
     ``*_consumption`` block: gallons for Diesel/Hybrid, kWh for Electric.
+
+    Per-equipment rates: when ``vehicle`` is a specific equipment name
+    (e.g. ``"main_stack_rtg"``, ``"sts_crane"``, ``"yard_tractor"``) the
+    lookup tries ``<vehicle>_<status>`` first, then falls back to the
+    legacy generic key (``crane_<status>`` for loads, ``hostler_<status>``
+    for trips). Callers that still pass generic vehicle names
+    (``vehicle="crane"``, ``vehicle="hostler"``, ``vehicle="truck"``) hit
+    the legacy key directly.
     """
     cfg = terminal.energy_use_config
 
@@ -324,19 +588,39 @@ def compute_energy_use(terminal, status: str, move: str, vehicle: str, energy_ty
     vehicle = vehicle.lower()
     energy_type = energy_type.capitalize()
 
-    # --- load consumption (unit: per lift)
+    def _lookup(block_name: str, primary_key: str, fallback_key: str) -> float:
+        block = cfg[block_name]
+        entry = block.get(primary_key) or block.get(fallback_key)
+        if entry is None:
+            raise KeyError(
+                f"energy_use.{block_name}: neither '{primary_key}' nor "
+                f"fallback '{fallback_key}' defined."
+            )
+        if energy_type not in entry:
+            raise KeyError(
+                f"energy_use.{block_name}.{primary_key if primary_key in block else fallback_key}: "
+                f"no '{energy_type}' rate."
+            )
+        return float(entry[energy_type])
+
+    # --- load consumption (unit: per lift) ---
     if move == "load":
-        key = "crane_loaded" if status == "loaded" else "crane_idle"
-        unit = cfg["load_consumption"][key][energy_type]
+        primary = f"{vehicle}_{status}"
+        fallback = f"crane_{status}"
+        unit = _lookup("load_consumption", primary, fallback)
         energy_use = unit
 
-    # --- trip consumption (unit: hr × travel_time)
+    # --- trip consumption (unit: hr × travel_time) ---
     elif move == "trip":
-        key = f"{vehicle}_{status}"  # e.g. hostler_loaded / truck_empty
-        unit = cfg["trip_consumption"][key][energy_type]
+        primary = f"{vehicle}_{status}"
+        # legacy fallback: hostler_* for tractor-like vehicles, truck_* for trucks
+        fallback = (
+            f"truck_{status}" if vehicle == "truck" else f"hostler_{status}"
+        )
+        unit = _lookup("trip_consumption", primary, fallback)
         energy_use = unit * travel_time
 
-    # --- side pick consumption (unit: per lift)
+    # --- side pick consumption (unit: per lift) ---
     elif move == "side":
         unit = cfg["side_pick_consumption"]["side"][energy_type]
         energy_use = unit
@@ -362,18 +646,3 @@ def record_energy_use(energy_use_records: list, vehicle_type: str, fuel_type: st
         "record_timestamp": float(env_now),
     })
 
-def initialize_train_events(env, terminal, train_id):
-    # Event dicts are pre-created on TerminalState, so no hasattr/setattr
-    # guards are needed here.
-    state = terminal.state
-    for d in (
-        state.train_ic_unload_events,
-        state.train_oc_prepared_events,
-        state.train_ic_picked_events,
-        state.train_start_load_events,
-        state.train_end_load_events,
-        state.train_departed_events,
-    ):
-        existing = d.get(train_id)
-        if existing is None or existing.triggered:
-            d[train_id] = env.event()

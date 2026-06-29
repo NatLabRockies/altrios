@@ -119,3 +119,74 @@ def _record_side_energy(terminal, hostler_obj, train_id, container_id, env_now):
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase 1F helpers for the new flow modules (yard_flow / vessel_flow /
+# drayage_flow). As of Phase 1H these pass equipment-specific vehicle keys
+# to ``compute_energy_use``, which resolves them against the per-equipment
+# rates in ``energy_use.load_consumption`` / ``energy_use.trip_consumption``
+# (with the legacy ``crane_*`` / ``hostler_*`` keys retained as fallbacks).
+# ---------------------------------------------------------------------------
+
+def _record_stack_lift_energy(
+    terminal, crane_obj, pool_name, status, train_id,
+    container_id, event_type, env_now, zone="stack",
+):
+    """Per-lift energy record for a stack-lift equipment piece.
+
+    ``pool_name`` is the equipment family (``"main_stack_rtg"``,
+    ``"top_pick"``, ``"sts_crane"``, ``"rail_track_rtg"``) and is used
+    both as the ``resource_type`` label on ``vehicle_log`` and as the
+    per-equipment rate key (``<pool_name>_<status>``) in
+    ``energy_use.load_consumption``.
+    """
+    energy_type = _energy_type_for(crane_obj)
+    energy_value = utilities.compute_energy_use(
+        terminal, status=status, move="load", vehicle=pool_name,
+        energy_type=energy_type, travel_time=0.0,
+    )
+    utilities.record_energy_use(
+        energy_use_records,
+        vehicle_type=pool_name,
+        fuel_type=energy_type,
+        resource_id=getattr(crane_obj, "id", ""),
+        track_id=str(getattr(crane_obj, "track_id", "")
+                     or getattr(crane_obj, "berth_id", "")
+                     or ""),
+        train_id=str(train_id),
+        container_id=container_id,
+        event_type=event_type,
+        zone=zone,
+        energy_value=energy_value,
+        travel_time=0.0,
+        env_now=env_now,
+    )
+
+
+def _record_yard_tractor_trip_energy(
+    terminal, tractor_obj, status, train_id,
+    container_id, event_type, travel_time, env_now,
+):
+    """Per-trip energy record for a yard tractor haul. Looks up the
+    per-equipment ``yard_tractor_loaded`` / ``yard_tractor_empty`` rates
+    (with the legacy ``hostler_*`` keys as fallback)."""
+    energy_type = _energy_type_for(tractor_obj)
+    energy_value = utilities.compute_energy_use(
+        terminal, status=status, move="trip", vehicle="yard_tractor",
+        energy_type=energy_type, travel_time=travel_time,
+    )
+    utilities.record_energy_use(
+        energy_use_records,
+        vehicle_type="yard_tractor",
+        fuel_type=energy_type,
+        resource_id=getattr(tractor_obj, "id", ""),
+        track_id=str(getattr(tractor_obj, "pool", "")),
+        train_id=str(train_id),
+        container_id=container_id,
+        event_type=event_type,
+        zone="yard",
+        energy_value=energy_value,
+        travel_time=travel_time,
+        env_now=env_now,
+    )
+
+

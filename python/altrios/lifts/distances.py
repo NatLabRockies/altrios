@@ -169,21 +169,6 @@ def speed_density(avg_density, vehicle_type, N):
     return speed
 
 
-def simulate_truck_travel(truck_id, train_schedule, terminal, config=None, config_path="input/config.yaml", params=None):
-    if params is None:
-        params = calculate_distances(config=config, config_path=config_path)
-    N = params["N"]
-    total_lane_length = params["total_lane_length"]
-    d_t_min, d_t_max = params["d_t_min"], params["d_t_max"]
-
-    d_t_dist = 3.28 * uniform(loc=d_t_min, scale=(d_t_max - d_t_min)).rvs()
-    current_veh_num = train_schedule["truck_number"] - len(terminal.state.truck_store.items)
-    veh_density = current_veh_num / total_lane_length
-    truck_speed = speed_density(veh_density, 'truck', N)
-    truck_travel_time = d_t_dist / (2 * truck_speed * 3600)
-    return truck_travel_time, d_t_dist, truck_speed, veh_density
-
-
 def simulate_hostler_track_travel(hostler_id, current_veh_num, config=None, config_path="input/config.yaml", params=None):
     """
     Multitrack call this function for distance calculations:

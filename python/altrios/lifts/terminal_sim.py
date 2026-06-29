@@ -1,25 +1,26 @@
 """Terminal-mode registry and generic simulation dispatcher.
 
-The LIFTS package supports multiple terminal process-flow families ("modes"):
-rail-to-truck and truck-to-rail (today the only registered mode,
-``intermodal_rail``), and — coming in Phase 1 of the vessel-workflows
-rebuild — vessel<->truck and vessel<->rail flows that share yard equipment
-but differ in trigger semantics and schedule shape.
+The LIFTS package supports three terminal process-flow families ("modes"):
+``truck_rail``, ``rail_vessel``, and ``vessel_truck``. All three move
+containers through the *main container stack* using a shared catalog of
+yard equipment (RTGs, top-picks, yard tractors, chassis), differing only
+in which endpoint(s) (rail track, vessel berth, gate) the containers
+enter and exit through.
 
 A :class:`TerminalMode` bundles the mode-specific pieces:
-    * ``build_schedule(input_plan, terminal_name) -> list[dict]``
-        Mode-specific schedule construction (e.g. train timetable, vessel
-        call list, drayage arrival stream).
+    * ``build_schedule(input_plan, terminal_name, extras) -> list[dict]``
+        Mode-specific schedule construction. Each returned dict is one
+        arrival entry tagged with ``_kind`` so the dispatcher can route
+        it through the right per-arrival generator.
     * ``process_arrival(env, terminal, schedule_entry) -> generator``
-        SimPy process kicked off once per scheduled arrival.
+        SimPy process kicked off once per scheduled arrival. Dispatches
+        internally on ``schedule_entry["_kind"]``.
     * ``resource_specs`` / ``event_specs`` / ``event_types`` /
       ``container_id_pattern`` / ``post_process`` (optional)
-        Phase-3-ready metadata that lets the dispatcher itself stay
-        mode-agnostic. See :class:`TerminalMode` for details.
+        Declarative metadata. See :class:`TerminalMode` for details.
 
 Modes register themselves into ``_MODES`` and are dispatched by name via
-:func:`run_terminal_simulation`. A future declarative input file can select
-a mode by name without changing this module.
+:func:`run_terminal_simulation`.
 """
 from __future__ import annotations
 
@@ -31,11 +32,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import polars as pl
 import simpy
 
-from altrios.lifts import distances, utilities
+from altrios.lifts import distances, specs, utilities
 from altrios.lifts.classes import Terminal, loggingLevel
+from altrios.lifts.drayage_flow import process_drayage_arrival
 from altrios.lifts.energy_use import energy_use_records, CO2_KG_PER_UNIT
 from altrios.lifts.resources_decl import EventSpec, ResourceSpec
 from altrios.lifts.train_flow import process_train_arrival
+from altrios.lifts.vessel_flow import process_vessel_arrival
 
 
 # Type aliases for the optional post-processing hook.
@@ -53,8 +56,8 @@ class TerminalMode:
     """Bundle that defines one terminal process flow family.
 
     Required fields describe how arrivals are scheduled and simulated.
-    Optional fields are Phase-3-ready metadata: declarative resource specs,
-    declared event surface, an id-extraction pattern, and a mode-specific
+    Optional fields are declarative metadata: resource specs, declared
+    event surface, an id-extraction pattern, and a mode-specific
     post-processing hook applied to the dispatcher's generic outputs.
 
     Parameters
@@ -63,23 +66,29 @@ class TerminalMode:
         Unique mode identifier used by :func:`get_mode`.
     process_arrival
         SimPy generator function kicked off once per scheduled arrival.
+        Receives one entry dict from ``build_schedule`` and dispatches
+        internally on ``entry["_kind"]``.
     build_schedule
         Mode-specific schedule builder; returns a list of arrival-dict
-        entries to feed into ``process_arrival``.
+        entries to feed into ``process_arrival``. Signature is
+        ``(input_plan, terminal_name, extras: dict | None) -> List[dict]``;
+        ``extras`` carries auxiliary inputs (vessel call list, drayage
+        schedule, ...) not required by every mode.
     description
         Human-readable description for diagnostics.
     resource_specs
-        ``ResourceSpec`` list this mode requires. The dispatcher unions
-        these across active modes (dedup by name) and builds primitives
-        onto ``TerminalState``. Empty in legacy modes that still use
-        ``TerminalState.__init__``'s built-in primitives.
+        ``ResourceSpec`` list this mode requires. The dispatcher passes
+        these to ``TerminalState`` so only the requested pools are
+        instantiated. Empty falls back to ``TerminalState``'s default
+        (union of all three modes' specs).
     event_specs
-        ``EventSpec`` list advertising the per-arrival events this mode
-        emits. Diagnostic in Phase 1.
+        ``EventSpec`` list advertising the per-arrival SimPy events this
+        mode emits. Diagnostic only.
     event_types
-        Container-event type names this mode emits. The dispatcher backfills
-        any of these that never fired with all-null columns, so downstream
-        consumers see a stable schema regardless of run size.
+        Container-event type names this mode emits. The dispatcher
+        backfills any of these that never fired with all-null columns,
+        so downstream consumers see a stable schema regardless of run
+        size.
     container_id_pattern
         Optional precompiled regex used by ``post_process`` to extract
         arrival ids from container ids.
@@ -91,7 +100,7 @@ class TerminalMode:
     """
     name: str
     process_arrival: Callable[..., Any]
-    build_schedule: Callable[[Any, str], List[dict]]
+    build_schedule: Callable[..., List[dict]]
     description: str = ""
     resource_specs: Tuple[ResourceSpec, ...] = field(default_factory=tuple)
     event_specs: Tuple[EventSpec, ...] = field(default_factory=tuple)
@@ -133,9 +142,11 @@ def list_modes() -> List[str]:
 
 def run_terminal_simulation(
         mode: str,
-        train_consist_plan: pl.DataFrame,
+        train_consist_plan: Optional[pl.DataFrame],
         terminal: str,
-        log_level: loggingLevel = loggingLevel.BASIC) -> tuple[pl.DataFrame, pl.DataFrame, Terminal]:
+        log_level: loggingLevel = loggingLevel.BASIC,
+        extra_inputs: Optional[Dict[str, Any]] = None,
+) -> tuple[pl.DataFrame, pl.DataFrame, Terminal]:
     """Run a terminal simulation using the named mode.
 
     Parameters
@@ -143,11 +154,16 @@ def run_terminal_simulation(
     mode
         Name of a registered `TerminalMode` (see `list_modes()`).
     train_consist_plan
-        Mode-specific input plan. For `intermodal_rail` this is the train
-        consist plan DataFrame. Future modes may interpret this argument
-        differently or rename it.
+        Primary mode-specific input plan. For ``truck_rail`` and
+        ``rail_vessel`` this is the train consist plan DataFrame; for
+        ``vessel_truck`` it may be ``None`` (the mode reads its inputs
+        from ``extra_inputs`` or default resource paths).
     terminal
         Terminal name (selects entries from the input plan).
+    extra_inputs
+        Optional dict of auxiliary inputs. Recognized keys depend on the
+        mode: ``"vessel_schedule"`` (DataFrame or path), ``"drayage_schedule"``
+        (DataFrame or path). Unknown keys are ignored.
 
     Returns
     -------
@@ -155,7 +171,7 @@ def run_terminal_simulation(
         One row per container with arrival/handling/departure timestamps.
     vehicle_log
         One row per resource event (crane/hostler/truck), including an
-        `energy_consumption(gal)` column for that event.
+        `energy_consumption(gal_or_kWh)` column for that event.
     terminal_obj
         The fully-populated `Terminal` (config + layout + resource counts +
         post-run state) used for the simulation. Callers can read its
@@ -171,36 +187,37 @@ def run_terminal_simulation(
 
     random.seed(42)
 
-    train_timetable = mode_obj.build_schedule(train_consist_plan, terminal)
-    truck_number = max([entry['truck_number'] for entry in train_timetable])
-    chassis_count = max([entry['empty_cars'] + entry['full_cars'] for entry in train_timetable])
+    schedule = mode_obj.build_schedule(
+        train_consist_plan, terminal, extra_inputs or {},
+    )
     env = simpy.Environment()
 
-    terminal_obj = Terminal(env,
+    # The mode may declare its own resource_specs. Empty tuple -> use the
+    # default union of all three Phase 1 modes' specs.
+    resource_specs = list(mode_obj.resource_specs) if mode_obj.resource_specs else None
+
+    terminal_obj = Terminal(
+        env,
         config=terminal_config,
         layout=terminal_layout,
-        truck_capacity=truck_number,
-        chassis_count=chassis_count,
-        log_level=log_level)
+        log_level=log_level,
+        resource_specs=resource_specs,
+    )
 
     terminal_obj.log(loggingLevel.BASIC, f"[INFO] layout: {terminal_layout}")
-    terminal_obj.log(loggingLevel.DEBUG, "\nTrain timetable:")
-    for schedule in train_timetable:
-        terminal_obj.log(loggingLevel.DEBUG, str(schedule))
-        env.process(mode_obj.process_arrival(env, terminal_obj, schedule))
-
-    num_tracks = terminal_obj.track_number
-    num_cranes = sum(terminal_obj.cranes_on_track.values())
-    num_hostlers = terminal_obj.hostler_number
+    terminal_obj.log(loggingLevel.DEBUG, f"\n{mode_obj.name} schedule:")
+    for entry in schedule:
+        terminal_obj.log(loggingLevel.DEBUG, str(entry))
+        env.process(mode_obj.process_arrival(env, terminal_obj, entry))
 
     terminal_obj.log(loggingLevel.BASIC, "*" * 50)
     terminal_obj.log(loggingLevel.BASIC,
-        f"Mode: {mode_obj.name}; Tracks: {num_tracks}; Cranes: {num_cranes}; Hostlers: {num_hostlers}")
+        f"Mode: {mode_obj.name}; Schedule entries: {len(schedule)}")
     terminal_obj.log(loggingLevel.BASIC, "*" * 50)
 
-    # When a train_consist_plan is supplied, simulate the entire plan regardless
+    # When an input plan is supplied, simulate the entire plan regardless
     # of the config's simulation length. Otherwise honor the configured horizon.
-    if train_consist_plan is not None:
+    if train_consist_plan is not None or schedule:
         env.run()
     else:
         env.run(until=terminal_config["simulation"]["length"])
@@ -224,8 +241,8 @@ def _build_generic_outputs(
 
     The dispatcher uses ``mode_obj.event_types`` to backfill any declared
     event columns that never fired during this run. Mode-specific derived
-    columns (e.g. ``container_processing_time`` for ``intermodal_rail``)
-    are added by the mode's ``post_process`` callable, not here.
+    columns (e.g. ``container_processing_time`` for ``truck_rail``) are
+    added by the mode's ``post_process`` callable, not here.
     """
     # container_events is a flat list of (container_id, event_type, timestamp)
     # tuples; pivot it once to wide form here rather than building a
@@ -298,87 +315,344 @@ def _build_generic_outputs(
 # Built-in modes
 # ---------------------------------------------------------------------------
 
-# Container-event columns the intermodal_rail flow emits. Order is the original
+# ---------------------------------------------------------------------------
+# Built-in modes
+# ---------------------------------------------------------------------------
+
+# Container-event columns the rail/yard/drayage flows emit. Order is the
 # logical order of the journey (used to backfill any column that never fired).
-_INTERMODAL_RAIL_EVENT_TYPES: Tuple[str, ...] = (
+_TRUCK_RAIL_EVENT_TYPES: Tuple[str, ...] = (
     "train_arrival_expected", "train_arrival_actual",
-    "crane_unload", "hostler_pickup", "hostler_dropoff",
-    "truck_arrival", "truck_dropoff", "truck_pickup", "truck_exit",
-    "crane_load", "train_depart",
+    "rail_track_rtg_unload",
+    "yard_tractor_rail_to_stack",
+    "main_stack_rtg_stack_in", "top_pick_stack_in", "stack_in",
+    "drayage_arrival", "drayage_gate_in",
+    "main_stack_rtg_stack_out", "top_pick_stack_out", "stack_out",
+    "yard_tractor_stack_to_rail",
+    "drayage_gate_out",
+    "rail_track_rtg_load",
+    "train_depart",
 )
 
-_INTERMODAL_RAIL_TRAIN_ID_PATTERN = re.compile(r"Train-(\d+)")
+_VESSEL_EVENT_TYPES: Tuple[str, ...] = (
+    "vessel_arrival_expected", "vessel_arrival_actual",
+    "sts_unload",
+    "main_stack_rtg_stack_in", "top_pick_stack_in", "stack_in",
+    "main_stack_rtg_stack_out", "top_pick_stack_out", "stack_out",
+    "sts_load",
+    "vessel_depart",
+)
+
+_RAIL_VESSEL_EVENT_TYPES: Tuple[str, ...] = tuple(
+    dict.fromkeys((*_TRUCK_RAIL_EVENT_TYPES, *_VESSEL_EVENT_TYPES))
+)
+
+_VESSEL_TRUCK_EVENT_TYPES: Tuple[str, ...] = tuple(
+    dict.fromkeys((
+        *_VESSEL_EVENT_TYPES,
+        "drayage_arrival", "drayage_gate_in",
+        "stack_in", "stack_out",
+        "drayage_gate_out",
+    ))
+)
+
+_TRAIN_ID_PATTERN = re.compile(r"Train-(\d+)")
+_VESSEL_ID_PATTERN = re.compile(r"Vessel-(\d+)")
 
 
-def _intermodal_rail_post_process(
-    container_data: pl.DataFrame, vehicle_log: pl.DataFrame
-) -> Tuple[pl.DataFrame, pl.DataFrame]:
-    """Add intermodal_rail-specific derived columns to ``container_data``.
+# ---------------------------------------------------------------------------
+# Helpers for schedule construction
+# ---------------------------------------------------------------------------
 
-    Computes per-container processing time and joins each container row back
-    to its train's mean ``train_arrival_*`` so OC rows carry the train arrival
-    info that only IC rows record directly.
+def _resolve_table(value: Any, default_path) -> pl.DataFrame:
+    """Coerce ``value`` (DataFrame, path, or None) into a polars DataFrame.
+
+    ``None`` falls back to ``default_path`` so demos can omit the auxiliary
+    schedule and get the canonical sample data."""
+    if value is None:
+        return pl.read_csv(default_path)
+    if isinstance(value, pl.DataFrame):
+        return value
+    # Assume it's a path-like.
+    return pl.read_csv(value)
+
+
+def _synthesize_drayage_from_trains(
+    train_entries: List[dict],
+    pre_arrival_window_hr: float = 0.5,
+    post_arrival_window_hr: float = 1.0,
+) -> List[dict]:
+    """Generate one dropoff per OC (just before each train arrival) and one
+    pickup per IC (just after each train arrival). Used by ``truck_rail``
+    when the caller does not supply an explicit drayage schedule, so the
+    rail side has containers to load/unload at the stack.
+
+    ``truck_id`` ranges are partitioned per train so collisions are
+    impossible: dropoffs use ``train_id * 100000 + i`` and pickups use
+    ``train_id * 100000 + 50000 + i``.
     """
-    container_data = container_data.lazy().with_columns(
-        pl.when(
-            pl.col("truck_exit").is_not_null()
-            & pl.col("train_arrival_expected").is_not_null()
+    out: List[dict] = []
+    for entry in train_entries:
+        train_id = int(entry["train_id"])
+        arrival = float(entry["arrival_time"])
+        oc_n = int(entry.get("oc_number") or 0)
+        ic_n = int(entry.get("full_cars") or 0)
+        for i in range(1, oc_n + 1):
+            out.append({
+                "_kind": "drayage",
+                "truck_id": train_id * 100000 + i,
+                "arrival_time": max(0.0, arrival - pre_arrival_window_hr),
+                "action": "dropoff",
+                "container_id": None,
+                "train_id": train_id,
+            })
+        for i in range(1, ic_n + 1):
+            out.append({
+                "_kind": "drayage",
+                "truck_id": train_id * 100000 + 50000 + i,
+                "arrival_time": arrival + post_arrival_window_hr,
+                "action": "pickup",
+                "container_id": None,
+                "train_id": train_id,
+            })
+    return out
+
+
+# ---------------------------------------------------------------------------
+# truck_rail
+# ---------------------------------------------------------------------------
+
+def _build_truck_rail_schedule(
+    train_consist_plan: pl.DataFrame, terminal_name: str,
+    extras: Dict[str, Any],
+) -> List[dict]:
+    train_entries = utilities.build_train_timetable(
+        train_consist_plan, terminal_name, as_dicts=True,
+    )
+    for entry in train_entries:
+        entry["_kind"] = "train"
+
+    drayage_input = extras.get("drayage_schedule")
+    if drayage_input is None:
+        drayage_entries = _synthesize_drayage_from_trains(train_entries)
+    else:
+        drayage_df = _resolve_table(
+            drayage_input,
+            utilities.resources_root() / "drayage_schedule.csv",
         )
-        .then(pl.col("truck_exit") - pl.col("train_arrival_expected"))
-        .when(pl.col("train_depart").is_not_null())
-        .then(pl.col("crane_load") - pl.col("truck_arrival"))
-        .otherwise(None)
-        .alias("container_processing_time"),
-        pl.col("container_id")
-        .str.extract(r"Train-(\d+)")
-        .cast(pl.Int64)
-        .alias("train_id"),
+        drayage_entries = utilities.build_drayage_schedule(
+            drayage_df, terminal_name, as_dicts=True,
+        )
+        for e in drayage_entries:
+            e["_kind"] = "drayage"
+
+    combined = train_entries + drayage_entries
+    combined.sort(key=lambda e: float(e.get("arrival_time") or 0.0))
+    return combined
+
+
+def _truck_rail_process_arrival(env, terminal, entry: dict):
+    kind = entry.get("_kind", "train")
+    if kind == "train":
+        yield from process_train_arrival(env, terminal, entry)
+    elif kind == "drayage":
+        yield from process_drayage_arrival(env, terminal, entry)
+    else:
+        raise ValueError(f"truck_rail: unknown _kind {kind!r}")
+
+
+def _truck_rail_post_process(
+    container_data: pl.DataFrame, vehicle_log: pl.DataFrame,
+) -> Tuple[pl.DataFrame, pl.DataFrame]:
+    """Add per-container ``container_processing_time`` and join OC rows to
+    their train's actual arrival time."""
+    if container_data.height == 0:
+        return container_data, vehicle_log
+
+    has_truck_exit = "drayage_gate_out" in container_data.columns
+    has_train_arrival_exp = "train_arrival_expected" in container_data.columns
+    has_train_depart = "train_depart" in container_data.columns
+    has_drayage_arrival = "drayage_arrival" in container_data.columns
+    has_rtg_load = "rail_track_rtg_load" in container_data.columns
+
+    if has_truck_exit and has_train_arrival_exp:
+        ic_proc = (
+            pl.when(
+                pl.col("drayage_gate_out").is_not_null()
+                & pl.col("train_arrival_expected").is_not_null()
+            )
+            .then(pl.col("drayage_gate_out") - pl.col("train_arrival_expected"))
+        )
+    else:
+        ic_proc = pl.lit(None)
+
+    if has_train_depart and has_drayage_arrival and has_rtg_load:
+        oc_proc = (
+            pl.when(pl.col("train_depart").is_not_null())
+            .then(pl.col("rail_track_rtg_load") - pl.col("drayage_arrival"))
+        )
+    else:
+        oc_proc = pl.lit(None)
+
+    container_data = container_data.with_columns(
+        ic_proc.otherwise(oc_proc).alias("container_processing_time"),
+        pl.col("container_id").str.extract(r"Train-(\d+)").cast(pl.Int64).alias("train_id"),
         pl.col("container_id").str.starts_with("IC").alias("is_ic"),
     )
 
-    # OC train actual arrival time (averaged across IC rows of that train).
-    train_arrival_df = (
-        container_data
-        .filter(pl.col("is_ic"), pl.col("train_arrival_actual").is_not_null())
-        .group_by("train_id")
-        .agg(pl.col("train_arrival_actual").mean())
-    )
-    # OC train expected arrival time
-    train_arrival_expected_df = (
-        container_data
-        .filter(pl.col("is_ic"), pl.col("train_arrival_expected").is_not_null())
-        .group_by("train_id")
-        .agg(pl.col("train_arrival_expected").mean())
-    )
-    container_data = (
-        container_data
-        .join(train_arrival_df, on="train_id", how="left")
-        .join(train_arrival_expected_df, on="train_id", how="left")
-        .rename({
-            "train_arrival_actual_right": "train_arrival_actual_oc",
-            "train_arrival_expected_right": "train_arrival_expected_oc",
-        })
-        .drop("is_ic", "train_id")
-    ).collect()
+    if has_train_arrival_exp:
+        train_actual = (
+            container_data
+            .filter(pl.col("is_ic"))
+            .filter(pl.col("train_arrival_actual").is_not_null())
+            if "train_arrival_actual" in container_data.columns
+            else container_data.head(0)
+        )
+        if train_actual.height > 0:
+            train_actual = train_actual.group_by("train_id").agg(
+                pl.col("train_arrival_actual").mean().alias("train_arrival_actual_oc")
+            )
+            container_data = container_data.join(
+                train_actual, on="train_id", how="left",
+            )
+
+    container_data = container_data.drop("is_ic", "train_id")
     return container_data, vehicle_log
 
 
-def _build_intermodal_rail_schedule(train_consist_plan: pl.DataFrame, terminal: str) -> List[dict]:
-    return utilities.build_train_timetable(train_consist_plan, terminal, as_dicts=True)
+register_mode(TerminalMode(
+    name="truck_rail",
+    process_arrival=_truck_rail_process_arrival,
+    build_schedule=_build_truck_rail_schedule,
+    description=(
+        "Truck<->rail terminal: trains arrive on tracks; drayage trucks "
+        "deliver export OCs and pick up import ICs at the gate. All "
+        "containers route through the main container stack via the rail "
+        "yard tractor pool (rail<->stack) and the stack RTG/top-pick crane "
+        "fleet."
+    ),
+    resource_specs=specs.TRUCK_RAIL_SPECS,
+    event_types=_TRUCK_RAIL_EVENT_TYPES,
+    container_id_pattern=_TRAIN_ID_PATTERN,
+    post_process=_truck_rail_post_process,
+))
+
+
+# ---------------------------------------------------------------------------
+# rail_vessel
+# ---------------------------------------------------------------------------
+
+def _build_rail_vessel_schedule(
+    train_consist_plan: Optional[pl.DataFrame], terminal_name: str,
+    extras: Dict[str, Any],
+) -> List[dict]:
+    """Trains + vessel calls. Vessel calls default to the bundled sample
+    ``vessel_call_list.csv`` if ``extras["vessel_schedule"]`` is absent."""
+    train_entries: List[dict] = []
+    if train_consist_plan is not None:
+        train_entries = utilities.build_train_timetable(
+            train_consist_plan, terminal_name, as_dicts=True,
+        )
+        for entry in train_entries:
+            entry["_kind"] = "train"
+
+    vessel_df = _resolve_table(
+        extras.get("vessel_schedule"),
+        utilities.resources_root() / "vessel_call_list.csv",
+    )
+    vessel_entries = utilities.build_vessel_schedule(
+        vessel_df, terminal_name, as_dicts=True,
+    )
+    for e in vessel_entries:
+        e["_kind"] = "vessel"
+
+    combined = train_entries + vessel_entries
+    combined.sort(key=lambda e: float(e.get("arrival_time") or 0.0))
+    return combined
+
+
+def _rail_vessel_process_arrival(env, terminal, entry: dict):
+    kind = entry.get("_kind")
+    if kind == "train":
+        yield from process_train_arrival(env, terminal, entry)
+    elif kind == "vessel":
+        yield from process_vessel_arrival(env, terminal, entry)
+    else:
+        raise ValueError(f"rail_vessel: unknown _kind {kind!r}")
 
 
 register_mode(TerminalMode(
-    name="intermodal_rail",
-    process_arrival=process_train_arrival,
-    build_schedule=_build_intermodal_rail_schedule,
+    name="rail_vessel",
+    process_arrival=_rail_vessel_process_arrival,
+    build_schedule=_build_rail_vessel_schedule,
     description=(
-        "Intermodal rail terminal: trains arrive on tracks; ICs (rail-to-truck) "
-        "and OCs (truck-to-rail) flow through shared chassis, hostlers, parking "
-        "slots, and gantry cranes."
+        "Rail<->vessel terminal: trains and vessels both deliver/receive "
+        "containers; the stack mediates the exchange. No drayage gate."
     ),
-    event_types=_INTERMODAL_RAIL_EVENT_TYPES,
-    container_id_pattern=_INTERMODAL_RAIL_TRAIN_ID_PATTERN,
-    post_process=_intermodal_rail_post_process,
+    resource_specs=specs.RAIL_VESSEL_SPECS,
+    event_types=_RAIL_VESSEL_EVENT_TYPES,
+    container_id_pattern=_TRAIN_ID_PATTERN,
+))
+
+
+# ---------------------------------------------------------------------------
+# vessel_truck
+# ---------------------------------------------------------------------------
+
+def _build_vessel_truck_schedule(
+    train_consist_plan: Optional[pl.DataFrame], terminal_name: str,
+    extras: Dict[str, Any],
+) -> List[dict]:
+    """Vessel calls + drayage trucks. ``train_consist_plan`` is unused
+    (pass ``None``); vessel and drayage schedules come from ``extras`` or
+    the bundled sample CSVs."""
+    vessel_df = _resolve_table(
+        extras.get("vessel_schedule"),
+        utilities.resources_root() / "vessel_call_list.csv",
+    )
+    vessel_entries = utilities.build_vessel_schedule(
+        vessel_df, terminal_name, as_dicts=True,
+    )
+    for e in vessel_entries:
+        e["_kind"] = "vessel"
+
+    drayage_df = _resolve_table(
+        extras.get("drayage_schedule"),
+        utilities.resources_root() / "drayage_schedule.csv",
+    )
+    drayage_entries = utilities.build_drayage_schedule(
+        drayage_df, terminal_name, as_dicts=True,
+    )
+    for e in drayage_entries:
+        e["_kind"] = "drayage"
+
+    combined = vessel_entries + drayage_entries
+    combined.sort(key=lambda e: float(e.get("arrival_time") or 0.0))
+    return combined
+
+
+def _vessel_truck_process_arrival(env, terminal, entry: dict):
+    kind = entry.get("_kind")
+    if kind == "vessel":
+        yield from process_vessel_arrival(env, terminal, entry)
+    elif kind == "drayage":
+        yield from process_drayage_arrival(env, terminal, entry)
+    else:
+        raise ValueError(f"vessel_truck: unknown _kind {kind!r}")
+
+
+register_mode(TerminalMode(
+    name="vessel_truck",
+    process_arrival=_vessel_truck_process_arrival,
+    build_schedule=_build_vessel_truck_schedule,
+    description=(
+        "Vessel<->truck terminal: vessels deliver/receive containers; "
+        "drayage trucks deliver/receive at the gate. All containers route "
+        "through the main container stack."
+    ),
+    resource_specs=specs.VESSEL_TRUCK_SPECS,
+    event_types=_VESSEL_TRUCK_EVENT_TYPES,
+    container_id_pattern=_VESSEL_ID_PATTERN,
 ))
 
 
@@ -387,7 +661,7 @@ if __name__ == "__main__":
         .with_columns(pl.lit("Intermodal").alias("Train_Type"))
     )
     container_data, vehicle_log_df, terminal_obj = run_terminal_simulation(
-        mode="intermodal_rail",
+        mode="truck_rail",
         train_consist_plan=consist_plan,
         terminal="Allouez",
     )

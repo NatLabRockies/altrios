@@ -6,14 +6,10 @@ modes reference the same spec object (by identity, not just by name), the
 dispatcher's :func:`merge_specs` deduplicates them and the resulting
 SimPy primitive is shared across both modes — see ``resources_decl.py``.
 
-Capacity callables read from the ``config`` mapping. Phase 1H formalizes
-the ``vessel:`` and ``yard_stack:`` config sections; the ``.get(...)``
-fallbacks below are placeholders so this module imports cleanly before
-that work lands.
-
-Phase 1D delivers this catalog as data only. The actual instantiation
-onto :class:`TerminalState` happens in Phase 1G when the three new modes
-are registered and the legacy ``intermodal_rail`` mode is retired.
+Capacity callables read from the ``config`` mapping. The ``vessel:`` and
+``yard_stack:`` sections are canonical (see ``resources/config.yaml``);
+the ``.get(...)`` defaults below remain as a defensive fallback so this
+module can still import against a stripped-down config (e.g. in tests).
 """
 from __future__ import annotations
 

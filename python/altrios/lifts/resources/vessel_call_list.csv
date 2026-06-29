@@ -1,0 +1,5 @@
+Vessel_ID,Vessel_Name,Origin_ID,Destination_ID,Arrival_Time_Hr,Departure_Time_Hr,Inbound_Containers,Outbound_Containers
+1,Northland Spirit,Allouez,Duluth,24.0,60.0,140,110
+2,Boreal Crest,Two_Harbors,Allouez,80.0,124.0,180,90
+3,Iron Range Trader,Allouez,Thunder_Bay,156.0,196.0,120,150
+4,Lake Superior Mariner,Silver_Bay,Allouez,224.0,272.0,200,80

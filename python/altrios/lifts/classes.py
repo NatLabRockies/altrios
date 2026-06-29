@@ -2,7 +2,6 @@
 equipment dataclasses (container/truck/rtg/sts_crane/top_pick/yard_tractor/
 chassis/vessel) plus the loggingLevel enum.
 """
-import simpy
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -123,12 +122,19 @@ class vessel:
 class Terminal:
     """Static configuration of a terminal: layout, design parameters, operating
     constants, and pre-computed counts. Everything that mutates during the
-    simulation (SimPy stores/resources, per-train events, counters, records)
-    lives on the ``state`` member (a :class:`TerminalState`).
+    simulation (SimPy stores/resources, records) lives on the ``state``
+    member (a :class:`TerminalState`).
+
+    SimPy primitives are constructed declaratively from the active mode's
+    :class:`~altrios.lifts.resources_decl.ResourceSpec` catalog (see
+    :mod:`altrios.lifts.specs`). Callers pass ``resource_specs`` to select
+    which pools to build; ``None`` (the default) builds the union of all
+    three Phase 1 modes' specs so every flow module can run.
     """
 
-    def __init__(self, env, config, layout, truck_capacity, chassis_count,
-                 log_level: "loggingLevel" = None):
+    def __init__(self, env, config, layout,
+                 log_level: "loggingLevel" = None,
+                 resource_specs=None):
         self.config = config
 
         # Run-scoped log threshold. Stored on Terminal for inspection and to
@@ -143,12 +149,9 @@ class Terminal:
         gate_cfg = config["gates"]
         energy_use_cfg = config["energy_use"]
 
-        # Only fields that are read from other modules, or needed below to
-        # size SimPy resources, are pulled out as flat attributes. Everything
-        # else stays accessible via ``self.config``.
+        # Only fields that are read from other modules are pulled out as
+        # flat attributes. Pool capacities now live on the ResourceSpecs.
         self.track_number = yard_cfg["track_number"]
-        self.hostler_number = term_cfg["hostler_number"]
-        self.hostler_diesel_percentage = term_cfg["hostler_diesel_percentage"]
         self.in_gate_numbers = gate_cfg["in_gate_numbers"]
         self.out_gate_numbers = gate_cfg["out_gate_numbers"]
 
@@ -162,8 +165,8 @@ class Terminal:
         # Cranes per track. The YAML's ``cranes_per_track`` may be either a
         # scalar (broadcast to every track) or a list of length
         # ``track_number`` (one entry per track, 1-indexed in the resulting
-        # map). The SimPy stores holding the crane objects themselves live on
-        # ``state.cranes_by_track``.
+        # map). Used for diagnostic logging; the actual rail-track RTG
+        # primitives are built from ``RAIL_TRACK_RTGS_BY_TRACK`` spec.
         cpt_cfg = term_cfg["cranes_per_track"]
         if isinstance(cpt_cfg, (list, tuple)):
             if len(cpt_cfg) != self.track_number:
@@ -181,10 +184,6 @@ class Terminal:
         # energy-use config (per-event diesel/electric consumption rates)
         self.energy_use_config = energy_use_cfg
 
-        # sizing inputs (informational; live stores sized from these on state)
-        self.truck_capacity = truck_capacity
-        self.chassis_count = chassis_count
-
         # fixed processing-time parameters
         self.CONTAINERS_PER_CRANE_MOVE_MEAN = 2 / 60  # hr
         self.CRANE_MOVE_DEV_TIME = 1 / 3600  # hr
@@ -195,8 +194,9 @@ class Terminal:
         self.TRUCK_INGATE_TIME_DEV = 2 / 60
         self.TRUCK_OUTGATE_TIME_DEV = 2 / 60
 
-        # Mutable simulation state lives here.
-        self.state = TerminalState(env, self)
+        # Mutable simulation state. The TerminalState constructor builds
+        # SimPy primitives from the supplied (or default) resource specs.
+        self.state = TerminalState(env, self, resource_specs=resource_specs)
 
     def log(self, level: "loggingLevel", msg: str) -> None:
         """Print msg iff its severity level is <= self.log_level."""
@@ -206,137 +206,54 @@ class Terminal:
 class TerminalState:
     """Mutable per-run simulation state for a :class:`Terminal`.
 
-    Holds the SimPy ``Store``/``Resource`` instances whose contents evolve as
-    the simulation runs, the per-train SimPy events, and the dictionaries that
-    accumulate container events, counters, and timing records.
+    SimPy ``Store`` / ``Resource`` / ``Container`` primitives are
+    instantiated from a list of
+    :class:`~altrios.lifts.resources_decl.ResourceSpec`. Each spec's
+    ``name`` becomes an attribute on this object (e.g. ``state.tracks``,
+    ``state.main_stack_rtgs``). When a spec is partitioned (e.g. one Store
+    per track id), the attribute is a ``dict`` keyed by the partition.
+
+    Cross-cutting records that don't belong to any single pool (container
+    events, per-train timing) live as plain attributes.
     """
 
-    def __init__(self, env, terminal: "Terminal"):
+    def __init__(self, env, terminal: "Terminal", resource_specs=None):
+        # Local imports keep classes.py free of the spec catalog at module
+        # import time (the spec catalog imports from classes.py).
+        from altrios.lifts.resources_decl import build_state_from_specs
+        from altrios.lifts import specs as spec_catalog
+
         self.env = env
         self._terminal = terminal
 
-        # Track availability (one slot per track id)
-        self.tracks = simpy.Store(env, capacity=terminal.track_number)
-        for track_id in range(1, self.tracks.capacity + 1):
-            self.tracks.put(track_id)
+        # Default spec set: union of every Phase 1 mode's specs, deduped
+        # by name. The dispatcher passes a narrower spec list when a mode
+        # only needs a subset; tests can also override.
+        if resource_specs is None:
+            seen: set = set()
+            combined: list = []
+            for bundle in (
+                spec_catalog.TRUCK_RAIL_SPECS,
+                spec_catalog.RAIL_VESSEL_SPECS,
+                spec_catalog.VESSEL_TRUCK_SPECS,
+            ):
+                for spec in bundle:
+                    if spec.name not in seen:
+                        seen.add(spec.name)
+                        combined.append(spec)
+            resource_specs = combined
 
-        # Cranes: one Store per track holding the live crane objects.
-        self.cranes_by_track = {
-            track_id: simpy.Store(env, capacity=num_cranes)
-            for track_id, num_cranes in terminal.cranes_on_track.items()
-        }
-        for track_id, num_cranes in terminal.cranes_on_track.items():
-            for crane_number in range(1, num_cranes + 1):
-                self.cranes_by_track[track_id].put(
-                    rtg(type="Hybrid", id=crane_number,
-                        pool="rail_track", track_id=track_id)
-                )
-
-        # Gates
-        self.in_gates = simpy.Resource(env, terminal.in_gate_numbers)
-        self.out_gates = simpy.Resource(env, terminal.out_gate_numbers)
-
-        # Container/queue stores
-        self.train_pool_stores = simpy.Store(env, capacity=99999)
-        self.train_oc_stores = simpy.Store(env, capacity=99999)
-        self.oc_store = simpy.Store(env, capacity=99999)
-        self.truck_store = simpy.Store(env, capacity=999999999)
-
-        # ----- Containers in flight: keyed dict-of-Store, NOT FilterStore -----
-        # FilterStore.get(lambda ...) is O(N) per call; with thousands of
-        # containers in flight this dominates runtime. Splitting by the keys
-        # the filters were checking (train_id, type) reduces each get/put to
-        # O(1). Counters track per-train totals where consumers pull "any"
-        # item but need a per-train completion check.
-
-        # ICs awaiting crane unload, one Store per train.
-        self.train_ic_stores: dict = {}
-
-        # Chassis: IC side is shared (container_process pulls any Inbound);
-        # OC side is per-train (load_crane_worker pulls by train_id).
-        self.chassis_ic_store = simpy.Store(env)
-        self.chassis_oc_stores: dict = {}
-        self.chassis_ic_count_by_train: dict = {}
-        self.chassis_oc_count_by_train: dict = {}
-
-        # Parking slots: IC side is per-train (truck pulls by train_id);
-        # OC side is shared (hostler pulls any Outbound, regardless of train).
-        self.parking_ic_stores: dict = {}
-        self.parking_oc_store = simpy.Store(env)
-        self.parking_oc_count_by_train: dict = {}
-
-        # Hostlers: split into parked/active pools
-        hostler_total = terminal.hostler_number
-        hostler_diesel = round(hostler_total * terminal.hostler_diesel_percentage)
-        hostler_electric = hostler_total - hostler_diesel
-        self.parked_hostlers = simpy.Store(env, capacity=hostler_total)
-        self.active_hostlers = simpy.Store(env, capacity=hostler_total)
-        # Today's hostlers are rail-side workers; tag them pool='rail'.
-        hostlers_list = (
-            [yard_tractor(id=i, type="Diesel", pool="rail")
-             for i in range(hostler_diesel)] +
-            [yard_tractor(id=i + hostler_diesel, type="Electric", pool="rail")
-             for i in range(hostler_electric)]
+        primitives = build_state_from_specs(
+            env, resource_specs, terminal.config, {},
         )
-        for h in hostlers_list:
-            self.parked_hostlers.put(h)
-
-        # Per-train SimPy events
-        self.all_trucks_arrived_events: dict = {}
-        self.train_ic_unload_events: dict = {}
-        self.train_ic_picked_events: dict = {}
-        self.train_oc_prepared_events: dict = {}
-        self.train_start_load_events: dict = {}
-        self.train_end_load_events: dict = {}
-        self.train_departed_events: dict = {}
-
-        # Per-train counters and totals
-        self.IC_COUNT: dict = {}
-        self.OC_COUNT: dict = {}
-        self.total_ic: dict = {}
-        self.total_oc: dict = {}
+        for name, prim in primitives.items():
+            setattr(self, name, prim)
 
         # Records accumulated as the simulation runs.
-        # container_events is a flat list of (container_id, event_type, timestamp)
-        # tuples; it is pivoted to a wide DataFrame at end-of-sim. Keeping it
-        # flat avoids per-event dict-of-dict insertions in the hot path.
+        # container_events is a flat list of (container_id, event_type,
+        # timestamp) tuples; it is pivoted to a wide DataFrame at
+        # end-of-sim. Keeping it flat avoids per-event dict-of-dict
+        # insertions in the hot path.
         self.container_events: list = []
         self.time_per_train: dict = {}
         self.train_delay_time: dict = {}
-
-    # ----- Per-train Store accessors (lazy creation) ----------------------
-    # Using helpers rather than dict.setdefault(...) avoids constructing a
-    # throwaway simpy.Store every call when the key already exists.
-
-    def train_ic_store(self, train_id):
-        s = self.train_ic_stores.get(train_id)
-        if s is None:
-            s = simpy.Store(self.env)
-            self.train_ic_stores[train_id] = s
-        return s
-
-    def chassis_oc_store(self, train_id):
-        s = self.chassis_oc_stores.get(train_id)
-        if s is None:
-            s = simpy.Store(self.env)
-            self.chassis_oc_stores[train_id] = s
-        return s
-
-    def parking_ic_store(self, train_id):
-        s = self.parking_ic_stores.get(train_id)
-        if s is None:
-            s = simpy.Store(self.env)
-            self.parking_ic_stores[train_id] = s
-        return s
-
-    def in_flight_hostler_count(self) -> int:
-        """Hostlers currently checked out (neither idling in the parked pool
-        nor sitting in the active pool waiting to be re-dispatched). This
-        is the yard-wide congestion measure used by the hostler-speed model
-        in :mod:`altrios.lifts.distances`; it is the hostler analog of
-        ``simulate_truck_travel``'s ``truck_number - truck_store.items``."""
-        return (
-            self._terminal.hostler_number
-            - len(self.parked_hostlers.items)
-            - len(self.active_hostlers.items)
-        )
