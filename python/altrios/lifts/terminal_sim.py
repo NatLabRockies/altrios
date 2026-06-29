@@ -1,28 +1,32 @@
 """Terminal-mode registry and generic simulation dispatcher.
 
-The LIFTS package currently implements two intermodal process flows that share
-a single arrival trigger: rail-to-truck (IC, inbound containers) and the
-reverse, truck-to-rail (OC, outbound containers). Future work will add
-vessel<->truck and vessel<->rail flows that share yard resources (storage
-areas, hostlers, ...) but differ in trigger semantics and schedule shape.
+The LIFTS package supports multiple terminal process-flow families ("modes"):
+rail-to-truck and truck-to-rail (today the only registered mode,
+``intermodal_rail``), and — coming in Phase 1 of the vessel-workflows
+rebuild — vessel<->truck and vessel<->rail flows that share yard equipment
+but differ in trigger semantics and schedule shape.
 
-This module abstracts those concerns into a `TerminalMode`:
-    * `build_schedule(input_plan, terminal_name) -> list[dict]`
-        Mode-specific schedule construction. For intermodal_rail this wraps
-        `utilities.build_train_timetable`. A future vessel mode would read a
-        vessel call list instead.
-    * `process_arrival(env, terminal, schedule_entry) -> generator`
+A :class:`TerminalMode` bundles the mode-specific pieces:
+    * ``build_schedule(input_plan, terminal_name) -> list[dict]``
+        Mode-specific schedule construction (e.g. train timetable, vessel
+        call list, drayage arrival stream).
+    * ``process_arrival(env, terminal, schedule_entry) -> generator``
         SimPy process kicked off once per scheduled arrival.
+    * ``resource_specs`` / ``event_specs`` / ``event_types`` /
+      ``container_id_pattern`` / ``post_process`` (optional)
+        Phase-3-ready metadata that lets the dispatcher itself stay
+        mode-agnostic. See :class:`TerminalMode` for details.
 
-Modes register themselves into `_MODES` and are dispatched by name via
-`run_terminal_simulation(mode=...)`. A future declarative input file can
-select a mode by name without changing this module.
+Modes register themselves into ``_MODES`` and are dispatched by name via
+:func:`run_terminal_simulation`. A future declarative input file can select
+a mode by name without changing this module.
 """
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, List
+import re
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import polars as pl
 import simpy
@@ -30,7 +34,14 @@ import simpy
 from altrios.lifts import distances, utilities
 from altrios.lifts.classes import Terminal, loggingLevel
 from altrios.lifts.energy_use import energy_use_records, CO2_KG_PER_UNIT
+from altrios.lifts.resources_decl import EventSpec, ResourceSpec
 from altrios.lifts.train_flow import process_train_arrival
+
+
+# Type aliases for the optional post-processing hook.
+PostProcessFn = Callable[
+    [pl.DataFrame, pl.DataFrame], Tuple[pl.DataFrame, pl.DataFrame]
+]
 
 
 # ---------------------------------------------------------------------------
@@ -39,11 +50,54 @@ from altrios.lifts.train_flow import process_train_arrival
 
 @dataclass(frozen=True)
 class TerminalMode:
-    """Bundle of callables that define one terminal process flow family."""
+    """Bundle that defines one terminal process flow family.
+
+    Required fields describe how arrivals are scheduled and simulated.
+    Optional fields are Phase-3-ready metadata: declarative resource specs,
+    declared event surface, an id-extraction pattern, and a mode-specific
+    post-processing hook applied to the dispatcher's generic outputs.
+
+    Parameters
+    ----------
+    name
+        Unique mode identifier used by :func:`get_mode`.
+    process_arrival
+        SimPy generator function kicked off once per scheduled arrival.
+    build_schedule
+        Mode-specific schedule builder; returns a list of arrival-dict
+        entries to feed into ``process_arrival``.
+    description
+        Human-readable description for diagnostics.
+    resource_specs
+        ``ResourceSpec`` list this mode requires. The dispatcher unions
+        these across active modes (dedup by name) and builds primitives
+        onto ``TerminalState``. Empty in legacy modes that still use
+        ``TerminalState.__init__``'s built-in primitives.
+    event_specs
+        ``EventSpec`` list advertising the per-arrival events this mode
+        emits. Diagnostic in Phase 1.
+    event_types
+        Container-event type names this mode emits. The dispatcher backfills
+        any of these that never fired with all-null columns, so downstream
+        consumers see a stable schema regardless of run size.
+    container_id_pattern
+        Optional precompiled regex used by ``post_process`` to extract
+        arrival ids from container ids.
+    post_process
+        Optional ``(container_data, vehicle_log) -> (container_data,
+        vehicle_log)`` hook for mode-specific dataframe shaping. Receives
+        DataFrames whose generic preparation (pivot, sort, backfill) is
+        already done.
+    """
     name: str
     process_arrival: Callable[..., Any]
     build_schedule: Callable[[Any, str], List[dict]]
     description: str = ""
+    resource_specs: Tuple[ResourceSpec, ...] = field(default_factory=tuple)
+    event_specs: Tuple[EventSpec, ...] = field(default_factory=tuple)
+    event_types: Tuple[str, ...] = field(default_factory=tuple)
+    container_id_pattern: Optional[re.Pattern] = None
+    post_process: Optional[PostProcessFn] = None
 
 
 _MODES: Dict[str, TerminalMode] = {}
@@ -151,80 +205,67 @@ def run_terminal_simulation(
     else:
         env.run(until=terminal_config["simulation"]["length"])
 
-    # Create DataFrame for container events. container_events is a flat list of
-    # (container_id, event_type, timestamp) tuples; pivot it once to wide form
-    # here rather than building a dict-of-dicts during the run.
-    _CONTAINER_EVENT_TYPES = [
-        "train_arrival_expected", "train_arrival_actual",
-        "crane_unload", "hostler_pickup", "hostler_dropoff",
-        "truck_arrival", "truck_dropoff", "truck_pickup", "truck_exit",
-        "crane_load", "train_depart",
-    ]
+    container_data, vehicle_log = _build_generic_outputs(terminal_obj, mode_obj)
+
+    if mode_obj.post_process is not None:
+        container_data, vehicle_log = mode_obj.post_process(container_data, vehicle_log)
+
+    return container_data, vehicle_log, terminal_obj
+
+
+# ---------------------------------------------------------------------------
+# Generic output assembly (mode-agnostic)
+# ---------------------------------------------------------------------------
+
+def _build_generic_outputs(
+    terminal_obj: Terminal, mode_obj: TerminalMode
+) -> Tuple[pl.DataFrame, pl.DataFrame]:
+    """Pivot container events to wide form and assemble the vehicle log.
+
+    The dispatcher uses ``mode_obj.event_types`` to backfill any declared
+    event columns that never fired during this run. Mode-specific derived
+    columns (e.g. ``container_processing_time`` for ``intermodal_rail``)
+    are added by the mode's ``post_process`` callable, not here.
+    """
+    # container_events is a flat list of (container_id, event_type, timestamp)
+    # tuples; pivot it once to wide form here rather than building a
+    # dict-of-dicts during the run.
+    declared_event_types = list(mode_obj.event_types)
     events_long = pl.DataFrame(
         terminal_obj.state.container_events,
-        schema={"container_id": pl.Utf8, "event_type": pl.Utf8, "timestamp": pl.Float64},
+        schema={
+            "container_id": pl.Utf8,
+            "event_type": pl.Utf8,
+            "timestamp": pl.Float64,
+        },
         orient="row",
     )
     if events_long.height == 0:
         container_data = pl.DataFrame(
-            schema={"container_id": pl.Utf8, **{t: pl.Float64 for t in _CONTAINER_EVENT_TYPES}}
+            schema={
+                "container_id": pl.Utf8,
+                **{t: pl.Float64 for t in declared_event_types},
+            }
         )
     else:
         container_data = events_long.pivot(
-            values="timestamp", index="container_id", on="event_type",
+            values="timestamp",
+            index="container_id",
+            on="event_type",
             aggregate_function="last",
         )
-    # Ensure all known event-type columns exist even if some never fired,
-    # so downstream column references below don't blow up on small runs.
-    missing = [t for t in _CONTAINER_EVENT_TYPES if t not in container_data.columns]
+    # Backfill any declared event columns that never fired so downstream
+    # consumers see a stable schema regardless of run size.
+    missing = [t for t in declared_event_types if t not in container_data.columns]
     if missing:
         container_data = container_data.with_columns(
             [pl.lit(None, dtype=pl.Float64).alias(t) for t in missing]
         )
     container_data = (
         container_data
-        .lazy()
         .sort("container_id")
         .select(pl.col("container_id"), pl.exclude("container_id"))
-        .with_columns(
-            pl.when(pl.col("truck_exit").is_not_null() & pl.col("train_arrival_expected").is_not_null())
-                .then(pl.col("truck_exit") - pl.col("train_arrival_expected"))
-                .when(pl.col("train_depart").is_not_null())
-                .then(pl.col("crane_load") - pl.col("truck_arrival"))
-                .otherwise(None)
-                .alias("container_processing_time"),
-            pl.col("container_id").str.extract(r"Train-(\d+)").cast(pl.Int64).alias("train_id"),
-            pl.col("container_id").str.starts_with("IC").alias("is_ic")
-        )
     )
-
-    # OC train actual arrival time
-    train_arrival_df = (container_data
-        .filter(
-            pl.col("is_ic"),
-            pl.col("train_arrival_actual").is_not_null()
-        )
-        .group_by("train_id")
-        .agg(pl.col("train_arrival_actual").mean())
-    )
-    # OC train expected arrival time
-    train_arrival_expected_df = (container_data
-        .filter(
-            pl.col("is_ic"),
-            pl.col("train_arrival_expected").is_not_null()
-        )
-        .group_by("train_id")
-        .agg(pl.col("train_arrival_expected").mean())
-    )
-    container_data = (container_data
-        .join(train_arrival_df, on="train_id", how="left")
-        .join(train_arrival_expected_df, on="train_id", how="left")
-        .rename({
-            "train_arrival_actual_right": "train_arrival_actual_oc",
-            "train_arrival_expected_right": "train_arrival_expected_oc"
-        })
-        .drop("is_ic", "train_id")
-    ).collect()
 
     vehicle_log = pl.DataFrame(
         energy_use_records,
@@ -250,12 +291,77 @@ def run_terminal_simulation(
             * pl.col("fuel_type").replace_strict(CO2_KG_PER_UNIT, default=float("nan"))
         ).alias("emissions(kgCO2)")
     )
-    return container_data, vehicle_log, terminal_obj
+    return container_data, vehicle_log
 
 
 # ---------------------------------------------------------------------------
 # Built-in modes
 # ---------------------------------------------------------------------------
+
+# Container-event columns the intermodal_rail flow emits. Order is the original
+# logical order of the journey (used to backfill any column that never fired).
+_INTERMODAL_RAIL_EVENT_TYPES: Tuple[str, ...] = (
+    "train_arrival_expected", "train_arrival_actual",
+    "crane_unload", "hostler_pickup", "hostler_dropoff",
+    "truck_arrival", "truck_dropoff", "truck_pickup", "truck_exit",
+    "crane_load", "train_depart",
+)
+
+_INTERMODAL_RAIL_TRAIN_ID_PATTERN = re.compile(r"Train-(\d+)")
+
+
+def _intermodal_rail_post_process(
+    container_data: pl.DataFrame, vehicle_log: pl.DataFrame
+) -> Tuple[pl.DataFrame, pl.DataFrame]:
+    """Add intermodal_rail-specific derived columns to ``container_data``.
+
+    Computes per-container processing time and joins each container row back
+    to its train's mean ``train_arrival_*`` so OC rows carry the train arrival
+    info that only IC rows record directly.
+    """
+    container_data = container_data.lazy().with_columns(
+        pl.when(
+            pl.col("truck_exit").is_not_null()
+            & pl.col("train_arrival_expected").is_not_null()
+        )
+        .then(pl.col("truck_exit") - pl.col("train_arrival_expected"))
+        .when(pl.col("train_depart").is_not_null())
+        .then(pl.col("crane_load") - pl.col("truck_arrival"))
+        .otherwise(None)
+        .alias("container_processing_time"),
+        pl.col("container_id")
+        .str.extract(r"Train-(\d+)")
+        .cast(pl.Int64)
+        .alias("train_id"),
+        pl.col("container_id").str.starts_with("IC").alias("is_ic"),
+    )
+
+    # OC train actual arrival time (averaged across IC rows of that train).
+    train_arrival_df = (
+        container_data
+        .filter(pl.col("is_ic"), pl.col("train_arrival_actual").is_not_null())
+        .group_by("train_id")
+        .agg(pl.col("train_arrival_actual").mean())
+    )
+    # OC train expected arrival time
+    train_arrival_expected_df = (
+        container_data
+        .filter(pl.col("is_ic"), pl.col("train_arrival_expected").is_not_null())
+        .group_by("train_id")
+        .agg(pl.col("train_arrival_expected").mean())
+    )
+    container_data = (
+        container_data
+        .join(train_arrival_df, on="train_id", how="left")
+        .join(train_arrival_expected_df, on="train_id", how="left")
+        .rename({
+            "train_arrival_actual_right": "train_arrival_actual_oc",
+            "train_arrival_expected_right": "train_arrival_expected_oc",
+        })
+        .drop("is_ic", "train_id")
+    ).collect()
+    return container_data, vehicle_log
+
 
 def _build_intermodal_rail_schedule(train_consist_plan: pl.DataFrame, terminal: str) -> List[dict]:
     return utilities.build_train_timetable(train_consist_plan, terminal, as_dicts=True)
@@ -270,6 +376,9 @@ register_mode(TerminalMode(
         "and OCs (truck-to-rail) flow through shared chassis, hostlers, parking "
         "slots, and gantry cranes."
     ),
+    event_types=_INTERMODAL_RAIL_EVENT_TYPES,
+    container_id_pattern=_INTERMODAL_RAIL_TRAIN_ID_PATTERN,
+    post_process=_intermodal_rail_post_process,
 ))
 
 

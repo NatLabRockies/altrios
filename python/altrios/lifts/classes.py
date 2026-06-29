@@ -1,4 +1,7 @@
-﻿"""Core LIFTS data model: Terminal config, mutable TerminalState, and small dataclasses (container/crane/truck/hostler) plus the loggingLevel enum."""
+﻿"""Core LIFTS data model: Terminal config, mutable TerminalState, and small
+equipment dataclasses (container/truck/rtg/sts_crane/top_pick/yard_tractor/
+chassis/vessel) plus the loggingLevel enum.
+"""
 import simpy
 from dataclasses import dataclass
 from enum import IntEnum
@@ -27,18 +30,10 @@ class container:
             prefix = 'C'
         return f"{prefix}-{self.id}-Train-{self.train_id}"
 
-@dataclass
-class crane:
-    type: str = 'Diesel'
-    id: int = 0
-    track_id: int = 0
-
-    def to_string(self) -> str:
-        return f'{self.id}-Track-{self.track_id}-{self.type}'
-
 
 @dataclass
 class truck:
+    """Drayage truck visiting the terminal."""
     type: str = 'Diesel'
     id: int = 0
     train_id: int = 0
@@ -48,12 +43,81 @@ class truck:
 
 
 @dataclass
-class hostler:
+class rtg:
+    """Rubber-tired gantry crane. Used at both the rail tracks
+    (``pool='rail_track'``, ``track_id`` set) and the main container stack
+    (``pool='main_stack'``, ``track_id=0``)."""
     type: str = 'Diesel'
     id: int = 0
+    pool: str = ''            # 'rail_track' or 'main_stack'
+    track_id: int = 0         # only meaningful for pool == 'rail_track'
 
     def to_string(self) -> str:
-        return f'{self.id}-{self.type}'
+        if self.pool == 'rail_track':
+            return f'{self.id}-Track-{self.track_id}-{self.type}'
+        return f'{self.id}-{self.pool}-{self.type}'
+
+
+@dataclass
+class sts_crane:
+    """Ship-to-shore crane stationed at a berth (vessel <-> shore lift)."""
+    type: str = 'Diesel'
+    id: int = 0
+    berth_id: int = 0
+
+    def to_string(self) -> str:
+        return f'{self.id}-Berth-{self.berth_id}-{self.type}'
+
+
+@dataclass
+class top_pick:
+    """Top-pick handler servicing the main stack as a flexible alternative
+    to the RTG. Each top_pick carries the id of the safety car it operates
+    with (combined Store entry in Phase 1; may be split in Phase 2)."""
+    type: str = 'Diesel'
+    id: int = 0
+    safety_car_id: int = 0
+
+    def to_string(self) -> str:
+        return f'{self.id}-Safety-{self.safety_car_id}-{self.type}'
+
+
+@dataclass
+class yard_tractor:
+    """Yard tractor (a.k.a. hostler) hauling chassis around the terminal.
+    Distinct pools (``main_yard_tractors`` water<->stack, ``rail_yard_tractors``
+    rail<->stack) hold yard_tractor instances tagged with their pool."""
+    type: str = 'Diesel'
+    id: int = 0
+    pool: str = ''            # e.g. 'main' or 'rail'
+
+    def to_string(self) -> str:
+        return f'{self.id}-{self.pool}-{self.type}'
+
+
+@dataclass
+class chassis:
+    """Chassis carrying a container. Two pools exist (terminal vs road) for
+    different physical equipment, distinguished by the ``pool`` field; the
+    dataclass itself is shared because chassis carry no behavior."""
+    type: str = 'Standard'
+    id: int = 0
+    pool: str = ''            # 'terminal' or 'road'
+
+    def to_string(self) -> str:
+        return f'{self.pool}-chassis-{self.id}-{self.type}'
+
+
+@dataclass
+class vessel:
+    """Vessel making a berth call; carries an id and container counts."""
+    id: int = 0
+    name: str = ''
+    inbound_containers: int = 0
+    outbound_containers: int = 0
+
+    def to_string(self) -> str:
+        return f'Vessel-{self.id}-{self.name}'
 
 
 class Terminal:
@@ -164,7 +228,8 @@ class TerminalState:
         for track_id, num_cranes in terminal.cranes_on_track.items():
             for crane_number in range(1, num_cranes + 1):
                 self.cranes_by_track[track_id].put(
-                    crane(type="Hybrid", id=crane_number, track_id=track_id)
+                    rtg(type="Hybrid", id=crane_number,
+                        pool="rail_track", track_id=track_id)
                 )
 
         # Gates
@@ -206,9 +271,12 @@ class TerminalState:
         hostler_electric = hostler_total - hostler_diesel
         self.parked_hostlers = simpy.Store(env, capacity=hostler_total)
         self.active_hostlers = simpy.Store(env, capacity=hostler_total)
+        # Today's hostlers are rail-side workers; tag them pool='rail'.
         hostlers_list = (
-            [hostler(id=i, type="Diesel") for i in range(hostler_diesel)] +
-            [hostler(id=i + hostler_diesel, type="Electric") for i in range(hostler_electric)]
+            [yard_tractor(id=i, type="Diesel", pool="rail")
+             for i in range(hostler_diesel)] +
+            [yard_tractor(id=i + hostler_diesel, type="Electric", pool="rail")
+             for i in range(hostler_electric)]
         )
         for h in hostlers_list:
             self.parked_hostlers.put(h)
