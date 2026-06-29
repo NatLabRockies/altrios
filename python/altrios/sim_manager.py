@@ -21,6 +21,7 @@ def main(
     warm_start_days: int = defaults.WARM_START_DAYS,
     scenario_year: int = defaults.BASE_ANALYSIS_YEAR,
     target_bel_share: float = 0.5,
+    walk_timed_paths = False,
     debug: bool = False,
     loco_pool: Optional[pl.DataFrame] = None,
     refuelers: Optional[pl.DataFrame] = None,
@@ -30,6 +31,7 @@ def main(
     train_type: alt.TrainType = alt.TrainType.Freight,
     demand_file: Union[pl.DataFrame, Path, str] = str(defaults.DEMAND_FILE),
     network_charging_guidelines: Optional[pl.DataFrame] = None,
+    consist_plan_in: Optional[pl.DataFrame] = None,
 ) -> Tuple[
     pl.DataFrame,
     pl.DataFrame,
@@ -73,19 +75,12 @@ def main(
     train_planner_config.loco_info = metrics.add_battery_costs(
         train_planner_config.loco_info, scenario_year
     )
-    train_planner_config.simulation_days = simulation_days + 2 * warm_start_days
-
-    # TODO mbruchon: un-comment this and move it out into rollout.py so rollouts still work
-    # if loco_pool is None: loco_pool = planner.data_prep.build_locopool(
-    #        config = train_planner_config,
-    #       method="shares_twoway",
-    #        shares=[1-target_bel_share, target_bel_share],
-    #        demand_file=demand_file
-    #       )
+    if consist_plan_in is None:
+        train_planner_config.simulation_days = simulation_days + 2 * warm_start_days
 
     t0_ptc = time.perf_counter()
     (
-        train_consist_plan,
+        consist_plan_out,
         loco_pool,
         refuelers,
         speed_limit_train_sims,
@@ -101,6 +96,7 @@ def main(
         demand_file=demand_file,
         train_type=train_type,
         network_charging_guidelines=network_charging_guidelines,
+        consist_plan_in=consist_plan_in
     )
     t1_ptc = time.perf_counter()
 
@@ -118,14 +114,28 @@ def main(
             f"Elapsed time to plan train consist for year {scenario_year}: {t1_ptc - t0_ptc:.3g} s"
         )
 
+    origins = []
+    for slts in speed_limit_train_sims:
+        origins.append(slts.to_pydict()['origs'][0]['Location ID'])
+    
     t0_disp = time.perf_counter()
-    timed_paths = alt.run_dispatch(
-        network,
-        alt.SpeedLimitTrainSimVec(speed_limit_train_sims),
-        est_time_nets,
-        False,
-        False,
-    )
+    timed_paths = []
+    for i in range(len(speed_limit_train_sims)):
+        this_timed_path = alt.run_dispatch(
+            network,
+            alt.SpeedLimitTrainSimVec([speed_limit_train_sims[i]]),
+            [est_time_nets[i]],
+            False,
+            False,
+        )[0]
+        timed_paths.append(this_timed_path)
+        if walk_timed_paths:
+            speed_limit_train_sims[i].set_save_interval(60)
+            speed_limit_train_sims[i].walk_timed_path(
+                network=network,
+                timed_path=this_timed_path,
+            )
+
     timed_paths: List[List[alt.LinkIdxTime]] = [  # type: ignore[no-redef]
         tp.to_pydict() for tp in timed_paths
     ]
@@ -162,21 +172,22 @@ def main(
         }
     )
 
-    train_consist_plan = train_consist_plan.join(
+    consist_plan_out = consist_plan_out.join(
         train_times, on=["Train_ID", "Origin_ID", "Destination_ID"], how="left"
     )
-    train_consist_plan_untrimmed = train_consist_plan.clone()
-    if train_planner_config.single_train_mode is False:
-        train_consist_plan = train_consist_plan.filter(
+    consist_plan_out_untrimmed = consist_plan_out.clone()
+    if (train_planner_config.single_train_mode is False) and (consist_plan_in is None):
+        consist_plan_out = consist_plan_out.filter(
             pl.col("Departure_Time_Planned_Hr") >= pl.lit(24 * warm_start_days),
             pl.col("Departure_Time_Planned_Hr")
             < pl.lit(24 * (simulation_days + warm_start_days)),
         )
-    train_consist_plan = train_consist_plan.with_columns(
+    
+    consist_plan_out = consist_plan_out.with_columns(
         (pl.col("Train_ID").rank("dense") - 1).alias("TrainSimVec_Index")
     )
     # speed_limit_train_sims is 0-indexed but Train_ID starts at 1
-    to_keep = train_consist_plan.unique(subset=["Train_ID"]).to_series().sort()
+    to_keep = consist_plan_out.unique(subset=["Train_ID"]).to_series().sort()
     for i, sim in enumerate(speed_limit_train_sims):
         sim_dict = sim.to_pydict()
         sim_dict["simulation_days"] = simulation_days
@@ -188,12 +199,12 @@ def main(
     timed_paths = [timed_paths[i - 1] for i in to_keep]
 
     return (
-        train_consist_plan,  # NOTE: we generate this and therefore don't need it
+        consist_plan_out,
         loco_pool,
         refuelers,
         grid_emissions_factors,
         nodal_energy_prices,
         train_sims,
         timed_paths,
-        train_consist_plan_untrimmed,
+        consist_plan_out_untrimmed,
     )

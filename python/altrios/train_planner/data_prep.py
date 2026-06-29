@@ -221,6 +221,34 @@ def append_loco_info(loco_info: pd.DataFrame) -> pd.DataFrame:
     return loco_info
 
 
+def loco_info_to_pool(
+    loco_pool: pl.DataFrame,
+    config: planner_config.TrainPlannerConfig
+) -> pl.DataFrame:
+    info_df = pl.from_pandas(
+        config.loco_info.drop(labels="Rust_Loco", axis=1),
+        schema_overrides={
+            "Locomotive_Type": pl.Categorical,
+            "Fuel_Type": pl.Categorical,
+        },
+    )
+    return (loco_pool
+        .cast({"Locomotive_Type" : pl.Categorical,
+            "Node" : pl.Categorical,
+        })
+        .join(info_df, on="Locomotive_Type", how="inner")
+    )
+
+def add_loco_status_columns(loco_pool: pl.DataFrame) -> pl.DataFrame:
+    return loco_pool.with_columns(
+        pl.lit(None).cast(pl.Float64).alias("Arrival_Time"),
+        pl.lit(None).cast(pl.Float64).alias("Refuel_Duration"),
+        pl.lit(None).cast(pl.Float64).alias("Refueler_Efficiency"),
+        pl.lit(None).cast(pl.Float64).alias("Refueling_Done_Time"),
+        pl.lit(None).cast(pl.Float64).alias("Servicing_Done_Time"),
+        pl.lit(None).cast(pl.Float64).alias("SOC_Target_J")
+    )
+
 def build_locopool(
     config: planner_config.TrainPlannerConfig,
     demand_file: Union[pl.DataFrame, pl.LazyFrame, Path, str],
@@ -263,7 +291,7 @@ def build_locopool(
                 .mean()
             ) / config.containers_per_car
         else:
-            assert "No valid columns in demand DataFrame"
+            raise Exception("No valid columns in demand DataFrame")
         if config.single_train_mode:
             initial_size = math.ceil(
                 cars_per_od / min(config.cars_per_locomotive.values())
@@ -376,29 +404,13 @@ def build_locopool(
             "Locomotive_ID": pl.Series(engine_numbers, dtype=pl.UInt32),
             "Locomotive_Type": pl.Series(types, dtype=pl.Categorical),
             "Node": pl.Series(sorted_nodes, dtype=pl.Categorical),
-            "Arrival_Time": pl.Series(np.zeros(rows), dtype=pl.Float64),
-            "Servicing_Done_Time": pl.Series(np.zeros(rows), dtype=pl.Float64),
-            "Refueling_Done_Time": pl.Series(np.tile(0, rows), dtype=pl.Float64),
-            "Status": pl.Series(np.tile("Ready", rows), dtype=pl.Categorical),
-            "SOC_Target_J": pl.Series(np.zeros(rows), dtype=pl.Float64),
-            "Refuel_Duration": pl.Series(np.zeros(rows), dtype=pl.Float64),
-            "Refueler_J_Per_Hr": pl.Series(np.zeros(rows), dtype=pl.Float64),
-            "Refueler_Efficiency": pl.Series(np.zeros(rows), dtype=pl.Float64),
-            "Port_Count": pl.Series(np.zeros(rows), dtype=pl.UInt32),
         }
-    )
+    ).with_columns(
+        pl.lit("Ready").alias("Status")
+    ).pipe(add_loco_status_columns)
 
-    loco_info_pl = pl.from_pandas(
-        config.loco_info.drop(labels="Rust_Loco", axis=1),
-        schema_overrides={
-            "Locomotive_Type": pl.Categorical,
-            "Fuel_Type": pl.Categorical,
-        },
-    )
-
-    loco_pool = loco_pool.join(loco_info_pl, on="Locomotive_Type")
+    loco_pool = loco_info_to_pool(loco_pool, config)
     return loco_pool
-
 
 def build_refuelers(
     node_list: pd.Series,
@@ -507,10 +519,14 @@ def build_refuelers(
 def append_charging_guidelines(
     refuelers: pl.DataFrame,
     loco_pool: pl.DataFrame,
-    demand: pl.DataFrame,
-    network_charging_guidelines: pl.DataFrame,
-) -> pl.DataFrame:
-    active_ods = demand.select(["Origin", "Destination"]).unique()
+    active_ods: pl.DataFrame | None = None,
+    network_charging_guidelines: pl.DataFrame | None = None,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    if network_charging_guidelines is None:
+        refuelers = refuelers.with_columns(pl.lit(0.0).alias("Battery_Headroom_J"))
+        loco_pool = loco_pool.with_columns(pl.lit(0.0).alias("Battery_Headroom_J"))
+        return refuelers, loco_pool
+    
     network_charging_guidelines = (
         network_charging_guidelines.join(
             active_ods, on=["Origin", "Destination"], how="inner"
@@ -553,41 +569,120 @@ def append_charging_guidelines(
     )
     return refuelers, loco_pool
 
+def get_freight_to_car_mapping(rail_vehicles: list[alt.RailVehicle]) -> dict[str, str]:
+    # Create mapping from freight types to car types
+    freight_type_to_car_type = {}
+    for rv in rail_vehicles:
+        rv_dict = rv.to_pydict()
+        # Check for duplicate mappings (should not happen)
+        if rv_dict["freight_type"] in freight_type_to_car_type:
+            raise Exception(
+                f"More than one rail vehicle car type for freight type {rv_dict['freight_type']}"
+            )
+        else:
+            # Map this freight type to its car type
+            freight_type_to_car_type[rv_dict["freight_type"]] = rv_dict["car_type"]
+    
+    return freight_type_to_car_type
 
 def configure_rail_vehicles(
-    single_train_dispatch: Dict,
-    available_rail_vehicles: List[alt.RailVehicle],
+    train_type: str,
+    cars_loaded: int,
+    cars_empty: int,
+    rail_vehicles: List[alt.RailVehicle],
     freight_type_to_car_type: Dict,
-) -> (List[alt.RailVehicle], Dict[str, int]):
+) -> (list[alt.RailVehicle], dict[str, int]):
     freight_types = []
     n_cars_by_type = {}
-    this_train_type = single_train_dispatch["Train_Type"]
-    if single_train_dispatch["Cars_Loaded"] > 0:
+    this_train_type = train_type
+    if cars_loaded > 0:
         freight_type = f"{this_train_type}_Loaded"
         freight_types.append(freight_type)
-        car_type = None
         if freight_type in freight_type_to_car_type:
             car_type = freight_type_to_car_type[freight_type]
         else:
-            assert f"Rail vehicle car type not found for freight type {freight_type}."
-        n_cars_by_type[car_type] = int(single_train_dispatch["Cars_Loaded"])
-    if single_train_dispatch["Cars_Empty"] > 0:
+            raise Exception(f"Rail vehicle car type not found for freight type {freight_type}.")
+        n_cars_by_type[car_type] = int(cars_loaded)
+    if cars_empty > 0:
         freight_type = f"{this_train_type}_Empty"
         freight_types.append(freight_type)
-        car_type = None
         if freight_type in freight_type_to_car_type:
             car_type = freight_type_to_car_type[freight_type]
         else:
-            assert f"Rail vehicle car type not found for freight type {freight_type}."
-        n_cars_by_type[car_type] = int(single_train_dispatch["Cars_Empty"])
+            raise Exception(f"Rail vehicle car type not found for freight type {freight_type}.")
+        n_cars_by_type[car_type] = int(cars_empty)
+
+    assert len(n_cars_by_type) > 0, \
+        "`this_train[\"Cars_Loaded\"]` and `this_train[\"Cars_Empty\"]` are both zero"
 
     rv_to_use = [
         vehicle
-        for vehicle in available_rail_vehicles
+        for vehicle in rail_vehicles
         if vehicle.to_pydict()["freight_type"] in freight_types
     ]
     return rv_to_use, n_cars_by_type
 
+def scale_rv_mass_and_length(
+    rv_to_use: list[alt.RailVehicle],
+    n_cars_by_type: dict[str, int],
+    locos: list[alt.Locomotive],
+    total_mass_kilograms: float = None,
+    total_length_meters: float = None,
+    train_num_axles: float = None,
+    max_allowed_scaler: float = 1E3,
+    include_loco_weight: bool = True,
+    assumed_loco_length_meters: float = 75.0 * alt.utilities.M_PER_FT,
+) -> list[alt.RailVehicle]:
+    loco_kilograms = 0
+    if include_loco_weight:
+        loco_kilograms = sum(loco.to_pydict()["mass_kilograms"] for loco in locos)
+    loco_length_meters = 0
+    axles_per_car = None
+    if train_num_axles is not None:
+        car_count = sum([n_cars_by_type[key] for key in n_cars_by_type])
+        axles_per_car = round(train_num_axles / car_count)
+    if assumed_loco_length_meters is not None:
+        loco_length_meters = assumed_loco_length_meters * len(locos)
+    rv_length_meters = 0
+    rv_mass_base_kilograms = 0
+    rv_mass_freight_kilograms = 0
+    for rv in rv_to_use:
+        rv_dict = rv.to_pydict()
+        n_cars = n_cars_by_type[rv_dict["car_type"]]
+        rv_length_meters += rv_dict["length_meters"] * n_cars
+        rv_mass_base_kilograms += rv_dict["mass_static_base_kilograms"] * n_cars
+        rv_mass_freight_kilograms += rv_dict["mass_freight_kilograms"] * n_cars
+
+    rv_freight_mass_scaler = 1.0
+    rv_base_mass_scaler = 1.0
+    if total_mass_kilograms is not None:
+        this_train_kilograms = total_mass_kilograms
+        # Only adjust freight mass if that is sufficient to equalize
+        if (this_train_kilograms > rv_mass_base_kilograms) and (rv_mass_freight_kilograms > 0):
+            rv_freight_mass_scaler = (this_train_kilograms - loco_kilograms - rv_mass_base_kilograms) / rv_mass_freight_kilograms
+        else:
+        # Otherwise, scale freight and base mass both
+            rv_freight_mass_scaler = (this_train_kilograms - loco_kilograms) / (rv_mass_freight_kilograms + rv_mass_base_kilograms)
+            rv_base_mass_scaler = rv_freight_mass_scaler
+
+    if total_length_meters is not None:
+        this_train_length_meters = total_length_meters
+        rv_length_scaler = (this_train_length_meters - loco_length_meters) / rv_length_meters
+
+    for i in range(len(rv_to_use)):
+        rv_dict = rv_to_use[i].to_pydict()
+        if axles_per_car is not None:
+            rv_dict["axle_count"] = axles_per_car
+        if (rv_length_scaler >= 0.0) and (rv_length_scaler < max_allowed_scaler):
+            rv_dict["length_meters"] = rv_dict["length_meters"] * rv_length_scaler
+        if (rv_freight_mass_scaler >= 0.0) and (rv_freight_mass_scaler < max_allowed_scaler):
+            rv_dict["mass_freight_kilograms"] = rv_dict["mass_freight_kilograms"] * rv_freight_mass_scaler
+        if (rv_base_mass_scaler >= 0.0) and (rv_base_mass_scaler < max_allowed_scaler):
+            rv_dict["mass_static_base_kilograms"] = rv_dict["mass_static_base_kilograms"] * rv_base_mass_scaler
+
+        rv_to_use[i] = alt.RailVehicle.from_pydict(rv_dict)
+
+    return rv_to_use
 
 def appendTonsAndHP(
     df: Union[pl.DataFrame, pl.LazyFrame],

@@ -215,6 +215,51 @@ def smoothen(signal: npt.ArrayLike, period: int = 9) -> npt.ArrayLike:
 def print_dt():
     print(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
+def set_network_max_speed(network_dict: dict, max_speed_mph: float):
+    max_speed_meters_per_second = max_speed_mph * 1000 / 3600 / alt.utilities.MI_PER_KM
+    for link_idx in range(len(network_dict[1])):
+        if network_dict[1][link_idx]['speed_set'] is None: 
+            continue
+        if network_dict[1][link_idx]['speed_set']['speed_limits'] is None: 
+            continue
+        for speed_limit_idx in range(len(network_dict[1][link_idx]['speed_set']['speed_limits'])):
+            current_limit = network_dict[1][link_idx]['speed_set']['speed_limits'][speed_limit_idx]['speed_meters_per_second']
+            network_dict[1][link_idx]['speed_set']['speed_limits'][speed_limit_idx]['speed_meters_per_second'] = min(current_limit, max_speed_meters_per_second)
+
+    return network_dict
+
+def scale_network_speed_limits(network_dict: dict, scaler: float):
+    for link_idx in range(len(network_dict[1])):
+        if network_dict[1][link_idx]['speed_set'] is None: 
+            continue
+        if network_dict[1][link_idx]['speed_set']['speed_limits'] is None: 
+            continue
+        for speed_limit_idx in range(len(network_dict[1][link_idx]['speed_set']['speed_limits'])):
+            current_limit = network_dict[1][link_idx]['speed_set']['speed_limits'][speed_limit_idx]['speed_meters_per_second']
+            network_dict[1][link_idx]['speed_set']['speed_limits'][speed_limit_idx]['speed_meters_per_second'] = current_limit * scaler
+
+    return network_dict
+
+def increase_link_speed_limits(network_dict: dict, link_indices: list[int], new_speed_limit_meters_per_second: float, alt_value: float, overrides: dict = None):
+    updated_network_dict = network_dict.copy()
+    non_max_vals = {}
+    for link_idx in range(len(network_dict[1])):
+        if network_dict[1][link_idx]['idx_curr'] in link_indices: 
+            val_to_assign = new_speed_limit_meters_per_second
+        elif (overrides is not None) and (link_idx in overrides):
+            val_to_assign = overrides[link_idx]
+        else: 
+            val_to_assign = alt_value
+        if network_dict[1][link_idx]['speed_set'] is None: continue
+        if network_dict[1][link_idx]['speed_set']['speed_limits'] is None: continue
+        for speed_limit_idx in range(len(network_dict[1][link_idx]['speed_set']['speed_limits'])):
+            if updated_network_dict[1][link_idx]['speed_set']['speed_limits'][speed_limit_idx]['speed_meters_per_second'] is None: continue
+            updated_network_dict[1][link_idx]['speed_set']['speed_limits'][speed_limit_idx]['speed_meters_per_second'] = val_to_assign
+        
+        if val_to_assign != alt_value:
+            non_max_vals[link_idx] = val_to_assign
+    return updated_network_dict, non_max_vals
+
 def add_catenary_uniform(
     network: alt.Network,
     uniform_power_limit_watts: float,
@@ -235,55 +280,202 @@ def add_catenary_uniform(
 
     return alt.Network.from_pydict(network_dict)
 
+def add_catenary_high_grade(
+    network: alt.Network,
+    uniform_power_limit_watts: float,
+    grade_threshold: float
+) -> alt.Network:
+    network_dict = network.to_pydict()
+    for i in range(1, len(network_dict[1])):
+        link = network_dict[1][i]
+        if len(link['elevs']) >= 2:
+            max_grade = -float('inf')
+            for j in range(len(link['elevs']) - 1):
+                grade = (link["elevs"][j + 1]['elev_meters'] - link["elevs"][j]['elev_meters']) / (link["elevs"][j + 1]['offset_meters'] - link["elevs"][j]['offset_meters'])
+                max_grade = max(max_grade, grade)
+            if max_grade >= grade_threshold:
+                link['cat_power_limits'] = [{
+                    'offset_start_meters': 0.0,
+                    'offset_end_meters': link['length_meters'],
+                    'power_limit_watts': uniform_power_limit_watts,
+                    'district_id': None
+                }]
+
+    return alt.Network.from_pydict(network_dict)
+
+def _compute_cat_intervals(
+    start_pos_in_cycle: float,
+    link_length: float,
+    gap_meters: float,
+    cat_meters: float,
+) -> Tuple[List[Tuple[float, float]], float]:
+    """
+    Return sub-link intervals that should have catenary power and the
+    ending cycle position.
+
+    Walks from `start_pos_in_cycle` through the repeating gap/catenary pattern
+    (gap_meters of no catenary, then cat_meters of catenary) across `link_length`
+    meters, yielding precise (offset_start, offset_end) pairs relative to the
+    start of the link.
+
+    Returns (intervals, ending_pos_in_cycle) so the caller can chain links
+    without floating-point drift.
+    """
+    cycle_length = gap_meters + cat_meters
+    intervals: List[Tuple[float, float]] = []
+    pos_in_cycle = start_pos_in_cycle % cycle_length
+    link_offset = 0.0
+    while link_offset < link_length - 1e-9:
+        if pos_in_cycle < gap_meters:
+            advance = min(gap_meters - pos_in_cycle, link_length - link_offset)
+            link_offset += advance
+            pos_in_cycle += advance
+            if pos_in_cycle >= gap_meters - 1e-9:
+                pos_in_cycle = gap_meters
+        else:
+            advance = min(cycle_length - pos_in_cycle, link_length - link_offset)
+            if advance > 1e-9:
+                intervals.append((link_offset, link_offset + advance))
+            link_offset += advance
+            pos_in_cycle += advance
+            if pos_in_cycle >= cycle_length - 1e-9:
+                pos_in_cycle = 0.0
+    return intervals, pos_in_cycle
+
+
 def add_catenary_even_spacing(
     network: alt.Network,
     uniform_power_limit_watts: float,
     spacing_meters: Tuple[float, float],
     est_time_nets: List[alt.EstTimeNet],
 ) -> alt.Network:
-    est_time_net_dfs = []
-    for est_time_net in est_time_nets:
-        df = (           
-            pl.DataFrame(est_time_net.to_pydict()["val"])
-            .lazy()
-            .unnest("link_event")
-            .with_columns(
-                pl.col("est_type").replace({0: "Arrive", 1: "Clear", 2: "Fake"}).cast(pl.Categorical),
-                pl.selectors.contains("idx").replace({0: None}).cast(pl.UInt32)
-            )
-            .filter(pl.col("est_type") == pl.lit("Clear"))
-            .select("link_idx", "time_sched", "speed", "dist_to_next")
-            .group_by("time_sched").first()
-            .sort("time_sched")
-            .with_columns(
-                pl.col("dist_to_next").cum_sum().alias("total_dist_meters")
-            )
-            .with_columns(
-            ((pl.col("total_dist_meters").shift(1, fill_value=0) % (spacing_meters[1] + spacing_meters[0])) >= spacing_meters[0]).alias("has_catenary")
-            )
-        ).collect()
-        est_time_net_dfs.append(df)
-    links_to_energize = set(
-        pl.concat(est_time_net_dfs)
-            .filter(pl.col("has_catenary"))
-            .get_column("link_idx")
-            .to_list()
-    )
+    """
+    Place catenary with precise sub-link offsets.
+
+    spacing_meters[0] is the gap (no catenary), spacing_meters[1] is the
+    energized segment.  The mainline path is determined by following idx_next
+    pointers through the network, guided by the est_time_net path at junctions.
+    Only mainline links advance the spacing cycle; parallel-track and siding
+    links inherit the catenary state from the current cycle position without
+    advancing it.
+    """
+    gap_meters, cat_meters = spacing_meters
 
     network_dict = network.to_pydict()
-    # Iterate through all links in the dictionary
-    # network_dict is a tuple: (NetworkErrTol dict, [links])
-    # Skip index 0 which is the dummy link
+    # Build lookup: link idx -> link dict (index 0 is the dummy link, skip it)
+    link_by_idx: Dict[int, dict] = {
+        link['idx_curr']: link for link in network_dict[1]
+    }
+
+    # Extract ordered link path from the first est_time_net
+    est_time_net = est_time_nets[0]
+    ordered_link_idxs: List[int] = (
+        pl.DataFrame(est_time_net.to_pydict()["val"])
+        .lazy()
+        .unnest("link_event")
+        .with_columns(
+            pl.col("est_type").replace({0: "Arrive", 1: "Clear", 2: "Fake"}).cast(pl.Categorical),
+            pl.selectors.contains("idx").replace({0: None}).cast(pl.UInt32)
+        )
+        .filter(pl.col("est_type") == pl.lit("Clear"))
+        .select("link_idx", "time_sched")
+        .sort("time_sched")
+        .select("link_idx")
+        .collect()
+        .get_column("link_idx")
+        .drop_nulls()
+        .to_list()
+    )
+    # Collapse consecutive runs of the same link
+    deduped_link_idxs: List[int] = []
+    for idx in ordered_link_idxs:
+        if not deduped_link_idxs or deduped_link_idxs[-1] != idx:
+            deduped_link_idxs.append(idx)
+
+    # Build mainline link set by following idx_next from the first link
+    # AND idx_prev from the last link (bidirectional).  At each step, prefer
+    # the pointer that appears in the est_time_net path.  The union of both
+    # chains covers junctions where one direction picks the wrong branch.
+    path_set = set(deduped_link_idxs)
+
+    # Forward chain: follow idx_next from the first path link
+    mainline_fwd: set = set()
+    current = deduped_link_idxs[0]
+    while current and current != 0 and current not in mainline_fwd:
+        mainline_fwd.add(current)
+        link = link_by_idx.get(current)
+        if link is None:
+            break
+        idx_next = link.get('idx_next', 0)
+        idx_next_alt = link.get('idx_next_alt', 0)
+        if idx_next in path_set:
+            current = idx_next
+        elif idx_next_alt in path_set:
+            current = idx_next_alt
+        else:
+            current = idx_next
+
+    # Backward chain: follow idx_prev from the last path link
+    mainline_bwd: set = set()
+    current = deduped_link_idxs[-1]
+    while current and current != 0 and current not in mainline_bwd:
+        mainline_bwd.add(current)
+        link = link_by_idx.get(current)
+        if link is None:
+            break
+        idx_prev = link.get('idx_prev', 0)
+        idx_prev_alt = link.get('idx_prev_alt', 0)
+        if idx_prev in path_set:
+            current = idx_prev
+        elif idx_prev_alt in path_set:
+            current = idx_prev_alt
+        else:
+            current = idx_prev
+
+    mainline_set = mainline_fwd | mainline_bwd
+
+    # Walk the est_time_net path:
+    #  - Mainline links (first visit): compute intervals, advance pos_in_cycle
+    #  - Non-mainline / revisited: advance a *local* cycle tracker so
+    #    consecutive non-mainline blocks get smooth catenary, but do NOT
+    #    advance the mainline pos_in_cycle.
+    link_cat_intervals: Dict[int, List[Tuple[float, float]]] = {}
+    seen_links: set = set()
+    pos_in_cycle = 0.0
+    local_pos = 0.0  # tracks cycle position within non-mainline blocks
+    for link_idx in deduped_link_idxs:
+        if link_idx not in link_by_idx:
+            continue
+        link_length = link_by_idx[link_idx]['length_meters']
+        is_mainline = link_idx in mainline_set and link_idx not in seen_links
+        if is_mainline:
+            intervals, pos_in_cycle = _compute_cat_intervals(
+                pos_in_cycle, link_length, gap_meters, cat_meters)
+            seen_links.add(link_idx)
+            local_pos = pos_in_cycle  # reset local tracker to mainline state
+            if intervals:
+                link_cat_intervals[link_idx] = intervals
+        elif link_idx not in link_cat_intervals:
+            intervals, local_pos = _compute_cat_intervals(
+                local_pos, link_length, gap_meters, cat_meters)
+            if intervals:
+                link_cat_intervals[link_idx] = intervals
+
+    # Apply catenary intervals to network links
     for i in range(1, len(network_dict[1])):
         link = network_dict[1][i]
-        if link['idx_curr'] in links_to_energize:
-            # Add catenary power limit spanning the entire link
-            link['cat_power_limits'] = [{
-                'offset_start_meters': 0.0,
-                'offset_end_meters': link['length_meters'],
+        link_idx = link['idx_curr']
+        if link_idx not in link_cat_intervals:
+            continue
+        link['cat_power_limits'] = [
+            {
+                'offset_start_meters': start,
+                'offset_end_meters': end,
                 'power_limit_watts': uniform_power_limit_watts,
-                'district_id': None
-            }]
+                'district_id': None,
+            }
+            for start, end in link_cat_intervals[link_idx]
+        ]
 
     return alt.Network.from_pydict(network_dict)
 
@@ -334,4 +526,15 @@ def show_plots() -> bool:
             # only true if provided input is exactly "true", case insensitive
         ).lower()
         == "true"
+    )
+
+def network_to_latlon(network: alt.Network) -> pl.DataFrame:
+    return(
+        pl.DataFrame(network.to_pydict()[1]).lazy()
+            .explode("headings")
+            .with_columns(
+                pl.col("headings").struct.field("lat").alias("lat"), 
+                pl.col("headings").struct.field("lon").alias("lon")
+            )
+            .drop("cat_power_limits", "link_idxs_lockout", "speed_set", "speed_sets", "elevs", "length_meters", "headings")
     )

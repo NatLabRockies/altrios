@@ -1228,3 +1228,5 @@ python/altrios/resources/demo_data/with_cat.csv
 python/altrios/resources/demo_data/with_cat2.csv
 python/altrios/resources/demo_data/without_cat.csv
 python/altrios/resources/demo_data/without_cat2.csv
+/python/altrios/resources/demo_data
+/python/altrios/resources/networks/v4

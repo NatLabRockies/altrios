@@ -328,7 +328,8 @@ impl FuelConverter {
             )
         );
         self.state.pwr_fuel.update(
-            pwr_out_req / *self.state.eta.get_fresh(|| format_dbg!())? + self.pwr_idle_fuel,
+            pwr_out_req / *self.state.eta.get_fresh(|| format_dbg!())?
+                + *self.state.pwr_idle_fuel.get_fresh(|| format_dbg!())?,
             || format_dbg!(),
         )?;
         self.state.pwr_loss.update(
