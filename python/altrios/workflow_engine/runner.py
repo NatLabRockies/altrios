@@ -32,7 +32,9 @@ Internally it composes:
      :func:`run_site` (test/programmatic use).
    Each entry is wrapped in an :class:`Entity` and scheduled as a
    SimPy process running the graph named in
-   ``mode.arrival_routing[entity.kind]``.
+   ``mode.arrival_routing[entity.kind]``. When more than one active
+   mode routes the same kind, the entry's optional ``mode`` key
+   selects which one fires.
 6. ``env.run()`` is called; on completion, a :class:`RunResult`
    bundles the populated :class:`OutputCollector` plus references
    to the catalog, site, env, and state.
@@ -270,19 +272,36 @@ def run_site(
 
     # Dispatch one SimPy process per entry. Each entry MUST carry a
     # ``kind`` matching an entity kind declared in the catalog and
-    # routed by exactly one active mode. ``arrival_time`` (hours) is
-    # consumed by the wrapper to delay the workflow start.
-    kind_to_mode: dict[str, WorkflowMode] = {}
+    # routed by at least one active mode. ``arrival_time`` (hours) is
+    # consumed by the wrapper to delay the workflow start. An optional
+    # ``mode`` key selects the workflow mode explicitly when more than
+    # one active mode routes the same kind.
+    #
+    # Two dispatch tables:
+    #   unique_kind_to_mode: kind -> mode, only when exactly one active
+    #     mode routes the kind. Used when the entry omits ``mode``.
+    #   mode_kind_to_mode: (mode_name, kind) -> mode, for entries that
+    #     specify ``mode`` explicitly.
+    # ``contended_kinds`` records which modes claim each kind that
+    # appears in more than one active mode, to produce actionable
+    # error messages.
+    unique_kind_to_mode: dict[str, WorkflowMode] = {}
+    contended_kinds: dict[str, list[str]] = {}
+    mode_kind_to_mode: dict[tuple[str, str], WorkflowMode] = {}
+    active_mode_names = {m.name for m in active_modes}
     for mode in active_modes:
         for kind in mode.arrival_routing:
-            if kind in kind_to_mode:
-                raise RunError(
-                    f"Entity kind {kind!r} is routed by both "
-                    f"{kind_to_mode[kind].name!r} and {mode.name!r}; "
-                    f"site {site.name!r} cannot disambiguate. Activate "
-                    "only one mode per kind, or rename the kind."
-                )
-            kind_to_mode[kind] = mode
+            mode_kind_to_mode[(mode.name, kind)] = mode
+            if kind in contended_kinds:
+                contended_kinds[kind].append(mode.name)
+            elif kind in unique_kind_to_mode:
+                contended_kinds[kind] = [
+                    unique_kind_to_mode[kind].name,
+                    mode.name,
+                ]
+                del unique_kind_to_mode[kind]
+            else:
+                unique_kind_to_mode[kind] = mode
 
     primitives = build_default_primitives()
     entities: list[Entity] = []
@@ -293,19 +312,48 @@ def run_site(
                 f"Got: {raw!r}."
             )
         kind = raw["kind"]
-        mode = kind_to_mode.get(kind)
-        if mode is None:
-            raise RunError(
-                f"Entity kind {kind!r} is not routed by any active "
-                f"mode in site {site.name!r}. Active routing: "
-                f"{ {m.name: list(m.arrival_routing) for m in active_modes} }."
-            )
+        explicit_mode = raw.get("mode")
+        if explicit_mode is not None:
+            mode = mode_kind_to_mode.get((explicit_mode, kind))
+            if mode is None:
+                if explicit_mode not in active_mode_names:
+                    raise RunError(
+                        f"Arrival entry {raw!r}: mode {explicit_mode!r} "
+                        f"is not active in site {site.name!r}. Active "
+                        f"modes: {sorted(active_mode_names)}."
+                    )
+                routed = list(catalog.mode(explicit_mode).arrival_routing)
+                raise RunError(
+                    f"Arrival entry {raw!r}: mode {explicit_mode!r} does "
+                    f"not route entity kind {kind!r}. Kinds routed by "
+                    f"{explicit_mode!r}: {routed}."
+                )
+        else:
+            mode = unique_kind_to_mode.get(kind)
+            if mode is None:
+                if kind in contended_kinds:
+                    raise RunError(
+                        f"Arrival entry {raw!r}: entity kind {kind!r} is "
+                        f"routed by multiple active modes "
+                        f"({contended_kinds[kind]}). Add a 'mode' key to "
+                        f"the arrival entry to disambiguate."
+                    )
+                raise RunError(
+                    f"Entity kind {kind!r} is not routed by any active "
+                    f"mode in site {site.name!r}. Active routing: "
+                    f"{ {m.name: list(m.arrival_routing) for m in active_modes} }."
+                )
         graph_name = mode.arrival_routing[kind]
         graph = mode.graphs[graph_name]
 
         arrival_time = float(raw.get("arrival_time", 0.0))
         ent_id = raw.get("id") or _auto_id(kind, len(entities))
-        attrs = {k: v for k, v in raw.items() if k not in ("kind", "id", "arrival_time")}
+        # ``mode`` is a dispatch directive, not an entity attribute —
+        # strip it before storing attrs.
+        attrs = {
+            k: v for k, v in raw.items()
+            if k not in ("kind", "id", "arrival_time", "mode")
+        }
         attrs.setdefault("arrival_time", arrival_time)
         entity = Entity(id=str(ent_id), kind=kind, attrs=attrs)
         entities.append(entity)

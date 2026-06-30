@@ -384,3 +384,197 @@ def test_run_site_site_config_overrides_catalog_defaults(tmp_path: Path):
     assert result.config["shovel_load_time_hr"] == pytest.approx(0.05)
     # Site-only keys are present
     assert result.config["custom_site_key"] == 99
+
+
+# ---- Multi-mode dispatch -------------------------------------------
+#
+# When more than one active mode routes the same entity kind, arrival
+# entries must carry an explicit ``mode`` key to disambiguate. The
+# runner picks the workflow from the named mode and records that the
+# right mode fired by inspecting per-mode event_type tags.
+
+CATALOG_MULTI_MODE_YAML = """\
+meta:
+  schema_version: 1
+name: multi_mode_catalog
+entity_kinds:
+  - name: widget
+    attrs:
+      arrival_time: float
+modes:
+  - name: assembly_a
+    arrival_routing:
+      widget: process_a
+    graphs:
+      - name: process_a
+        entry: emit
+        steps:
+          - id: emit
+            type: record_event
+            params:
+              event_type: assembled_by_a
+  - name: assembly_b
+    arrival_routing:
+      widget: process_b
+    graphs:
+      - name: process_b
+        entry: emit
+        steps:
+          - id: emit
+            type: record_event
+            params:
+              event_type: assembled_by_b
+"""
+
+
+def _write_multi_mode_site(
+    tmp_path: Path, *, active_modes: str = "[assembly_a, assembly_b]"
+) -> Path:
+    cat = tmp_path / "multi_catalog.yaml"
+    cat.write_text(CATALOG_MULTI_MODE_YAML)
+    site = tmp_path / "multi_site.yaml"
+    site.write_text(
+        "meta: {schema_version: 1}\n"
+        "name: multi_mode_site\n"
+        f"catalog: {cat}\n"
+        f"modes: {active_modes}\n"
+    )
+    return site
+
+
+def test_run_site_multi_mode_dispatch_by_mode_key(tmp_path: Path):
+    """Both modes claim ``widget``; explicit ``mode`` routes correctly."""
+    site = _write_multi_mode_site(tmp_path)
+    entries = [
+        {"kind": "widget", "id": "wa", "mode": "assembly_a"},
+        {"kind": "widget", "id": "wb", "mode": "assembly_b"},
+        {"kind": "widget", "id": "wa2", "mode": "assembly_a"},
+    ]
+    result = run_site(site, arrival_entries=entries)
+    by_id = {r["entity_id"]: r["event_type"] for r in result.output.event_log}
+    assert by_id == {
+        "wa": "assembled_by_a",
+        "wb": "assembled_by_b",
+        "wa2": "assembled_by_a",
+    }
+    # ``mode`` should NOT leak onto the entity's attrs.
+    for ent in result.entities:
+        assert "mode" not in ent.attrs
+
+
+def test_run_site_multi_mode_no_mode_key_raises(tmp_path: Path):
+    """Contended kind without ``mode`` key → actionable RunError."""
+    site = _write_multi_mode_site(tmp_path)
+    with pytest.raises(RunError) as exc:
+        run_site(site, arrival_entries=[{"kind": "widget", "id": "w"}])
+    msg = str(exc.value)
+    assert "multiple active modes" in msg
+    assert "assembly_a" in msg and "assembly_b" in msg
+    assert "'mode' key" in msg
+
+
+def test_run_site_multi_mode_explicit_mode_not_active_raises(tmp_path: Path):
+    """``mode`` key naming an inactive mode → actionable RunError."""
+    # Only activate assembly_a.
+    site = _write_multi_mode_site(tmp_path, active_modes="[assembly_a]")
+    with pytest.raises(RunError) as exc:
+        run_site(
+            site,
+            arrival_entries=[
+                {"kind": "widget", "id": "w", "mode": "assembly_b"}
+            ],
+        )
+    assert "not active" in str(exc.value)
+    assert "assembly_b" in str(exc.value)
+
+
+def test_run_site_multi_mode_explicit_mode_unknown_kind_raises(tmp_path: Path):
+    """``mode`` key with a kind the mode doesn't route → actionable RunError."""
+    # Add a second kind only routed by assembly_a; ask assembly_b for it.
+    cat_yaml = """\
+meta:
+  schema_version: 1
+name: multi_mode_catalog
+entity_kinds:
+  - {name: widget, attrs: {arrival_time: float}}
+  - {name: gadget, attrs: {arrival_time: float}}
+modes:
+  - name: assembly_a
+    arrival_routing:
+      widget: emit_w
+      gadget: emit_g
+    graphs:
+      - {name: emit_w, entry: e, steps: [{id: e, type: record_event, params: {event_type: w}}]}
+      - {name: emit_g, entry: e, steps: [{id: e, type: record_event, params: {event_type: g}}]}
+  - name: assembly_b
+    arrival_routing:
+      widget: emit_w
+    graphs:
+      - {name: emit_w, entry: e, steps: [{id: e, type: record_event, params: {event_type: w}}]}
+"""
+    cat = tmp_path / "cat.yaml"
+    cat.write_text(cat_yaml)
+    site = tmp_path / "site.yaml"
+    site.write_text(
+        "meta: {schema_version: 1}\n"
+        "name: s\n"
+        f"catalog: {cat}\n"
+        "modes: [assembly_a, assembly_b]\n"
+    )
+    with pytest.raises(RunError) as exc:
+        run_site(
+            site,
+            arrival_entries=[
+                {"kind": "gadget", "id": "g", "mode": "assembly_b"}
+            ],
+        )
+    msg = str(exc.value)
+    assert "does not route" in msg
+    assert "assembly_b" in msg
+    assert "gadget" in msg
+
+
+def test_run_site_multi_mode_uncontended_kind_still_works(tmp_path: Path):
+    """Kinds claimed by exactly one mode dispatch without a ``mode`` key,
+    even when other (contended) kinds exist in the catalog."""
+    cat_yaml = """\
+meta:
+  schema_version: 1
+name: mixed_catalog
+entity_kinds:
+  - {name: widget, attrs: {arrival_time: float}}
+  - {name: gadget, attrs: {arrival_time: float}}
+modes:
+  - name: mode_a
+    arrival_routing:
+      widget: emit
+      gadget: emit_g
+    graphs:
+      - {name: emit, entry: e, steps: [{id: e, type: record_event, params: {event_type: w_a}}]}
+      - {name: emit_g, entry: e, steps: [{id: e, type: record_event, params: {event_type: g_only}}]}
+  - name: mode_b
+    arrival_routing:
+      widget: emit
+    graphs:
+      - {name: emit, entry: e, steps: [{id: e, type: record_event, params: {event_type: w_b}}]}
+"""
+    cat = tmp_path / "cat.yaml"
+    cat.write_text(cat_yaml)
+    site = tmp_path / "site.yaml"
+    site.write_text(
+        "meta: {schema_version: 1}\n"
+        "name: s\n"
+        f"catalog: {cat}\n"
+        "modes: [mode_a, mode_b]\n"
+    )
+    # ``gadget`` is only routed by mode_a → no ``mode`` key needed.
+    result = run_site(
+        site,
+        arrival_entries=[
+            {"kind": "gadget", "id": "g1"},
+            {"kind": "widget", "id": "w1", "mode": "mode_a"},
+            {"kind": "widget", "id": "w2", "mode": "mode_b"},
+        ],
+    )
+    by_id = {r["entity_id"]: r["event_type"] for r in result.output.event_log}
+    assert by_id == {"g1": "g_only", "w1": "w_a", "w2": "w_b"}
