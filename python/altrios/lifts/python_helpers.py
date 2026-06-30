@@ -23,20 +23,27 @@ the schedule builders and post-process callables survive.
 """
 from __future__ import annotations
 
+import random
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Iterable, Mapping
 
 import polars as pl
 
 from altrios.lifts import consumption, drayage_flow, train_flow, utilities, vessel_flow
-from altrios.lifts.classes import loggingLevel
-from altrios.lifts.consumption import CO2_KG_PER_UNIT, consumption_records
+from altrios.lifts.classes import container, loggingLevel
+from altrios.lifts.consumption import (
+    CO2_KG_PER_UNIT,
+    _record_stack_lift_consumption,
+    consumption_records,
+)
 from altrios.lifts.specs import (
     RAIL_VESSEL_SPECS,
     TRUCK_RAIL_SPECS,
     VESSEL_TRUCK_SPECS,
 )
 from altrios.lifts.terminal_adapter import TerminalAdapter
+from altrios.lifts.yard_flow import stack_in, stack_out, yard_tractor_haul
 from altrios.workflow_engine import build_state_from_specs
 from altrios.workflow_engine.registry import register
 
@@ -144,6 +151,15 @@ def build_freight_state(
         # fresh state object, so this branch only fires if a caller
         # reuses state — rare but cheap to guard.
         state.container_events = []
+
+    # Per-train list of OCs loaded onto each train, populated by
+    # ``freight.load_one_oc`` and consumed by
+    # ``freight.record_train_depart_events`` (the train-arrival graph's
+    # post-load step uses it to record ``train_depart`` for every OC
+    # that ended up on the train). Phase A.11 deletes this when the
+    # legacy ``terminal_adapter`` goes away and the events flow
+    # straight through ``OutputCollector``.
+    state.loaded_ocs_by_train = {}
 
     # Build the union of every freight mode's specs (capacity callables
     # read from `config` so any site-level overrides on yard.track_number
@@ -381,6 +397,175 @@ def process_vessel_arrival_yaml(*, env, state, entity):
     :func:`process_train_arrival_yaml` for the calling convention."""
     entry = _entry_from_entity(entity)
     yield from vessel_flow.process_vessel_arrival(env, state.terminal_adapter, entry)
+
+
+# ---- train-arrival decomposition (Phase A.4) -----------------------
+#
+# These helpers replace the single-step ``freight.process_train_arrival``
+# wrapper above with a YAML graph whose top-level orchestration
+# (track acquisition, IC/OC fork-join, arrival/depart events) is
+# expressed in workflow_engine primitives. The inner unload/load body
+# remains a python: escape hatch because (a) it composes the
+# yard_flow helpers (stack_in/stack_out/yard_tractor_haul) which are
+# their own SimPy generators, and (b) the lift_time random.uniform
+# draw is interleaved with consumption recording in a way that's
+# clearer in Python than YAML. Phase A would further decompose the
+# helpers themselves if needed.
+
+
+@register("freight.setup_train_arrival")
+def setup_train_arrival(*, env, entity) -> SimpleNamespace:
+    """Normalize a ``train``-kind entity into a SimpleNamespace of
+    typed fields the train-arrival graph downstream steps consume via
+    ``bindings.meta.<field>`` (asteval can't call ``int``/``float``/
+    ``list``/``range``, so type coercion has to happen in Python)."""
+    attrs = dict(entity.attrs) if hasattr(entity, "attrs") else dict(vars(entity))
+    train_id = int(attrs.get("train_id") or 0)
+    ic_count = int(attrs.get("full_cars") or 0)
+    oc_count = int(attrs.get("oc_number") or 0)
+    arrival_time = float(attrs.get("arrival_time") or 0.0)
+    departure_time = float(attrs.get("departure_time") or 0.0)
+    return SimpleNamespace(
+        train_id=train_id,
+        ic_count=ic_count,
+        oc_count=oc_count,
+        arrival_time=arrival_time,
+        departure_time=departure_time,
+        ic_ids=list(range(1, ic_count + 1)),
+        oc_ids=list(range(oc_count)),
+    )
+
+
+@register("freight.record_train_arrival_expected")
+def record_train_arrival_expected(*, env, terminal, meta) -> None:
+    """Pre-record ``train_arrival_expected`` for every IC at the
+    train's scheduled arrival time. Mirrors the loop the legacy
+    ``train_flow.process_train_arrival`` runs before yielding the
+    arrival timeout."""
+    for ic_id in meta.ic_ids:
+        ic_label = container(type="Inbound", id=ic_id, train_id=meta.train_id)
+        utilities.record_container_event(
+            terminal, ic_label, "train_arrival_expected", meta.arrival_time,
+        )
+
+
+@register("freight.log_train_on_track")
+def log_train_on_track(*, env, terminal, meta, track_id) -> None:
+    """One-liner log statement; preserved verbatim from the legacy
+    ``process_train_arrival`` so ``--log_level basic`` output matches."""
+    terminal.log(
+        loggingLevel.BASIC,
+        f"Time {env.now:.3f}: Train {meta.train_id} on track {track_id} "
+        f"(IC={meta.ic_count}, OC={meta.oc_count}).",
+    )
+
+
+@register("freight.unload_one_ic")
+def unload_one_ic(*, env, terminal, track_id, train_id, ic_id):
+    """Lift one IC off the train and route it to the stack.
+
+    YAML-driven equivalent of legacy ``train_flow._unload_one_ic``
+    minus the manual fork-join args (parallelism is now the engine's
+    ``loop parallel:true`` primitive). The ``train_arrival_actual``
+    container-event recording (legacy: inline in the spawning loop)
+    moves here so the loop step sees no Python side effects.
+    """
+    state = terminal.state
+    ic = container(type="Inbound", id=int(ic_id), train_id=int(train_id))
+    utilities.record_container_event(
+        terminal, ic, "train_arrival_actual", env.now,
+    )
+
+    rtg_pool = state.rail_track_rtgs_by_track[int(track_id)]
+    rtg_obj = yield rtg_pool.get()
+    try:
+        lift_time = (
+            terminal.CONTAINERS_PER_CRANE_MOVE_MEAN
+            + random.uniform(0, terminal.CRANE_MOVE_DEV_TIME)
+        )
+        yield env.timeout(lift_time)
+        utilities.record_container_event(
+            terminal, ic, "rail_track_rtg_unload", env.now,
+        )
+        _record_stack_lift_consumption(
+            getattr(terminal, "output", None),
+            terminal, rtg_obj, "rail_track_rtg", status="loaded",
+            train_id=int(train_id), container_id=ic.to_string(),
+            event_type="rail_track_rtg_unload", env_now=env.now,
+            zone="track",
+        )
+    finally:
+        yield rtg_pool.put(rtg_obj)
+
+    yield env.process(yard_tractor_haul(
+        env, terminal, state.rail_yard_tractors,
+        ic, from_zone="rail", to_zone="stack",
+    ))
+    yield env.process(stack_in(env, terminal, ic, source_chassis=None))
+
+
+@register("freight.load_one_oc")
+def load_one_oc(*, env, terminal, track_id, train_id):
+    """Pull one OC off the stack and load it onto the train.
+
+    YAML-driven equivalent of legacy ``train_flow._load_one_oc`` minus
+    the fork-join args. The loaded OC is appended to
+    ``state.loaded_ocs_by_train[train_id]`` so the post-load
+    ``freight.record_train_depart_events`` step can record the
+    ``train_depart`` row for each OC at the actual departure time.
+    """
+    state = terminal.state
+    oc = yield env.process(stack_out(env, terminal, container_obj=None))
+
+    yield env.process(yard_tractor_haul(
+        env, terminal, state.rail_yard_tractors,
+        oc, from_zone="stack", to_zone="rail",
+    ))
+
+    rtg_pool = state.rail_track_rtgs_by_track[int(track_id)]
+    rtg_obj = yield rtg_pool.get()
+    try:
+        lift_time = (
+            terminal.CONTAINERS_PER_CRANE_MOVE_MEAN
+            + random.uniform(0, terminal.CRANE_MOVE_DEV_TIME)
+        )
+        yield env.timeout(lift_time)
+        utilities.record_container_event(
+            terminal, oc, "rail_track_rtg_load", env.now,
+        )
+        _record_stack_lift_consumption(
+            getattr(terminal, "output", None),
+            terminal, rtg_obj, "rail_track_rtg", status="loaded",
+            train_id=int(train_id), container_id=oc.to_string(),
+            event_type="rail_track_rtg_load", env_now=env.now,
+            zone="track",
+        )
+    finally:
+        yield rtg_pool.put(rtg_obj)
+
+    tid = int(train_id)
+    state.loaded_ocs_by_train.setdefault(tid, []).append(oc)
+
+
+@register("freight.record_train_depart_events")
+def record_train_depart_events(*, env, terminal, train_id) -> None:
+    """Record ``train_depart`` for the train and for every OC the load
+    phase placed on it. The OCs come from
+    ``state.loaded_ocs_by_train[train_id]``, populated by
+    ``freight.load_one_oc``. The bucket is cleared after to avoid
+    leaking across runs that share the same state.
+    """
+    state = terminal.state
+    tid = int(train_id)
+    utilities.record_container_event(
+        terminal, f"Train-{tid}", "train_depart", env.now,
+    )
+    loaded = state.loaded_ocs_by_train.get(tid, [])
+    for oc in loaded:
+        utilities.record_container_event(
+            terminal, oc, "train_depart", env.now,
+        )
+    state.loaded_ocs_by_train.pop(tid, None)
 
 
 # ---- output assembly -----------------------------------------------

@@ -68,17 +68,106 @@ modes:
       train: handle_train_arrival
       drayage: handle_drayage_arrival
     graphs:
+      # Phase A.4: top-level train-arrival orchestration in YAML.
+      # The IC/OC inner body remains a python: escape hatch because
+      # it composes the yard_flow helpers (stack_in/stack_out/
+      # yard_tractor_haul), each a SimPy generator in its own right.
       - name: handle_train_arrival
-        entry: call_legacy
+        entry: setup
         steps:
-          - id: call_legacy
+          - id: setup
             type: python
             params:
-              call: freight.process_train_arrival
+              call: freight.setup_train_arrival
               args:
                 env: "{env}"
-                state: "{state}"
                 entity: "{entity}"
+              bind: meta
+            next: pre_record_expected
+          - id: pre_record_expected
+            type: python
+            params:
+              call: freight.record_train_arrival_expected
+              args:
+                env: "{env}"
+                terminal: "{state.terminal_adapter}"
+                meta: "{bindings.meta}"
+            next: wait_for_arrival
+          - id: wait_for_arrival
+            type: timeout
+            params:
+              duration: "{max(0.0, bindings.meta.arrival_time - env.now)}"
+            next: acquire_track
+          - id: acquire_track
+            type: request
+            params:
+              pool: tracks
+              bind: track_id
+            next: log_arrival
+          - id: log_arrival
+            type: python
+            params:
+              call: freight.log_train_on_track
+              args:
+                env: "{env}"
+                terminal: "{state.terminal_adapter}"
+                meta: "{bindings.meta}"
+                track_id: "{bindings.track_id}"
+            next: unload_loop
+          - id: unload_loop
+            type: loop
+            params:
+              over: "{bindings.meta.ic_ids}"
+              as: ic_id
+              do: unload_one_ic_call
+              parallel: true
+            next: load_loop
+          - id: unload_one_ic_call
+            type: python
+            params:
+              call: freight.unload_one_ic
+              args:
+                env: "{env}"
+                terminal: "{state.terminal_adapter}"
+                track_id: "{bindings.track_id}"
+                train_id: "{bindings.meta.train_id}"
+                ic_id: "{bindings.ic_id}"
+          - id: load_loop
+            type: loop
+            params:
+              over: "{bindings.meta.oc_ids}"
+              as: oc_idx
+              do: load_one_oc_call
+              parallel: true
+            next: wait_for_depart
+          - id: load_one_oc_call
+            type: python
+            params:
+              call: freight.load_one_oc
+              args:
+                env: "{env}"
+                terminal: "{state.terminal_adapter}"
+                track_id: "{bindings.track_id}"
+                train_id: "{bindings.meta.train_id}"
+          - id: wait_for_depart
+            type: timeout
+            params:
+              duration: "{max(0.0, bindings.meta.departure_time - env.now)}"
+            next: record_depart
+          - id: record_depart
+            type: python
+            params:
+              call: freight.record_train_depart_events
+              args:
+                env: "{env}"
+                terminal: "{state.terminal_adapter}"
+                train_id: "{bindings.meta.train_id}"
+            next: release_track
+          - id: release_track
+            type: release
+            params:
+              pool: tracks
+              bind: track_id
       - name: handle_drayage_arrival
         entry: call_legacy
         steps:
