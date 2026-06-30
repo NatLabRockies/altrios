@@ -42,7 +42,7 @@ update the corresponding section below.
 | 3E.config_defaults | `Catalog.config_defaults` field; merged below site `config:` so catalogs ship domain defaults | **Done** (2026-06-30) — 2 tests; **265 total workflow_engine tests pass** |
 | 3H | Mining example catalog + smoke test (proves engine is domain-neutral) | **Done** (2026-06-30) — `examples/mining_haul.yaml` + 4 tests |
 | **B (3E.freight + 3F via adapter)** | `TerminalAdapter` pure-proxy class + `lifts/catalog.yaml` with 1-step `python:` graphs + `lifts/python_helpers.py` + 3 site files + parity harness | **Done** (2026-06-30) — 3 parity tests; **268 total tests pass**; see §8.B |
-| **CHECKPOINT** | Git tag `phase3-b-shim`. Two freight entry points coexist (`run_terminal_simulation` legacy + `run_site` via adapter); banner in `python/altrios/lifts/README.md` points new code at `run_site`. | **Ready** (tag not yet pushed) |
+| **CHECKPOINT** | Git tag `phase3-b-shim` marks the historical state where two freight entry points coexisted (`run_terminal_simulation` legacy + `run_site` via adapter). Superseded by Phase A: the legacy entry point and the adapter were deleted; `run_site` is now the sole freight entry point. | **Superseded** (see §8.A) |
 | **A (3G full refactor)** | Migrate module globals to `OutputCollector`, refactor helper signatures, decompose freight workflows into fine-grained YAML graphs using the 19 primitives, delete `train_flow.py` / `drayage_flow.py` / `vessel_flow.py`, delete `TerminalAdapter`, delete `TerminalMode` + `run_terminal_simulation`, migrate demos and verify-scripts | **Done** (2026-06-30) — see §8.A. **268 total tests pass.** `terminal_adapter.py`, the four legacy flow modules, `terminal_sim.py`, the legacy `run_terminal_simulation` / `TerminalMode` / mode registry, and the Phase-1/Phase-2 verify scripts are all deleted. Demos and the smoke script drive `run_site` directly. |
 
 ---
@@ -102,28 +102,40 @@ python/altrios/                            # engine + freight catalog
 │   ├── __init__.py
 │   ├── resources.py                       # ResourceSpec + merge/build helpers
 │   ├── entities.py                        # Entity + EntityKindSpec dataclasses
-│   ├── steps.py                           # Step + StepGraph dataclasses
-│   ├── interpreter.py                     # SimPy generator built from a graph
+│   ├── interpreter.py                     # Step / StepGraph / ExecutionContext;
+│   │                                      # SimPy generator built from a graph
 │   ├── expressions.py                     # asteval-based {entity.x} resolver
-│   ├── distributions.py                   # constant / uniform / lognormal / ...
-│   ├── yaml_loader.py                     # PyYAML loader + !include + schema
+│   ├── distributions.py                   # Constant / Uniform / Poisson
+│   ├── yaml_loader.py                     # PyYAML loader + !include
+│   ├── yaml_expressions.py                # "{expr}" detection / recursive walk
+│   ├── schemas.py                         # pydantic models (Catalog, Site, ...)
+│   ├── loader.py                          # load_catalog / load_site / extends:
+│   ├── layout.py                          # Layout.distance / Layout.node
 │   ├── registry.py                        # @register'd python: callables
-│   └── output.py                          # resource_log + entity_data assembly
+│   ├── output.py                          # OutputCollector (3 row-lists)
+│   ├── runner.py                          # run_site canonical entry point
+│   └── tests/
 │
 └── lifts/                                 # FREIGHT CATALOG
-    ├── catalog/                           # the actual YAML files
-    │   ├── truck_rail.yaml
-    │   ├── rail_vessel.yaml
-    │   ├── vessel_truck.yaml
-    │   └── common/
-    │       ├── equipment.yaml             # 14 default ResourceSpec defs
-    │       ├── consumption_rates.yaml
-    │       ├── distributions.yaml         # named distribution presets
-    │       └── schedule_mappings.yaml
-    ├── python_helpers.py                  # @register'd freight callables
-    └── demos/sites/                       # example Site files for the demo
-        ├── single_track_demo.yaml
-        └── double_track_demo.yaml
+    ├── catalog.yaml                       # single catalog file (3 modes:
+    │                                      # truck_rail / rail_vessel / vessel_truck)
+    ├── specs.py                           # ResourceSpec instances + mode bundles
+    ├── python_helpers.py                  # @register'd freight callables + assemble_outputs
+    ├── classes.py                         # freight dataclasses (Container, Truck, ...)
+    ├── consumption.py                     # CO2/fuel accounting helpers
+    ├── distances.py                       # Manhattan / hostler / triangular travel
+    ├── utilities.py                       # logging, schedules, event recording
+    ├── yard_flow.py                       # stack_in / stack_out / yard_tractor_haul
+    ├── resources/config.yaml              # freight config defaults
+    ├── sites/                             # site files exercised by demos
+    │   ├── allouez_truck_rail.yaml
+    │   ├── allouez_rail_vessel.yaml
+    │   └── allouez_vessel_truck.yaml
+    ├── demos/                             # per-mode demo scripts
+    │   ├── truck_rail_demo.py
+    │   ├── rail_vessel_demo.py
+    │   └── vessel_truck_demo.py
+    └── tests/                             # freight smoke + parity tests
 ```
 
 User-provided catalogs and sites can live anywhere on disk.
@@ -167,7 +179,8 @@ Only **two file types** (catalog and site) exist in YAML. The third tier
 
 ### 4.1 `ResourceSpec` (extends existing, adds `role`)
 
-Already exists in Phase 2 (`altrios/lifts/resources_decl.py`). Phase 3A.1
+Lives at `altrios/workflow_engine/resources.py` (moved from
+`altrios/lifts/resources_decl.py` in Phase 3A.3). Phase 3A.1
 adds a required **`role`** string field:
 
 | Role | Used for | Logged how |
@@ -271,7 +284,7 @@ are evaluated by **asteval** with a constrained symbol table:
 |---|---|
 | `entity` | The current entity's `id`, `kind`, and `attrs.*` |
 | `bindings` | Local variables set by earlier `bind` / `request` steps |
-| `state` | Live `TerminalState` view: `state.container_stack.level`, etc. |
+| `state` | Live engine state (a `SimpleNamespace` built by `build_state_from_specs`): pools like `state.container_stack`, `state.tracks`, and any per-run attributes attached by the catalog (e.g. `state.distances`). |
 | `config` | Scalars from the site file's `config:` block |
 | `layout` | Site coordinates and Manhattan distances |
 | `env` | SimPy `env.now` |
@@ -282,7 +295,7 @@ beyond this uses a `python:` step.
 
 ---
 
-## 5. Step primitives (v1 — 17 primitives)
+## 5. Step primitives (v1 — 19 primitives)
 
 Locked-down primitive set for Phase 3B. Catalogs author workflows
 exclusively from these primitives plus the `python:` escape hatch.
@@ -308,9 +321,6 @@ exclusively from these primitives plus the `python:` escape hatch.
 | `python` | `call` (dotted name), `args` (expr dict), `bind?` | Escape hatch — invoke a registered Python helper |
 | `assert` | `condition`, `message?` | Invariant check |
 | `log` | `level`, `message` (template) | Diagnostic |
-
-(That's actually 19 — `assert` and `log` were added as utility primitives.
-v1 implements all of them.)
 
 ---
 
@@ -376,9 +386,11 @@ distribution-agnostic so this is purely an `ExecutionContext` /
 
 ### 3A — Engine schema, extraction, renames (in progress)
 
-Pure refactor; no new behavior visible to existing demos. Each sub-step is
-verifiable independently via the Phase 1 + Phase 2 verification matrices
-(`scripts/verify_lifts_phase1.py`, `scripts/verify_lifts_phase2.py`).
+Pure refactor; no new behavior visible to existing demos. Each sub-step was
+verified independently against the Phase 1 + Phase 2 verification matrices
+(`scripts/verify_lifts_phase1.py`, `scripts/verify_lifts_phase2.py` — both
+removed in A.12 once their coverage was absorbed into
+`tests/test_freight_parity.py`).
 
 | Sub-step | Description |
 |---|---|
@@ -553,6 +565,7 @@ table and the implementation.
 | 17 | **Demo migration policy** = rewrite demos to use `run_site()` | 2026-06-29 | After 3G, the YAML scenario IS the contract. No transitional shims. |
 | 18 | **Schema versioning** = mandatory `meta.schema_version: 1` on every YAML | 2026-06-29 | Enables future migrations. v1 is the only version in Phase 3. |
 | D7 | **Freight YAML-translation strategy** = B then A | 2026-06-30 | The `run_site` runner expects state built by `build_state_from_specs` (a `SimpleNamespace` of pools). The existing freight helpers (`process_train_arrival`, `_unload_one_ic`, `yard_tractor_haul`, ...) expect a `Terminal` object with `terminal.state.tracks`, `terminal.config`, `terminal.log()`, `terminal.CRANE_MOVE_DEV_TIME`, and module-level `container_events` / `consumption_records` lists. **Chosen path:** ship **(B) Terminal-adapter shim** first — 1-step `python:` YAML graphs that call existing generators unchanged — then immediately follow with **(A) full refactor**: migrate module globals to `OutputCollector`, refactor helper signatures to `(env, state, config, output)`, decompose freight workflows into fine-grained YAML using the 19 primitives, delete the Python flow modules and the adapter. Discipline rules: B's adapter is a pure attribute proxy with no logic; A is scheduled before B merges; the parity test gates both PRs. See §8.B and §8.A for sub-step detail. |
+| D10b | **Override of Decision 10** — engine output schema is schema-loose, not column-mapped | post-A.13 | Phase 3B's `OutputCollector` and `record_event` / `record_resource_event` / `record_consumption` primitives accept arbitrary row dicts; the engine writes whatever the YAML step declares plus envelope columns. No `entity_id_column` catalog field exists. Per-catalog wide-table assembly (e.g. pivoting `event_log` into `container_data`) is done in the catalog's Python helpers (for freight: `lifts/python_helpers.py::assemble_outputs`). The `vehicle_log` → `resource_log` rename and the `role` / `quantity` columns from Decision 10 are still in force; only the `container_id` → `entity_id_column` rename was abandoned in favor of catalog-side assembly. |
 
 ---
 
