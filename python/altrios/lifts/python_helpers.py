@@ -31,11 +31,12 @@ from typing import Any, Iterable, Mapping
 import polars as pl
 import simpy
 
-from altrios.lifts import consumption, drayage_flow, train_flow, utilities, vessel_flow
-from altrios.lifts.classes import container, loggingLevel
+from altrios.lifts import consumption, utilities
+from altrios.lifts.classes import container, loggingLevel, truck
 from altrios.lifts.consumption import (
     CO2_KG_PER_UNIT,
     _record_stack_lift_consumption,
+    _record_trip_consumption,
     consumption_records,
 )
 from altrios.lifts.specs import (
@@ -354,50 +355,149 @@ def _synthesize_drayage_from_trains(
     return out
 
 
-# ---- arrival wrappers ----------------------------------------------
+# ---- (Phase A.8a) Inlined private helpers ------------------------------
+#
+# These helpers used to live in ``train_flow.py`` / ``drayage_flow.py`` /
+# ``vessel_flow.py`` and were called by the legacy
+# ``freight.process_X_arrival`` wrappers, which were removed once the
+# YAML graphs decomposed train, drayage, and vessel arrivals into
+# fine-grained steps (Phases A.4/A.5/A.6). The remaining bodies below
+# are still referenced by the decomposed graphs through this module:
+#
+#   * ``_truck_factory`` — eager truck construction inside
+#     ``setup_drayage_arrival`` (preserves legacy RNG draw position).
+#   * ``_gate_in`` / ``_gate_out`` / ``_drayage_zone_travel`` —
+#     composed by ``drayage_dropoff`` / ``drayage_pickup``.
+#   * ``_sts_unload_worker`` / ``_sts_load_worker`` — spawned per STS
+#     crane in ``vessel_drain_unload`` / ``vessel_drain_load``.
 
 
-def _entry_from_entity(entity) -> dict:
-    """Reconstruct the entry-dict shape the legacy generators expect.
-
-    The engine flattens an :class:`Entity` into a read-only
-    SimpleNamespace before passing it to expressions (merging
-    ``entity.attrs`` with top-level ``id``/``kind`` keys). The legacy
-    generators receive a plain dict, so we ``vars()`` the view. Extra
-    keys (``id``, ``kind``) are harmless — the generators read only
-    the fields they know about."""
-    if hasattr(entity, "attrs") and isinstance(getattr(entity, "attrs"), Mapping):
-        return dict(entity.attrs)
-    return dict(vars(entity))
+def _truck_factory(truck_id: int, terminal):
+    """Build one drayage truck object respecting the configured
+    diesel/electric mix. Used because the drayage schedule does not
+    pre-allocate truck objects."""
+    diesel = random.random() < terminal.TRUCK_DIESEL_PERCENTAGE
+    return truck(
+        type="Diesel" if diesel else "Electric",
+        id=truck_id,
+        train_id=0,
+    )
 
 
-@register("freight.process_train_arrival")
-def process_train_arrival_yaml(*, env, state, entity):
-    """Adapt the engine's ``python:`` calling convention onto
-    :func:`train_flow.process_train_arrival`.
-
-    The freight generator yields SimPy events; the engine's ``python``
-    handler ``yield from``s any generator result, so simulated time
-    inside the generator blocks the workflow correctly. Returns
-    ``None`` (no value to bind)."""
-    entry = _entry_from_entity(entity)
-    yield from train_flow.process_train_arrival(env, state.terminal_adapter, entry)
+def _drayage_zone_travel(env, terminal, label: str):
+    """Placeholder timed move between gate and stack zone."""
+    travel_time = terminal.TRUCK_INGATE_TIME + random.uniform(
+        0, terminal.TRUCK_INGATE_TIME_DEV
+    )
+    yield env.timeout(travel_time)
+    return travel_time
 
 
-@register("freight.process_drayage_arrival")
-def process_drayage_arrival_yaml(*, env, state, entity):
-    """Adapt onto :func:`drayage_flow.process_drayage_arrival`. See
-    :func:`process_train_arrival_yaml` for the calling convention."""
-    entry = _entry_from_entity(entity)
-    yield from drayage_flow.process_drayage_arrival(env, state.terminal_adapter, entry)
+def _gate_in(env, terminal, truck_obj):
+    req = terminal.state.in_gates.request()
+    yield req
+    travel_time = terminal.TRUCK_INGATE_TIME + random.uniform(
+        0, terminal.TRUCK_INGATE_TIME_DEV
+    )
+    yield env.timeout(travel_time)
+    terminal.state.in_gates.release(req)
+    utilities.record_container_event(
+        terminal, f"DrayageTruck-{truck_obj.id}", "drayage_gate_in", env.now,
+    )
+    _record_trip_consumption(
+        getattr(terminal, "output", None),
+        terminal, truck_obj, "truck", "loaded",
+        getattr(truck_obj, "train_id", ""), "", "drayage_gate_in",
+        travel_time, env.now,
+    )
 
 
-@register("freight.process_vessel_arrival")
-def process_vessel_arrival_yaml(*, env, state, entity):
-    """Adapt onto :func:`vessel_flow.process_vessel_arrival`. See
-    :func:`process_train_arrival_yaml` for the calling convention."""
-    entry = _entry_from_entity(entity)
-    yield from vessel_flow.process_vessel_arrival(env, state.terminal_adapter, entry)
+def _gate_out(env, terminal, truck_obj, container_obj=None):
+    req = terminal.state.out_gates.request()
+    yield req
+    travel_time = terminal.TRUCK_OUTGATE_TIME + random.uniform(
+        0, terminal.TRUCK_OUTGATE_TIME_DEV
+    )
+    yield env.timeout(travel_time)
+    terminal.state.out_gates.release(req)
+    container_label = (
+        container_obj.to_string() if container_obj is not None
+        else f"DrayageTruck-{truck_obj.id}"
+    )
+    utilities.record_container_event(
+        terminal, container_label, "drayage_gate_out", env.now,
+    )
+    _record_trip_consumption(
+        getattr(terminal, "output", None),
+        terminal, truck_obj, "truck",
+        "loaded" if container_obj is not None else "empty",
+        getattr(truck_obj, "train_id", ""),
+        container_obj.to_string() if container_obj is not None else "",
+        "drayage_gate_out",
+        travel_time, env.now,
+    )
+
+
+def _sts_unload_worker(env, terminal, berth_id: int, vessel_id: int,
+                       ic_queue: simpy.Store):
+    """One STS crane drains ICs from ``ic_queue`` until empty."""
+    state = terminal.state
+    sts_pool = state.sts_cranes_by_berth[berth_id]
+    sts_obj = yield sts_pool.get()
+    try:
+        while ic_queue.items:
+            ic = yield ic_queue.get()
+            lift_time = (
+                terminal.CONTAINERS_PER_CRANE_MOVE_MEAN
+                + random.uniform(0, terminal.CRANE_MOVE_DEV_TIME)
+            )
+            yield env.timeout(lift_time)
+            utilities.record_container_event(
+                terminal, ic, "sts_unload", env.now,
+            )
+            _record_stack_lift_consumption(
+                getattr(terminal, "output", None),
+                terminal, sts_obj, "sts_crane", status="loaded",
+                train_id=vessel_id,
+                container_id=ic.to_string(),
+                event_type="sts_unload",
+                env_now=env.now, zone="berth",
+            )
+            yield env.process(stack_in(env, terminal, ic, source_chassis=None))
+    finally:
+        yield sts_pool.put(sts_obj)
+
+
+def _sts_load_worker(env, terminal, berth_id: int, vessel_id: int,
+                     oc_remaining: list):
+    """One STS crane loads OCs onto the vessel until ``oc_remaining[0]``
+    decrements to zero. ``oc_remaining`` is a single-element list used
+    as a mutable counter shared across parallel STS workers."""
+    state = terminal.state
+    sts_pool = state.sts_cranes_by_berth[berth_id]
+    sts_obj = yield sts_pool.get()
+    try:
+        while oc_remaining[0] > 0:
+            oc_remaining[0] -= 1
+            oc = yield env.process(stack_out(env, terminal, container_obj=None))
+            lift_time = (
+                terminal.CONTAINERS_PER_CRANE_MOVE_MEAN
+                + random.uniform(0, terminal.CRANE_MOVE_DEV_TIME)
+            )
+            yield env.timeout(lift_time)
+            utilities.record_container_event(
+                terminal, oc, "sts_load", env.now,
+            )
+            _record_stack_lift_consumption(
+                getattr(terminal, "output", None),
+                terminal, sts_obj, "sts_crane", status="loaded",
+                train_id=vessel_id,
+                container_id=oc.to_string(),
+                event_type="sts_load",
+                env_now=env.now, zone="berth",
+            )
+    finally:
+        yield sts_pool.put(sts_obj)
 
 
 # ---- train-arrival decomposition (Phase A.4) -----------------------
@@ -589,7 +689,7 @@ def setup_drayage_arrival(*, env, entity, terminal) -> SimpleNamespace:
     action = str(attrs["action"])
     arrival_time = float(attrs.get("arrival_time") or 0.0)
     container_id = attrs.get("container_id")
-    truck_obj = drayage_flow._truck_factory(truck_id, terminal)
+    truck_obj = _truck_factory(truck_id, terminal)
     return SimpleNamespace(
         truck_id=truck_id,
         truck_obj=truck_obj,
@@ -611,10 +711,10 @@ def drayage_dropoff(*, env, terminal, meta):
             terminal, oc, f"external_id:{meta.container_id}", env.now,
         )
     utilities.record_container_event(terminal, oc, "drayage_arrival", env.now)
-    yield env.process(drayage_flow._gate_in(env, terminal, meta.truck_obj))
-    yield env.process(drayage_flow._drayage_zone_travel(env, terminal, "to_stack"))
+    yield env.process(_gate_in(env, terminal, meta.truck_obj))
+    yield env.process(_drayage_zone_travel(env, terminal, "to_stack"))
     yield env.process(stack_in(env, terminal, oc, source_chassis=None))
-    yield env.process(drayage_flow._gate_out(env, terminal, meta.truck_obj, container_obj=None))
+    yield env.process(_gate_out(env, terminal, meta.truck_obj, container_obj=None))
 
 
 @register("freight.drayage_pickup")
@@ -626,10 +726,10 @@ def drayage_pickup(*, env, terminal, meta):
     utilities.record_container_event(
         terminal, f"DrayageTruck-{meta.truck_id}", "drayage_arrival", env.now,
     )
-    yield env.process(drayage_flow._gate_in(env, terminal, meta.truck_obj))
-    yield env.process(drayage_flow._drayage_zone_travel(env, terminal, "to_stack"))
+    yield env.process(_gate_in(env, terminal, meta.truck_obj))
+    yield env.process(_drayage_zone_travel(env, terminal, "to_stack"))
     ic = yield env.process(stack_out(env, terminal, container_obj=None))
-    yield env.process(drayage_flow._gate_out(env, terminal, meta.truck_obj, container_obj=ic))
+    yield env.process(_gate_out(env, terminal, meta.truck_obj, container_obj=ic))
 
 
 # ---- A.6: vessel arrival decomposition --------------------------------
@@ -701,7 +801,7 @@ def vessel_drain_unload(*, env, terminal, meta, berth_ctx):
     :func:`vessel_flow.process_vessel_arrival`."""
     procs = [
         env.process(
-            vessel_flow._sts_unload_worker(
+            _sts_unload_worker(
                 env, terminal, berth_ctx.berth_id, meta.vessel_id,
                 berth_ctx.ic_queue,
             )
@@ -727,7 +827,7 @@ def vessel_drain_load(*, env, terminal, meta, berth_ctx):
         yield  # unreachable; keeps this a generator for the engine
     procs = [
         env.process(
-            vessel_flow._sts_load_worker(
+            _sts_load_worker(
                 env, terminal, berth_ctx.berth_id, meta.vessel_id,
                 berth_ctx.oc_remaining,
             )
