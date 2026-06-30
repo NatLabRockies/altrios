@@ -43,11 +43,11 @@ if train_rows.height > 0:
     print(f"min train_depart: {mn:.2f}")
 
 energy_by_resource = vl.group_by("resource_type").agg(
-    pl.col("energy_consumption(gal_or_kWh)").sum().alias("total_energy"),
+    pl.col("consumption_value").sum().alias("total_energy"),
 ).sort("resource_type")
 print("\nEnergy by resource_type:")
 for row in energy_by_resource.iter_rows(named=True):
     print(f"  {row['resource_type']:>22}: {row['total_energy']:10.2f}")
 
-print(f"\ntotal energy: {vl['energy_consumption(gal_or_kWh)'].sum():.2f}")
+print(f"\ntotal energy: {vl['consumption_value'].sum():.2f}")
 print(f"total emissions: {vl['emissions(kgCO2)'].sum():.2f}")

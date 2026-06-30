@@ -1,15 +1,21 @@
-"""Declarative SimPy resource specs for terminal modes.
+"""Declarative SimPy resource specs for workflow modes.
 
-A ``ResourceSpec`` describes one SimPy primitive (``Store``, ``Resource``,
-or ``Container``). Modes declare the specs they need; the dispatcher unions
-specs from all active modes, dedups by name (via :func:`merge_specs`),
-validates agreement on kind / capacity / partition_by, and asks
-:func:`build_state_from_specs` to instantiate the primitives.
+A :class:`ResourceSpec` describes one SimPy primitive (``Store``,
+``Resource``, or ``Container``). Modes declare the specs they need; the
+dispatcher unions specs from all active modes, dedups by name (via
+:func:`merge_specs`), validates agreement on kind / capacity /
+partition_by / role, and asks :func:`build_state_from_specs` to
+instantiate the primitives.
 
-Cross-mode sharing emerges from shared names — there is no ``private |
-shared`` flag. If two modes both declare a spec named ``"main_stack_rtgs"``,
-exactly one SimPy primitive is created and both modes refer to it through
-the same attribute on ``TerminalState``.
+Cross-mode sharing emerges from shared names — there is no
+``private | shared`` flag. If two modes both declare a spec named
+``"main_stack_rtgs"``, exactly one SimPy primitive is created and both
+modes refer to it through the same attribute on ``TerminalState``.
+
+This module lives in :mod:`altrios.workflow_engine` and knows nothing
+about freight, mining, or any other domain. Catalogs define
+domain-specific :class:`ResourceSpec` instances (e.g. ``TRACKS``,
+``STS_CRANES_BY_BERTH``) referencing the engine-level dataclass.
 """
 from __future__ import annotations
 
@@ -25,6 +31,17 @@ ItemFactory = Callable[[Mapping[str, Any], Mapping[str, Any]], Iterable[Any]]
 PartitionKeys = Callable[[Mapping[str, Any], Mapping[str, Any]], Iterable[Any]]
 
 
+# Conventional role values for ResourceSpec.role. Catalogs are free to
+# introduce additional role strings; the engine does not enforce
+# membership, but tooling (validation, default output columns,
+# documentation) understands these three.
+KNOWN_ROLES: frozenset[str] = frozenset({
+    "equipment",         # cranes, hostlers, yard tractors, chassis — actors that perform work
+    "infrastructure",    # tracks, berths, gate lanes, parking slots — capacity-limited spatial locations
+    "storage",           # container stack — holds entities being processed
+})
+
+
 @dataclass(frozen=True)
 class ResourceSpec:
     """Declarative description of one SimPy primitive.
@@ -37,6 +54,15 @@ class ResourceSpec:
     kind
         SimPy class to instantiate: ``"Store"``, ``"Resource"``, or
         ``"Container"``.
+    role
+        Conceptual category for tooling — typically one of
+        ``"equipment"``, ``"infrastructure"``, or ``"storage"`` (see
+        :data:`KNOWN_ROLES`). Catalogs may use additional strings; the
+        engine does not enforce membership. The role drives default
+        output-schema columns, load-time validation of consumption-rate
+        attachment, and human-facing error/documentation messages, but
+        **does not** affect simulation behavior — all roles are still
+        requested/released identically.
     capacity
         Either an int or a callable ``(config, schedules) -> int``.
     partition_by
@@ -51,6 +77,7 @@ class ResourceSpec:
 
     name: str
     kind: str
+    role: str
     capacity: CapacitySpec = 1
     partition_by: Optional[PartitionKeys] = None
     init_items: Optional[ItemFactory] = None
@@ -61,6 +88,12 @@ class ResourceSpec:
                 f"ResourceSpec(name={self.name!r}).kind must be one of "
                 f"{list(_SIMPY_CLASSES)}; got {self.kind!r}"
             )
+        if not isinstance(self.role, str) or not self.role:
+            raise ValueError(
+                f"ResourceSpec(name={self.name!r}).role must be a non-empty "
+                f"string; got {self.role!r}. Conventional values are "
+                f"{sorted(KNOWN_ROLES)}, but catalogs may use other strings."
+            )
 
 
 @dataclass(frozen=True)
@@ -69,7 +102,7 @@ class EventSpec:
 
     Phase 1 implementations still create events lazily inside arrival
     generators; ``EventSpec`` exists so modes can advertise their event
-    surface for diagnostics and future Phase 2 introspection.
+    surface for diagnostics and future Phase 3B+ introspection.
     """
 
     name: str
@@ -128,10 +161,10 @@ def merge_specs(
 ) -> dict[str, ResourceSpec]:
     """Union ``ResourceSpec`` lists across active modes; assert agreement.
 
-    Two specs agree iff they have the same ``kind``, identical
-    ``partition_by``/``init_items`` callables (compared by object identity),
-    and equal ``capacity``. Raise ``ValueError`` on disagreement so the
-    caller knows which two modes conflict.
+    Two specs agree iff they have the same ``kind``, the same ``role``,
+    identical ``partition_by``/``init_items`` callables (compared by
+    object identity), and equal ``capacity``. Raise ``ValueError`` on
+    disagreement so the caller knows which two modes conflict.
     """
     merged: dict[str, ResourceSpec] = {}
     contributors: dict[str, list[str]] = {}
@@ -144,6 +177,7 @@ def merge_specs(
                 continue
             if (
                 existing.kind != spec.kind
+                or existing.role != spec.role
                 or existing.partition_by is not spec.partition_by
                 or existing.init_items is not spec.init_items
                 or existing.capacity != spec.capacity

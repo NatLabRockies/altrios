@@ -22,7 +22,7 @@ from typing import Any
 
 from altrios.lifts import utilities
 from altrios.lifts.classes import container, loggingLevel
-from altrios.lifts.energy_use import _record_stack_lift_energy
+from altrios.lifts.consumption import _record_stack_lift_consumption
 from altrios.lifts.yard_flow import stack_in, stack_out, yard_tractor_haul
 
 
@@ -48,7 +48,7 @@ def _unload_one_ic(
         utilities.record_container_event(
             terminal, ic, "rail_track_rtg_unload", env.now,
         )
-        _record_stack_lift_energy(
+        _record_stack_lift_consumption(
             terminal, rtg_obj, "rail_track_rtg", status="loaded",
             train_id=train_id, container_id=ic.to_string(),
             event_type="rail_track_rtg_unload", env_now=env.now,
@@ -103,7 +103,7 @@ def _load_one_oc(
         utilities.record_container_event(
             terminal, oc, "rail_track_rtg_load", env.now,
         )
-        _record_stack_lift_energy(
+        _record_stack_lift_consumption(
             terminal, rtg_obj, "rail_track_rtg", status="loaded",
             train_id=train_id, container_id=oc.to_string(),
             event_type="rail_track_rtg_load", env_now=env.now,

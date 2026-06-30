@@ -567,8 +567,8 @@ def record_container_event(terminal, container, event_type, timestamp):
     terminal.state.container_events.append((container_string, event_type, timestamp))
 
 
-def compute_energy_use(terminal, status: str, move: str, vehicle: str, energy_type: str, travel_time: float) -> float:
-    """Return the per-event energy use for one resource action.
+def compute_consumption(terminal, status: str, move: str, vehicle: str, energy_type: str, travel_time: float) -> float:
+    """Return the per-event consumption for one resource action.
 
     The returned value is in the native unit of the configured
     ``*_consumption`` block: gallons for Diesel/Hybrid, kWh for Electric.
@@ -608,7 +608,7 @@ def compute_energy_use(terminal, status: str, move: str, vehicle: str, energy_ty
         primary = f"{vehicle}_{status}"
         fallback = f"crane_{status}"
         unit = _lookup("load_consumption", primary, fallback)
-        energy_use = unit
+        consumption = unit
 
     # --- trip consumption (unit: hr × travel_time) ---
     elif move == "trip":
@@ -618,22 +618,23 @@ def compute_energy_use(terminal, status: str, move: str, vehicle: str, energy_ty
             f"truck_{status}" if vehicle == "truck" else f"hostler_{status}"
         )
         unit = _lookup("trip_consumption", primary, fallback)
-        energy_use = unit * travel_time
+        consumption = unit * travel_time
 
     # --- side pick consumption (unit: per lift) ---
     elif move == "side":
         unit = cfg["side_pick_consumption"]["side"][energy_type]
-        energy_use = unit
+        consumption = unit
 
     else:
         raise ValueError(f"Unsupported move type '{move}' for vehicle '{vehicle}'.")
 
-    return energy_use
+    return consumption
 
 
-def record_energy_use(energy_use_records: list, vehicle_type: str, fuel_type: str, resource_id: str, track_id: str, train_id: str, container_id: str, event_type: str, zone: str, energy_value: float, travel_time: float, env_now: float) -> None:
-    energy_use_records.append({
+def record_consumption(consumption_records: list, vehicle_type: str, fuel_type: str, resource_id: str, track_id: str, train_id: str, container_id: str, event_type: str, zone: str, consumption_value: float, travel_time: float, env_now: float, role: str, quantity: str = "energy") -> None:
+    consumption_records.append({
         "resource_type": vehicle_type.lower(),
+        "role": role,
         "fuel_type": fuel_type,
         "resource_id": str(resource_id),
         "track_id":str(track_id),
@@ -641,7 +642,8 @@ def record_energy_use(energy_use_records: list, vehicle_type: str, fuel_type: st
         "container_id": str(container_id),
         "event_type": event_type,
         "zone": zone,
-        "energy_consumption(gal_or_kWh)": float(energy_value),
+        "quantity": quantity,
+        "consumption_value": float(consumption_value),
         "load/travel_time(hr)": float(travel_time),
         "record_timestamp": float(env_now),
     })

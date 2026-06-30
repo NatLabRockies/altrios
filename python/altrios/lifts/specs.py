@@ -22,7 +22,7 @@ from altrios.lifts.classes import (
     top_pick,
     yard_tractor,
 )
-from altrios.lifts.resources_decl import ResourceSpec
+from altrios.workflow_engine import ResourceSpec
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +65,7 @@ def _cranes_per_track(config: Mapping[str, Any], track_id: int) -> int:
 TRACKS = ResourceSpec(
     name="tracks",
     kind="Store",
+    role="infrastructure",
     capacity=lambda c, s: _yard_cfg(c).get("track_number", 5),
     init_items=lambda c, s: list(
         range(1, _yard_cfg(c).get("track_number", 5) + 1)
@@ -74,12 +75,14 @@ TRACKS = ResourceSpec(
 IN_GATES = ResourceSpec(
     name="in_gates",
     kind="Resource",
+    role="infrastructure",
     capacity=lambda c, s: _gates_cfg(c).get("in_gate_numbers", 3),
 )
 
 OUT_GATES = ResourceSpec(
     name="out_gates",
     kind="Resource",
+    role="infrastructure",
     capacity=lambda c, s: _gates_cfg(c).get("out_gate_numbers", 3),
 )
 
@@ -88,6 +91,7 @@ OUT_GATES = ResourceSpec(
 RAIL_TRACK_RTGS_BY_TRACK = ResourceSpec(
     name="rail_track_rtgs_by_track",
     kind="Store",
+    role="equipment",
     capacity=lambda c, s: _cranes_per_track(c, s["_partition_key"]),
     partition_by=lambda c, s: range(1, _yard_cfg(c).get("track_number", 5) + 1),
     init_items=lambda c, s: [
@@ -104,12 +108,14 @@ RAIL_TRACK_RTGS_BY_TRACK = ResourceSpec(
 BERTHS = ResourceSpec(
     name="berths",
     kind="Resource",
+    role="infrastructure",
     capacity=lambda c, s: _vessel_cfg(c).get("berth_number", 2),
 )
 
 STS_CRANES_BY_BERTH = ResourceSpec(
     name="sts_cranes_by_berth",
     kind="Store",
+    role="equipment",
     capacity=lambda c, s: _vessel_cfg(c).get("sts_cranes_per_berth", 2),
     partition_by=lambda c, s: range(1, _vessel_cfg(c).get("berth_number", 2) + 1),
     init_items=lambda c, s: [
@@ -127,6 +133,7 @@ STS_CRANES_BY_BERTH = ResourceSpec(
 MAIN_STACK_RTGS = ResourceSpec(
     name="main_stack_rtgs",
     kind="Store",
+    role="equipment",
     capacity=lambda c, s: _yard_stack_cfg(c).get("main_stack_rtg_count", 6),
     init_items=lambda c, s: [
         rtg(type="Diesel", id=i, pool="main_stack")
@@ -137,6 +144,7 @@ MAIN_STACK_RTGS = ResourceSpec(
 TOP_PICKS = ResourceSpec(
     name="top_picks",
     kind="Store",
+    role="equipment",
     capacity=lambda c, s: _yard_stack_cfg(c).get("top_pick_count", 2),
     init_items=lambda c, s: [
         top_pick(type="Diesel", id=i, safety_car_id=i)
@@ -147,12 +155,14 @@ TOP_PICKS = ResourceSpec(
 CONTAINER_STACK = ResourceSpec(
     name="container_stack",
     kind="Store",
+    role="storage",
     capacity=lambda c, s: _yard_stack_cfg(c).get("stack_capacity", 500),
 )
 
 PARKING_CHASSIS_SLOTS = ResourceSpec(
     name="parking_chassis_slots",
     kind="Resource",
+    role="infrastructure",
     capacity=lambda c, s: _yard_stack_cfg(c).get("parking_chassis_slot_count", 30),
 )
 
@@ -163,6 +173,7 @@ PARKING_CHASSIS_SLOTS = ResourceSpec(
 MAIN_YARD_TRACTORS = ResourceSpec(
     name="main_yard_tractors",
     kind="Store",
+    role="equipment",
     capacity=lambda c, s: _yard_stack_cfg(c).get("main_yard_tractor_count", 12),
     init_items=lambda c, s: [
         yard_tractor(type="Diesel", id=i, pool="main")
@@ -173,6 +184,7 @@ MAIN_YARD_TRACTORS = ResourceSpec(
 RAIL_YARD_TRACTORS = ResourceSpec(
     name="rail_yard_tractors",
     kind="Store",
+    role="equipment",
     capacity=lambda c, s: _yard_stack_cfg(c).get("rail_yard_tractor_count", 8),
     init_items=lambda c, s: [
         yard_tractor(type="Diesel", id=i, pool="rail")
@@ -187,6 +199,7 @@ RAIL_YARD_TRACTORS = ResourceSpec(
 TERMINAL_CHASSIS_POOL = ResourceSpec(
     name="terminal_chassis_pool",
     kind="Store",
+    role="equipment",
     capacity=lambda c, s: _yard_stack_cfg(c).get("terminal_chassis_count", 50),
     init_items=lambda c, s: [
         chassis(type="Standard", id=i, pool="terminal")
@@ -197,6 +210,7 @@ TERMINAL_CHASSIS_POOL = ResourceSpec(
 ROAD_CHASSIS_POOL = ResourceSpec(
     name="road_chassis_pool",
     kind="Store",
+    role="equipment",
     capacity=lambda c, s: _yard_stack_cfg(c).get("road_chassis_pool_count", 30),
     init_items=lambda c, s: [
         chassis(type="Standard", id=i, pool="road")

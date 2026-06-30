@@ -39,7 +39,7 @@ from altrios.lifts import run_terminal_simulation, utilities
 TERMINAL = "Allouez"
 
 
-def _print_summary(container_data: pl.DataFrame, vehicle_log: pl.DataFrame) -> None:
+def _print_summary(container_data: pl.DataFrame, resource_log: pl.DataFrame) -> None:
     ic_total = container_data.filter(pl.col("container_id").str.starts_with("IC"))
     oc_total = container_data.filter(pl.col("container_id").str.starts_with("OC"))
     train_rows = container_data.filter(pl.col("container_id").str.starts_with("Train-"))
@@ -57,10 +57,10 @@ def _print_summary(container_data: pl.DataFrame, vehicle_log: pl.DataFrame) -> N
               f"{train_rows['train_depart'].min():.2f} -> "
               f"{train_rows['train_depart'].max():.2f} h")
 
-    if vehicle_log.height > 0:
+    if resource_log.height > 0:
         energy_by_resource = (
-            vehicle_log.group_by("resource_type")
-            .agg(pl.col("energy_consumption(gal_or_kWh)").sum().alias("total"))
+            resource_log.group_by("resource_type")
+            .agg(pl.col("consumption_value").sum().alias("total"))
             .sort("resource_type")
         )
         print()
@@ -68,9 +68,9 @@ def _print_summary(container_data: pl.DataFrame, vehicle_log: pl.DataFrame) -> N
         for row in energy_by_resource.iter_rows(named=True):
             print(f"    {row['resource_type']:>22}: {row['total']:>10.2f}")
         print(f"  total energy     : "
-              f"{vehicle_log['energy_consumption(gal_or_kWh)'].sum():.2f}")
+              f"{resource_log['consumption_value'].sum():.2f}")
         print(f"  total emissions  : "
-              f"{vehicle_log['emissions(kgCO2)'].sum():.2f} kgCO2e")
+              f"{resource_log['emissions(kgCO2)'].sum():.2f} kgCO2e")
 
 
 def main() -> None:
@@ -82,7 +82,7 @@ def main() -> None:
     )
 
     t0 = time.perf_counter()
-    container_data, vehicle_log, _ = run_terminal_simulation(
+    container_data, resource_log, _ = run_terminal_simulation(
         modes=["truck_rail"],
         terminal=TERMINAL,
         inputs={"truck_rail": {"train_consist_plan": consist_plan}},
@@ -90,7 +90,7 @@ def main() -> None:
     elapsed = time.perf_counter() - t0
     print(f"\nLIFTS truck_rail run: {elapsed:.2f} s")
 
-    _print_summary(container_data, vehicle_log)
+    _print_summary(container_data, resource_log)
 
 
 if __name__ == "__main__":

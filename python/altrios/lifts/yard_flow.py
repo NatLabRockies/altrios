@@ -32,7 +32,9 @@ These helpers consume the spec-built ``TerminalState`` attributes
 etc.) defined in :mod:`altrios.lifts.specs`. Energy-use entries are
 recorded with ``resource_type=`` set to the equipment pool name
 (``main_stack_rtg``, ``top_pick``, ``yard_tractor``) and use the per-
-equipment rates in ``energy_use.load_consumption`` / ``trip_consumption``.
+equipment rates in ``energy_use.load_consumption`` / ``trip_consumption``
+(the config block is still keyed ``energy_use`` in the YAML).
+
 """
 from __future__ import annotations
 
@@ -40,9 +42,9 @@ import random
 from typing import TYPE_CHECKING, Any
 
 from altrios.lifts import distances, utilities
-from altrios.lifts.energy_use import (
-    _record_stack_lift_energy,
-    _record_yard_tractor_trip_energy,
+from altrios.lifts.consumption import (
+    _record_stack_lift_consumption,
+    _record_yard_tractor_trip_consumption,
 )
 
 if TYPE_CHECKING:
@@ -126,7 +128,7 @@ def stack_in(env, terminal, container_obj, source_chassis=None):
         utilities.record_container_event(
             terminal, container_obj, "stack_in", env.now,
         )
-        _record_stack_lift_energy(
+        _record_stack_lift_consumption(
             terminal, crane_obj, pool_name, status="loaded",
             train_id=getattr(container_obj, "train_id", ""),
             container_id=container_obj.to_string(),
@@ -174,7 +176,7 @@ def stack_out(env, terminal, container_obj=None, dest_chassis=None):
         utilities.record_container_event(
             terminal, container_obj, "stack_out", env.now,
         )
-        _record_stack_lift_energy(
+        _record_stack_lift_consumption(
             terminal, crane_obj, pool_name, status="loaded",
             train_id=getattr(container_obj, "train_id", ""),
             container_id=container_obj.to_string(),
@@ -219,7 +221,7 @@ def yard_tractor_haul(
         utilities.record_container_event(
             terminal, container_obj, event_label, env.now,
         )
-        _record_yard_tractor_trip_energy(
+        _record_yard_tractor_trip_consumption(
             terminal, tractor, status="loaded",
             train_id=getattr(container_obj, "train_id", ""),
             container_id=container_obj.to_string(),

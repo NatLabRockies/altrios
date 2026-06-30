@@ -37,7 +37,7 @@ from typing import Any
 
 from altrios.lifts import utilities
 from altrios.lifts.classes import container, truck
-from altrios.lifts.energy_use import _record_trip_energy
+from altrios.lifts.consumption import _record_trip_consumption
 from altrios.lifts.yard_flow import stack_in, stack_out
 
 
@@ -75,7 +75,7 @@ def _gate_in(env, terminal, truck_obj):
     utilities.record_container_event(
         terminal, f"DrayageTruck-{truck_obj.id}", "drayage_gate_in", env.now,
     )
-    _record_trip_energy(
+    _record_trip_consumption(
         terminal, truck_obj, "truck", "loaded",
         getattr(truck_obj, "train_id", ""), "", "drayage_gate_in",
         travel_time, env.now,
@@ -97,7 +97,7 @@ def _gate_out(env, terminal, truck_obj, container_obj=None):
     utilities.record_container_event(
         terminal, container_label, "drayage_gate_out", env.now,
     )
-    _record_trip_energy(
+    _record_trip_consumption(
         terminal, truck_obj, "truck",
         "loaded" if container_obj is not None else "empty",
         getattr(truck_obj, "train_id", ""),

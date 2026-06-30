@@ -220,7 +220,7 @@ class TerminalState:
     def __init__(self, env, terminal: "Terminal", resource_specs=None):
         # Local imports keep classes.py free of the spec catalog at module
         # import time (the spec catalog imports from classes.py).
-        from altrios.lifts.resources_decl import build_state_from_specs
+        from altrios.workflow_engine import build_state_from_specs
         from altrios.lifts import specs as spec_catalog
 
         self.env = env

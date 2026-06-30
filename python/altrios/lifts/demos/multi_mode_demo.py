@@ -103,7 +103,7 @@ def _build_vessel_truck_drayage() -> pl.DataFrame:
 
 
 def _print_summary(
-    container_data: pl.DataFrame, vehicle_log: pl.DataFrame, terminal_obj,
+    container_data: pl.DataFrame, resource_log: pl.DataFrame, terminal_obj,
 ) -> None:
     print()
     print("=" * 64)
@@ -137,19 +137,19 @@ def _print_summary(
             print(f"    {label:>30}: {cnt:>6}")
 
     # Energy / emissions totals.
-    if vehicle_log.height > 0:
+    if resource_log.height > 0:
         print()
         print("  energy by resource_type (gal/kWh):")
         for row in (
-            vehicle_log.group_by("resource_type")
-            .agg(pl.col("energy_consumption(gal_or_kWh)").sum().alias("total"))
+            resource_log.group_by("resource_type")
+            .agg(pl.col("consumption_value").sum().alias("total"))
             .sort("resource_type")
             .iter_rows(named=True)
         ):
             print(f"    {row['resource_type']:>22}: {row['total']:>10.2f}")
 
-        total_energy = vehicle_log["energy_consumption(gal_or_kWh)"].sum()
-        total_co2 = vehicle_log["emissions(kgCO2)"].sum()
+        total_energy = resource_log["consumption_value"].sum()
+        total_co2 = resource_log["emissions(kgCO2)"].sum()
         print()
         print(f"  total energy   : {total_energy:>10.2f}")
         print(f"  total emissions: {total_co2:>10.2f} kgCO2e")
@@ -188,7 +188,7 @@ def main() -> None:
     print(f"Drayage trucks (vessel_truck): {drayage.height}")
 
     t0 = time.perf_counter()
-    container_data, vehicle_log, terminal_obj = run_terminal_simulation(
+    container_data, resource_log, terminal_obj = run_terminal_simulation(
         modes=["truck_rail", "rail_vessel", "vessel_truck"],
         terminal=TERMINAL,
         inputs={
@@ -207,7 +207,7 @@ def main() -> None:
     elapsed = time.perf_counter() - t0
     print(f"\nLIFTS multi-mode (3-way) run: {elapsed:.2f} s")
 
-    _print_summary(container_data, vehicle_log, terminal_obj)
+    _print_summary(container_data, resource_log, terminal_obj)
 
 
 if __name__ == "__main__":

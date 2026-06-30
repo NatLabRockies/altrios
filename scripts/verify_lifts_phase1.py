@@ -8,15 +8,15 @@ pass, non-zero on the first failure.
 Verification matrix (Phase-1 scope):
 
   1. All three demos run end-to-end with non-empty ``container_data``
-     and ``vehicle_log``.
+     and ``resource_log``.
   2. Per-mode event coverage: every event_type declared by the mode
-     surfaces in ``vehicle_log.event_type``.
-  3. Equipment usage visible: ``vehicle_log.resource_type`` includes
+     surfaces in ``resource_log.event_type``.
+  3. Equipment usage visible: ``resource_log.resource_type`` includes
      the mode's expected equipment pools.
   4. Dynamic stack-crane routing fires: when both stack RTG and top-pick
-     are referenced, both appear in vehicle_log.
+     are referenced, both appear in resource_log.
   5. Energy / CO2 coverage: no NaN in
-     ``energy_consumption(gal_or_kWh)`` or ``emissions(kgCO2)``.
+     ``consumption_value`` or ``emissions(kgCO2)``.
   6. Functional truck_rail sanity: IC/OC counts match the consist plan
      totals.
   8. Dispatcher mode-agnostic: source-level grep against
@@ -52,7 +52,7 @@ TERMINAL = "Allouez"
 
 # ---------------------------------------------------------------------------
 # Per-mode expected equipment pools (a subset of resource_type values that
-# MUST appear in vehicle_log if the mode is exercised end-to-end).
+# MUST appear in resource_log if the mode is exercised end-to-end).
 # Not exhaustive — top_pick may legitimately not fire on light load — but
 # anchors check #3 (equipment usage visible).
 # ---------------------------------------------------------------------------
@@ -76,7 +76,7 @@ def _failed(label: str, detail: str = "") -> None:
 
 
 # ---------------------------------------------------------------------------
-# Mode runners (return (container_data, vehicle_log, mode_obj))
+# Mode runners (return (container_data, resource_log, mode_obj))
 # ---------------------------------------------------------------------------
 
 def _run_truck_rail():
@@ -159,7 +159,7 @@ def check_nonempty_outputs(mode_name: str, cd: pl.DataFrame, vl: pl.DataFrame) -
     if cd.height == 0:
         _failed(f"{mode_name}: container_data empty")
     if vl.height == 0:
-        _failed(f"{mode_name}: vehicle_log empty")
+        _failed(f"{mode_name}: resource_log empty")
 
 
 def check_event_coverage(mode_name: str, mode_obj, cd: pl.DataFrame) -> None:
@@ -183,7 +183,7 @@ def check_equipment_visible(mode_name: str, vl: pl.DataFrame) -> None:
     missing = expected - actual
     if missing:
         _failed(
-            f"{mode_name}: expected equipment pools missing from vehicle_log",
+            f"{mode_name}: expected equipment pools missing from resource_log",
             f"missing = {sorted(missing)}; actual = {sorted(actual)}",
         )
 
@@ -202,7 +202,7 @@ def check_dynamic_routing(mode_name: str, vl: pl.DataFrame) -> None:
 
 
 def check_energy_co2_coverage(mode_name: str, vl: pl.DataFrame) -> None:
-    energy_nulls = vl["energy_consumption(gal_or_kWh)"].is_null().sum()
+    energy_nulls = vl["consumption_value"].is_null().sum()
     emissions_nulls = vl["emissions(kgCO2)"].is_null().sum()
     if energy_nulls or emissions_nulls:
         _failed(

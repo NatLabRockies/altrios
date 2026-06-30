@@ -41,8 +41,8 @@ import simpy
 from altrios.lifts import distances, specs, utilities
 from altrios.lifts.classes import Terminal, loggingLevel
 from altrios.lifts.drayage_flow import process_drayage_arrival
-from altrios.lifts.energy_use import energy_use_records, CO2_KG_PER_UNIT
-from altrios.lifts.resources_decl import EventSpec, ResourceSpec, merge_specs
+from altrios.lifts.consumption import consumption_records, CO2_KG_PER_UNIT
+from altrios.workflow_engine import EventSpec, ResourceSpec, merge_specs
 from altrios.lifts.train_flow import process_train_arrival
 from altrios.lifts.vessel_flow import process_vessel_arrival
 
@@ -99,8 +99,8 @@ class TerminalMode:
         Optional precompiled regex used by ``post_process`` to extract
         arrival ids from container ids.
     post_process
-        Optional ``(container_data, vehicle_log) -> (container_data,
-        vehicle_log)`` hook for mode-specific dataframe shaping. Receives
+        Optional ``(container_data, resource_log) -> (container_data,
+        resource_log)`` hook for mode-specific dataframe shaping. Receives
         DataFrames whose generic preparation (pivot, sort, backfill) is
         already done.
     """
@@ -184,10 +184,15 @@ def run_terminal_simulation(
         One row per container with arrival/handling/departure timestamps.
         Columns are the union of every active mode's declared
         ``event_types`` (missing columns are backfilled with nulls).
-    vehicle_log
+    resource_log
         One row per resource event (crane/hostler/truck) across all
-        modes, including an ``energy_consumption(gal_or_kWh)`` and
-        ``emissions(kgCO2)`` column.
+        modes. Each row has a ``role`` tag (``equipment`` /
+        ``infrastructure`` / ``storage``, mirroring
+        ``ResourceSpec.role``), a ``quantity`` tag (currently always
+        ``"energy"``; future-proofs the per-row generalization to other
+        consumption quantities), a ``consumption_value`` column carrying
+        the value in the configured native unit, and a coarse
+        ``emissions(kgCO2)`` column for energy rows.
     terminal_obj
         The fully-populated ``Terminal`` used for the simulation. The
         same instance is shared by all active modes; pool primitives on
@@ -203,7 +208,7 @@ def run_terminal_simulation(
     mode_objs = [get_mode(name) for name in modes]
 
     # Reset the module-level energy-use buffer so repeat invocations are clean.
-    energy_use_records.clear()
+    consumption_records.clear()
 
     terminal_config = utilities.load_config(utilities.resources_root() / "config.yaml")
     terminal_layout = distances.get_layout(terminal_config)
@@ -267,16 +272,16 @@ def run_terminal_simulation(
     merged_event_types: Tuple[str, ...] = tuple(dict.fromkeys(
         t for m in mode_objs for t in m.event_types
     ))
-    container_data, vehicle_log = _build_generic_outputs_with_event_types(
+    container_data, resource_log = _build_generic_outputs_with_event_types(
         terminal_obj, merged_event_types,
     )
     for mode_obj in mode_objs:
         if mode_obj.post_process is not None:
-            container_data, vehicle_log = mode_obj.post_process(
-                container_data, vehicle_log,
+            container_data, resource_log = mode_obj.post_process(
+                container_data, resource_log,
             )
 
-    return container_data, vehicle_log, terminal_obj
+    return container_data, resource_log, terminal_obj
 
 
 # ---------------------------------------------------------------------------
@@ -335,10 +340,11 @@ def _build_generic_outputs_with_event_types(
         .select(pl.col("container_id"), pl.exclude("container_id"))
     )
 
-    vehicle_log = pl.DataFrame(
-        energy_use_records,
+    resource_log = pl.DataFrame(
+        consumption_records,
         schema={
             "resource_type": pl.Utf8,
+            "role": pl.Utf8,
             "fuel_type": pl.Utf8,
             "resource_id": pl.Utf8,
             "track_id": pl.Utf8,
@@ -346,20 +352,21 @@ def _build_generic_outputs_with_event_types(
             "container_id": pl.Utf8,
             "event_type": pl.Utf8,
             "zone": pl.Utf8,
-            "energy_consumption(gal_or_kWh)": pl.Float64,
+            "quantity": pl.Utf8,
+            "consumption_value": pl.Float64,
             "load/travel_time(hr)": pl.Float64,
             "record_timestamp": pl.Float64,
         },
     ).with_columns(
         # Coarse CO2-equivalent emissions, computed at end-of-sim from the
-        # static per-fuel factors in energy_use.CO2_KG_PER_UNIT. Unknown fuel
+        # static per-fuel factors in consumption.CO2_KG_PER_UNIT. Unknown fuel
         # types yield NaN so they're easy to spot.
         (
-            pl.col("energy_consumption(gal_or_kWh)")
+            pl.col("consumption_value")
             * pl.col("fuel_type").replace_strict(CO2_KG_PER_UNIT, default=float("nan"))
         ).alias("emissions(kgCO2)")
     )
-    return container_data, vehicle_log
+    return container_data, resource_log
 
 
 # ---------------------------------------------------------------------------
@@ -523,12 +530,12 @@ def _truck_rail_process_arrival(env, terminal, entry: dict):
 
 
 def _truck_rail_post_process(
-    container_data: pl.DataFrame, vehicle_log: pl.DataFrame,
+    container_data: pl.DataFrame, resource_log: pl.DataFrame,
 ) -> Tuple[pl.DataFrame, pl.DataFrame]:
     """Add per-container ``container_processing_time`` and join OC rows to
     their train's actual arrival time."""
     if container_data.height == 0:
-        return container_data, vehicle_log
+        return container_data, resource_log
 
     has_truck_exit = "drayage_gate_out" in container_data.columns
     has_train_arrival_exp = "train_arrival_expected" in container_data.columns
@@ -578,7 +585,7 @@ def _truck_rail_post_process(
             )
 
     container_data = container_data.drop("is_ic", "train_id")
-    return container_data, vehicle_log
+    return container_data, resource_log
 
 
 register_mode(TerminalMode(
@@ -726,7 +733,7 @@ if __name__ == "__main__":
     consist_plan = (pl.read_csv(utilities.package_root() / 'resources' / 'train_consist_plan.csv')
         .with_columns(pl.lit("Intermodal").alias("Train_Type"))
     )
-    container_data, vehicle_log_df, terminal_obj = run_terminal_simulation(
+    container_data, resource_log_df, terminal_obj = run_terminal_simulation(
         modes=["truck_rail"],
         terminal="Allouez",
         inputs={"truck_rail": {"train_consist_plan": consist_plan}},

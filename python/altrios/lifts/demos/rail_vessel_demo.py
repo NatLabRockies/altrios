@@ -30,7 +30,7 @@ from altrios.lifts import run_terminal_simulation, utilities
 TERMINAL = "Allouez"
 
 
-def _print_summary(container_data: pl.DataFrame, vehicle_log: pl.DataFrame) -> None:
+def _print_summary(container_data: pl.DataFrame, resource_log: pl.DataFrame) -> None:
     ic_total = container_data.filter(pl.col("container_id").str.starts_with("IC"))
     oc_total = container_data.filter(pl.col("container_id").str.starts_with("OC"))
     train_rows = container_data.filter(pl.col("container_id").str.starts_with("Train-"))
@@ -44,10 +44,10 @@ def _print_summary(container_data: pl.DataFrame, vehicle_log: pl.DataFrame) -> N
     print(f"    OC (outbound) : {oc_total.height}")
     print(f"  train rows       : {train_rows.height}")
 
-    if vehicle_log.height > 0:
+    if resource_log.height > 0:
         energy_by_resource = (
-            vehicle_log.group_by("resource_type")
-            .agg(pl.col("energy_consumption(gal_or_kWh)").sum().alias("total"))
+            resource_log.group_by("resource_type")
+            .agg(pl.col("consumption_value").sum().alias("total"))
             .sort("resource_type")
         )
         print()
@@ -56,7 +56,7 @@ def _print_summary(container_data: pl.DataFrame, vehicle_log: pl.DataFrame) -> N
             print(f"    {row['resource_type']:>22}: {row['total']:>10.2f}")
 
         # STS-specific event-type breakdown (highlight vessel activity)
-        sts_events = vehicle_log.filter(pl.col("resource_type") == "sts_crane")
+        sts_events = resource_log.filter(pl.col("resource_type") == "sts_crane")
         if sts_events.height > 0:
             print()
             print(f"  STS crane lifts  : {sts_events.height}")
@@ -69,9 +69,9 @@ def _print_summary(container_data: pl.DataFrame, vehicle_log: pl.DataFrame) -> N
                 print(f"    {row['event_type']:>22}: {row['count']:>6}")
 
         print(f"  total energy     : "
-              f"{vehicle_log['energy_consumption(gal_or_kWh)'].sum():.2f}")
+              f"{resource_log['consumption_value'].sum():.2f}")
         print(f"  total emissions  : "
-              f"{vehicle_log['emissions(kgCO2)'].sum():.2f} kgCO2e")
+              f"{resource_log['emissions(kgCO2)'].sum():.2f} kgCO2e")
 
 
 def main() -> None:
@@ -84,7 +84,7 @@ def main() -> None:
     vessel_calls = pl.read_csv(resources / "vessel_call_list.csv")
 
     t0 = time.perf_counter()
-    container_data, vehicle_log, _ = run_terminal_simulation(
+    container_data, resource_log, _ = run_terminal_simulation(
         modes=["rail_vessel"],
         terminal=TERMINAL,
         inputs={"rail_vessel": {
@@ -95,7 +95,7 @@ def main() -> None:
     elapsed = time.perf_counter() - t0
     print(f"\nLIFTS rail_vessel run: {elapsed:.2f} s")
 
-    _print_summary(container_data, vehicle_log)
+    _print_summary(container_data, resource_log)
 
 
 if __name__ == "__main__":

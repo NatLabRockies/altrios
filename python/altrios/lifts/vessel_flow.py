@@ -45,7 +45,7 @@ import simpy
 
 from altrios.lifts import utilities
 from altrios.lifts.classes import container, loggingLevel
-from altrios.lifts.energy_use import _record_stack_lift_energy
+from altrios.lifts.consumption import _record_stack_lift_consumption
 from altrios.lifts.yard_flow import stack_in, stack_out
 
 
@@ -70,7 +70,7 @@ def _sts_unload_worker(env, terminal, berth_id: int, vessel_id: int,
             utilities.record_container_event(
                 terminal, ic, "sts_unload", env.now,
             )
-            _record_stack_lift_energy(
+            _record_stack_lift_consumption(
                 terminal, sts_obj, "sts_crane", status="loaded",
                 train_id=vessel_id,
                 container_id=ic.to_string(),
@@ -105,7 +105,7 @@ def _sts_load_worker(env, terminal, berth_id: int, vessel_id: int,
             utilities.record_container_event(
                 terminal, oc, "sts_load", env.now,
             )
-            _record_stack_lift_energy(
+            _record_stack_lift_consumption(
                 terminal, sts_obj, "sts_crane", status="loaded",
                 train_id=vessel_id,
                 container_id=oc.to_string(),
