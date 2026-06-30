@@ -410,9 +410,6 @@ def build_drayage_schedule(drayage_schedule, terminal_name, as_dicts):
         Filter rows where ``Terminal_ID == terminal_name``.
     as_dicts : bool
         If True, return a list of dicts; otherwise return a DataFrame.
-
-    See also :func:`build_drayage_schedule_poisson` to synthesize the input
-    table from hourly volume targets.
     """
     required = {"Terminal_ID", "Arrival_Time_Hr", "Action"}
     missing = required.difference(drayage_schedule.columns)
@@ -464,95 +461,6 @@ def build_drayage_schedule(drayage_schedule, terminal_name, as_dicts):
 
     if as_dicts:
         return df.to_dicts()
-    return df
-
-
-def build_drayage_schedule_poisson(
-    hourly_volumes,
-    terminal_name,
-    sim_length_hr,
-    seed,
-    pickup_fraction=0.5,
-):
-    """Synthesize a drayage schedule via per-hour Poisson arrival counts.
-
-    Parameters
-    ----------
-    hourly_volumes : polars.DataFrame
-        Columns ``Terminal_ID`` (str), ``Hour`` (int, 0-based), and
-        ``Expected_Trucks`` (float). Rows with ``Terminal_ID != terminal_name``
-        are ignored. Hours not present in the table default to 0.
-    terminal_name : str
-        Filter on ``Terminal_ID``.
-    sim_length_hr : float
-        Total simulation horizon. Arrivals beyond this horizon are dropped.
-    seed : int
-        Seed for the per-call ``numpy.random.default_rng`` to keep results
-        reproducible without touching the global random state.
-    pickup_fraction : float in [0, 1]
-        Probability each generated truck is a 'pickup' (vs 'dropoff').
-
-    Returns
-    -------
-    polars.DataFrame
-        A schedule in the format expected by :func:`build_drayage_schedule`'s
-        input (columns Terminal_ID, Arrival_Time_Hr, Action, Truck_ID).
-    """
-    if not 0.0 <= pickup_fraction <= 1.0:
-        raise ValueError(
-            f"pickup_fraction must be in [0, 1]; got {pickup_fraction}."
-        )
-
-    filtered = hourly_volumes.filter(
-        pl.col("Terminal_ID") == pl.lit(terminal_name)
-    )
-    if filtered.height == 0:
-        raise ValueError(
-            f"No rows for terminal '{terminal_name}' in hourly_volumes."
-        )
-
-    rng = np.random.default_rng(seed)
-
-    arrival_times: list[float] = []
-    actions: list[str] = []
-    for row in filtered.iter_rows(named=True):
-        hour = int(row["Hour"])
-        if hour < 0 or hour >= sim_length_hr:
-            continue
-        rate = float(row["Expected_Trucks"])
-        if rate <= 0:
-            continue
-        n = int(rng.poisson(rate))
-        if n == 0:
-            continue
-        offsets = rng.uniform(0.0, 1.0, size=n)
-        for off in offsets:
-            t = hour + float(off)
-            if t >= sim_length_hr:
-                continue
-            arrival_times.append(t)
-            actions.append(
-                "pickup" if rng.random() < pickup_fraction else "dropoff"
-            )
-
-    if not arrival_times:
-        raise ValueError(
-            f"Poisson generation for terminal '{terminal_name}' produced no "
-            "trucks; check hourly_volumes rates and sim_length_hr."
-        )
-
-    df = (pl.DataFrame({
-            "Arrival_Time_Hr": arrival_times,
-            "Action": actions,
-        })
-        .sort("Arrival_Time_Hr")
-        .with_row_index(name="Truck_ID", offset=1)
-        .with_columns(
-            pl.col("Truck_ID").cast(pl.Int64),
-            pl.lit(terminal_name).alias("Terminal_ID"),
-        )
-        .select("Terminal_ID", "Truck_ID", "Arrival_Time_Hr", "Action")
-    )
     return df
 
 

@@ -74,69 +74,6 @@ def _record_trip_consumption(output, energy_use_config, vehicle_obj, vehicle_kin
         output.record_consumption(row)
 
 
-def _record_load_consumption(output, energy_use_config, crane_obj, status, train_id, container_id,
-                             event_type, env_now, track_id):
-    """Helper to compute + append a per-lift crane consumption record."""
-    fuel_type = _fuel_type_for(crane_obj)
-    consumption_value = utilities.compute_consumption(
-        energy_use_config, status=status, move="load", vehicle="crane",
-        energy_type=fuel_type, travel_time=0.0,
-    )
-    row = utilities.record_consumption(
-        consumption_records,
-        vehicle_type="crane",
-        role="equipment",
-        fuel_type=fuel_type,
-        resource_id=getattr(crane_obj, "id", ""),
-        track_id=track_id,
-        train_id=train_id,
-        container_id=container_id,
-        event_type=event_type,
-        zone="track",
-        consumption_value=consumption_value,
-        travel_time=0.0,
-        env_now=env_now,
-    )
-    if output is not None:
-        output.record_consumption(row)
-
-
-def _record_side_consumption(output, energy_use_config, hostler_obj, train_id, container_id, env_now):
-    """Helper to compute + append a side-pick consumption record.
-
-    The side-pick is logically performed by a side-loading crane, but no
-    such resource type exists in the simulation yet (TODO: add a per-yard
-    or per-track side_loading_crane store with its own pool, fuel mix, and
-    consumption config block; until then, the assigned hostler stands in
-    as the actor). The record's ``resource_type`` is set to
-    ``"side_loading_crane"`` so the event is visible as such in
-    ``resource_log_df``; ``resource_id`` / ``fuel_type`` are still taken
-    from the hostler so the per-event consumption uses a real fuel type.
-    """
-    fuel_type = _fuel_type_for(hostler_obj)
-    consumption_value = utilities.compute_consumption(
-        energy_use_config, status="loaded", move="side", vehicle="hostler",
-        energy_type=fuel_type, travel_time=0.0,
-    )
-    row = utilities.record_consumption(
-        consumption_records,
-        vehicle_type="side_loading_crane",
-        role="equipment",
-        fuel_type=fuel_type,
-        resource_id=getattr(hostler_obj, "id", ""),
-        track_id="",
-        train_id=train_id,
-        container_id=container_id,
-        event_type="side_pick",
-        zone="parking",
-        consumption_value=consumption_value,
-        travel_time=0.0,
-        env_now=env_now,
-    )
-    if output is not None:
-        output.record_consumption(row)
-
-
 # ---------------------------------------------------------------------------
 # Per-event consumption recording helpers used by the freight flow code
 # in :mod:`altrios.lifts.yard_flow` and :mod:`altrios.lifts.python_helpers`.

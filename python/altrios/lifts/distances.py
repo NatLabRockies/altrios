@@ -1,52 +1,11 @@
 ﻿"""Yard geometry and travel-time/speed sampling for trucks and hostlers."""
-from scipy.stats import triang, uniform
+from scipy.stats import triang
 import math
 import yaml
 import pandas as pd
 from pathlib import Path
 
 from altrios.lifts.utilities import resources_root
-
-def get_layout(config):
-    """
-    Return layout parameters, supporting two modes:
-      - fixed: use layout values directly from YAML
-      - adaptive: load layout from Excel based on train batch size
-    """
-    layout_cfg = config["layout"]
-    yard_cfg = config["yard"]
-    num_tracks = yard_cfg["track_number"]
-    mode = layout_cfg.get("mode", "fixed").lower()
-
-    if mode == "adaptive":
-        layout_path = Path(layout_cfg["file_path"])
-        batch_size = config["simulation"]["train_batch_size"]
-        df = pd.read_excel(resources_root() / "multiple_layout.xlsx")
-        capacity = batch_size * num_tracks * 2  # IC&OC for each track
-        row = df.loc[df["train batch (k)"] == capacity]
-        if row.empty:
-            raise ValueError(f"No layout found for train batch size {batch_size} corresponding capacity {capacity}")
-        row = row.iloc[0]
-        layout = {
-            "M": int(row["rows (M)"]),
-            "N": int(row["cols (N)"]),
-            "n_t": int(row["trainlanes (n_t)"]),
-            "n_p": int(row["parknglanes (n_p)"]),
-            "n_r": int(row["blocklen (n_r)"]),
-            "P": int(layout_cfg.get("P", 10)),
-            "mode": "adaptive"
-        }
-    else:
-        layout = {
-            "M": int(layout_cfg["M"]),
-            "N": int(layout_cfg["N"]),
-            "n_t": int(layout_cfg["n_t"]),
-            "n_p": int(layout_cfg["n_p"]),
-            "n_r": int(layout_cfg["n_r"]),
-            "P": int(layout_cfg.get("P", 10)),
-            "mode": "fixed"
-        }
-    return layout
 
 
 def calculate_distances(config_path="input/config.yaml", config=None, actual_railcars=None):
@@ -196,20 +155,3 @@ def simulate_hostler_track_travel(hostler_id, current_veh_num, config=None, conf
     hostler_travel_time = d_tr_dist / (hostler_speed * 3600)    # 1 hr = 3,600 s
 
     return hostler_travel_time, d_tr_dist, hostler_speed, veh_density
-
-def simulate_reposition_travel(hostler_id, current_veh_num, config=None, config_path="input/config.yaml", params=None):
-    if params is None:
-        params = calculate_distances(config=config, config_path=config_path)
-    total_lane_length, N = params["total_lane_length"]/3.28, params["N"]
-    d_r_min, d_r_max = params["d_r_min"]/3.28, params["d_r_max"]/3.28
-
-    d_r_dist = uniform(loc=d_r_min, scale=(d_r_max - d_r_min)).rvs()
-    veh_density = current_veh_num / total_lane_length
-    hostler_speed = speed_density(veh_density, 'hostler', N)
-    hostler_reposition_travel_time = d_r_dist / (hostler_speed * 3600)
-    return hostler_reposition_travel_time, d_r_dist, hostler_speed, veh_density
-
-# # test
-# if __name__ == "__main__":
-#     total = calculate_distances("input/config.yaml")
-#     print(f"Total estimated distance: {total:.2f}")
