@@ -1,6 +1,6 @@
 # Workflow Engine — Phase 3 Refactor Plan
 
-**Status:** Phase 3 complete (3A–3D + 3E + 3F + 3G + 3H done; freight YAML-translation strategy B+A both shipped per Decision D7)
+**Status:** Phase 3 complete (3A–3D + 3E + 3F + 3G + 3H done; freight YAML-translation strategy B+A both shipped per Decision D7; multi-mode dispatch enablement landed per §8.C / Decision D19)
 **Last updated:** 2026-06-30
 **Owner:** LIFTS subsystem maintainers
 
@@ -44,6 +44,7 @@ update the corresponding section below.
 | **B (3E.freight + 3F via adapter)** | `TerminalAdapter` pure-proxy class + `lifts/catalog.yaml` with 1-step `python:` graphs + `lifts/python_helpers.py` + 3 site files + parity harness | **Done** (2026-06-30) — 3 parity tests; **268 total tests pass**; see §8.B |
 | **CHECKPOINT** | Git tag `phase3-b-shim` marks the historical state where two freight entry points coexisted (`run_terminal_simulation` legacy + `run_site` via adapter). Superseded by Phase A: the legacy entry point and the adapter were deleted; `run_site` is now the sole freight entry point. | **Superseded** (see §8.A) |
 | **A (3G full refactor)** | Migrate module globals to `OutputCollector`, refactor helper signatures, decompose freight workflows into fine-grained YAML graphs using the 19 primitives, delete `train_flow.py` / `drayage_flow.py` / `vessel_flow.py`, delete `TerminalAdapter`, delete `TerminalMode` + `run_terminal_simulation`, migrate demos and verify-scripts | **Done** (2026-06-30) — see §8.A. **268 total tests pass.** `terminal_adapter.py`, the four legacy flow modules, `terminal_sim.py`, the legacy `run_terminal_simulation` / `TerminalMode` / mode registry, and the Phase-1/Phase-2 verify scripts are all deleted. Demos and the smoke script drive `run_site` directly. |
+| **C (multi-mode enablement)** | Engine: per-arrival `mode` field disambiguates kinds shared across modes (drayage in `truck_rail`+`vessel_truck`, train in `truck_rail`+`rail_vessel`, vessel in `rail_vessel`+`vessel_truck`). Freight: all 4 schedule builders accept optional `mode` kwarg; `catalog.yaml` schedule_mappings stamp drayage/rail_vessel/vessel_truck entries; new `sites/allouez_combined.yaml` composes truck_rail + vessel_truck sharing resource pools; new `demos/multi_mode_demo.py` (replaces the file deleted in A.10); new `test_combined_truck_rail_vessel_truck_smoke`. | **Done** (2026-06-30) — see §8.C and Decision D19. **274 total tests pass** (268 prior + 5 engine dispatch + 1 combined smoke). Single-mode truck_rail smoke 2469.15 (+0.011 % vs baseline). Commits `47537f5` (engine) and `36c05f1` (freight). |
 
 ---
 
@@ -521,7 +522,7 @@ adapter. `run_site` becomes the only freight entry point.
 | **A.7** | ✅ Re-ran parity. Container counts exact; energy totals match within ±0.5%; sim end times match. Now validating the decomposed YAML, not the proxied generators. |
 | **A.8** | ✅ Deleted `lifts/train_flow.py`, `lifts/drayage_flow.py`, `lifts/vessel_flow.py`, `lifts/terminal_sim.py`. Inlined private helpers (`_truck_factory`, `_gate_in`, `_gate_out`, `_sts_unload_worker`, `_sts_load_worker`, `_drayage_zone_travel`) into `python_helpers.py`. |
 | **A.9** | ✅ `TerminalMode` class, `_MODES` registry, `get_mode`, `list_modes`, `run_terminal_simulation` — all deleted with `terminal_sim.py`. `EVENT_TYPES_BY_MODE` constants migrated to `python_helpers.py` for `assemble_outputs`. Parity test rewritten as a smoke test pinning exact baselines (`test_freight_parity.py`). |
-| **A.10** | ✅ Migrated `truck_rail_demo.py`, `rail_vessel_demo.py`, `vessel_truck_demo.py`, and `python/altrios/demos/lifts_demo.py` to call `run_site` directly. `multi_mode_demo.py` **deleted** — `run_site` rejects ambiguous kind routing (train routed by both truck_rail and rail_vessel; vessel by both rail_vessel and vessel_truck; drayage by both truck_rail and vessel_truck), so a concurrent multi-mode site needs future engine work (mode-scoped kind names). The 3 single-mode demos cover all user-facing freight code paths. |
+| **A.10** | ✅ Migrated `truck_rail_demo.py`, `rail_vessel_demo.py`, `vessel_truck_demo.py`, and `python/altrios/demos/lifts_demo.py` to call `run_site` directly. `multi_mode_demo.py` **deleted** at the time of A.10 because `run_site` rejected ambiguous kind routing across modes. **Superseded by §8.C** (per-arrival `mode` field unblocks this; the demo file was re-added against the new `allouez_combined.yaml` site). The 3 single-mode demos still cover all single-mode user-facing freight code paths. |
 | **A.11** | ✅ Deleted `lifts/terminal_adapter.py`. Removed `state.terminal_adapter` from `build_freight_state`; helpers now take `(env, state, config)` directly. Attached `state.distances` for `yard_tractor_haul`. All 26 catalog.yaml call sites updated to pass `state: "{state}"` (+/- `config: "{config}"`) per the helper signature. |
 | **A.12** | ✅ Migrated `scripts/smoke_truck_rail.py` to `run_site`. **Deleted** `scripts/verify_lifts_phase1.py` and `scripts/verify_lifts_phase2.py`: their checks (event coverage, equipment usage, no-null energy, IC/OC counts, mode-agnostic dispatcher grep, mode registry) are now covered by `tests/test_freight_parity.py` and/or made obsolete by the legacy code's removal. |
 | **A.13** | ✅ This update. Marked A.1–A.12 Done; Decision D7 fully realized. |
@@ -531,11 +532,61 @@ adapter. `run_site` becomes the only freight entry point.
   `terminal_sim`, `TerminalMode`, `run_terminal_simulation`,
   `TerminalAdapter` in the codebase (verified by `grep -r`).
 - ✅ All 3 single-mode demos, `lifts_demo.py`, and `smoke_truck_rail.py`
-  drive `run_site` directly. (`multi_mode_demo.py` deleted; see A.10.)
+  drive `run_site` directly. (`multi_mode_demo.py` deleted at A.10;
+  re-added in §8.C.)
 - ✅ Parity smoke test passes with the decomposed YAML, validating
   exact baselines (3 modes × IC/OC/energy/end-time).
 - ✅ Total workflow_engine + lifts test count: 268 passed (held steady
   through B → A.7 → A.13).
+
+---
+
+### C — Multi-mode dispatch enablement (post-Phase-A)
+
+**Goal:** Allow a single site to compose multiple modes that share
+resource pools, even when some entity kinds are defined in more than
+one mode (e.g., `drayage` exists in both `truck_rail` and
+`vessel_truck`; `train` in both `truck_rail` and `rail_vessel`;
+`vessel` in both `rail_vessel` and `vessel_truck`).
+
+A.10 had to delete `multi_mode_demo.py` because `run_site` rejected
+any kind that appeared in more than one active mode. C unblocks this
+by disambiguating per-arrival rather than per-site.
+
+**Sub-steps:**
+
+| Sub-step | Description |
+|---|---|
+| **C.1** | ✅ Engine: `runner.py::run_site` now builds three dispatch tables — `unique_kind_to_mode` (kind defined in exactly one active mode), `mode_kind_to_mode` (mode-stamped kinds), and `contended_kinds` (kind defined in ≥ 2 active modes). For each arrival, an optional `mode` key selects the workflow; absent `mode`, only uncontended kinds dispatch. The `mode` key is stripped from `attrs` before storing on `Entity`. 5 new tests in `test_runner.py` cover: dispatch-by-mode-key, contended-without-mode error, inactive-mode error, kind-not-routed-by-named-mode error, mixed contended/uncontended. **273 tests pass.** Commit `47537f5`. |
+| **C.2** | ✅ Freight: all 4 schedule builders in `python_helpers.py` (`build_train_schedule`, `build_drayage_schedule_synth`, `build_drayage_schedule_csv` + `build_drayage_schedule` alias, `build_vessel_schedule`) accept optional `mode: str | None = None`. When supplied, the builder stamps each arrival dict with that mode. Default `None` preserves backward compatibility with the existing 3 single-mode site files. |
+| **C.3** | ✅ `lifts/catalog.yaml` `schedule_mappings`: existing `train_arrivals` and `vessel_arrivals` entries remain mode-less (single-mode catalogs still work unchanged); drayage entries now stamp `mode: truck_rail` or `mode: vessel_truck`; new entries `rail_vessel_train_arrivals` (mode=rail_vessel) and `vessel_truck_vessel_arrivals` (mode=vessel_truck) added. |
+| **C.4** | ✅ New `lifts/sites/allouez_combined.yaml` composes `truck_rail` + `vessel_truck` modes sharing `main_stack_rtg` and `yard_tractor` pools, with contended drayage routed by mode. |
+| **C.5** | ✅ New `lifts/demos/multi_mode_demo.py` drives the combined site through `run_site`, prints arrival breakdown (20 trains + 4 vessels + 1944 drayage = 1968 entities), and confirms shared `main_stack_rtg` usage across modes (4429 rows). |
+| **C.6** | ✅ New `test_combined_truck_rail_vessel_truck_smoke` in `test_freight_parity.py` pins the combined baseline within ±0.5 % (event_rows=19710, consumption_rows=13654, consumption_total=3247.34, env_now=336.26). |
+| **C.7** | ✅ Banked freight side at commit `36c05f1`. **274/274 tests pass.** Single-mode truck_rail smoke 2469.15 (+0.011 % baseline). |
+
+**Acceptance criteria for C — all met (2026-06-30):**
+- ✅ A site composing ≥ 2 modes with overlapping kinds dispatches
+  correctly when arrivals carry `mode`; the engine still rejects
+  contended kinds that arrive without a `mode` key.
+- ✅ Existing single-mode sites and tests are unchanged in behavior
+  (default `mode=None` in all builders; existing schedule_mappings
+  entries remain mode-less).
+- ✅ Resource pools declared at site level are shared across active
+  modes (verified by demo output showing one `main_stack_rtg`
+  consumption log feeding both `truck_rail` and `vessel_truck`).
+
+**Out of scope (deferred to future phase):**
+- Cross-mode `spawn` composition (`spawn`'s named-graph ref resolves
+  only within the spawning entity's mode; sub-workflows must live in
+  the same mode that spawns them).
+- `assemble_outputs` remains single-mode in v1; multi-mode sites use
+  raw collector access (`result.event_log`, `result.consumption_log`).
+  A multi-mode wide-table assembler is left for future work.
+- All-three-mode combined site (`truck_rail` + `rail_vessel` +
+  `vessel_truck`). The current combined site exercises 2 of 3 modes;
+  the third pairing has no separate operational story without
+  additional per-arrival routing data.
 
 ---
 
@@ -566,6 +617,7 @@ table and the implementation.
 | 18 | **Schema versioning** = mandatory `meta.schema_version: 1` on every YAML | 2026-06-29 | Enables future migrations. v1 is the only version in Phase 3. |
 | D7 | **Freight YAML-translation strategy** = B then A | 2026-06-30 | The `run_site` runner expects state built by `build_state_from_specs` (a `SimpleNamespace` of pools). The existing freight helpers (`process_train_arrival`, `_unload_one_ic`, `yard_tractor_haul`, ...) expect a `Terminal` object with `terminal.state.tracks`, `terminal.config`, `terminal.log()`, `terminal.CRANE_MOVE_DEV_TIME`, and module-level `container_events` / `consumption_records` lists. **Chosen path:** ship **(B) Terminal-adapter shim** first — 1-step `python:` YAML graphs that call existing generators unchanged — then immediately follow with **(A) full refactor**: migrate module globals to `OutputCollector`, refactor helper signatures to `(env, state, config, output)`, decompose freight workflows into fine-grained YAML using the 19 primitives, delete the Python flow modules and the adapter. Discipline rules: B's adapter is a pure attribute proxy with no logic; A is scheduled before B merges; the parity test gates both PRs. See §8.B and §8.A for sub-step detail. |
 | D10b | **Override of Decision 10** — engine output schema is schema-loose, not column-mapped | post-A.13 | Phase 3B's `OutputCollector` and `record_event` / `record_resource_event` / `record_consumption` primitives accept arbitrary row dicts; the engine writes whatever the YAML step declares plus envelope columns. No `entity_id_column` catalog field exists. Per-catalog wide-table assembly (e.g. pivoting `event_log` into `container_data`) is done in the catalog's Python helpers (for freight: `lifts/python_helpers.py::assemble_outputs`). The `vehicle_log` → `resource_log` rename and the `role` / `quantity` columns from Decision 10 are still in force; only the `container_id` → `entity_id_column` rename was abandoned in favor of catalog-side assembly. |
+| D19 | **Multi-mode dispatch via optional per-arrival `mode` key** | 2026-06-30 (post §8.C) | `run_site` originally rejected any entity kind defined in more than one active mode (kind ambiguity). To allow concurrent multi-mode sites without forcing globally-unique kind names (which would force authors to mangle catalog kinds like `truck_rail_drayage` / `vessel_truck_drayage`), `run_site` now disambiguates per arrival: each arrival may carry `mode: <mode_name>` (stripped before storing as `Entity` attrs). Kinds defined in exactly one active mode still dispatch with no `mode` key (preserves backward compatibility — all existing single-mode sites work unchanged). Kinds defined in ≥ 2 active modes ("contended") require `mode`; missing or unknown `mode` is a `RunError`. Composition with `spawn` works only within a single mode (spawned sub-workflows inherit the spawning entity's mode); cross-mode `spawn` is explicitly out of scope. See §8.C. |
 
 ---
 
