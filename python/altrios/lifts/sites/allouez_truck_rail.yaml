@@ -5,8 +5,8 @@
 #   (the path is the schedule value; the catalog's freight.build_train_schedule
 #   builder resolves it).
 # - drayage_arrivals: synthesized by the builder when schedule is null
-#   (matches the legacy ``_synthesize_drayage_from_trains`` default in
-#   terminal_sim.py).
+#   (one dropoff per OC just before each train, one pickup per IC just
+#   after; see ``freight.build_drayage_schedule_synth``).
 #
 # Site config pulls in the full freight config (yard/terminal/gates/vessel/
 # yard_stack/energy_use/layout) via !include. The catalog ships the eight

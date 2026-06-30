@@ -1,23 +1,22 @@
 # ---------------------------------------------------------------------------
-# Freight intermodal catalog (Phase 3 / Strategy B).
+# Freight intermodal catalog.
 #
-# Three modes: truck_rail, rail_vessel, vessel_truck. Each mode's graph
-# consists of a single ``python:`` step that delegates to the existing
-# freight generators in altrios.lifts.{train_flow,drayage_flow,vessel_flow}
-# via thin wrappers in altrios.lifts.python_helpers.
+# Three modes: truck_rail, rail_vessel, vessel_truck. Each mode's arrival
+# graphs are authored as fine-grained step sequences (see truck_rail's
+# ``handle_train_arrival`` for the canonical pattern). Irreducibly
+# stateful inner bodies (per-IC/OC SimPy generators, STS-crane parallel
+# workers, RTG dispatch) live as ``python:`` escape hatches in
+# ``altrios.lifts.python_helpers``.
 #
 # Resource pools are NOT declared here. The freight ResourceSpec
-# instances in altrios.lifts.specs use Python lambdas for capacity /
+# instances in altrios.lifts.specs use Python callables for capacity /
 # partition_by / init_items, which the YAML resource-spec form doesn't
 # accept directly. Instead, the catalog's state_init callable
 # (``freight.build_freight_state``) instantiates the spec union at run
-# start and attaches every primitive to state. **Phase A.6 translates
-# these specs into YAML form and moves them under each mode's
-# ``resources:`` block.**
+# start and attaches every primitive to state.
 #
-# config_defaults ships only the eight numeric simulation constants
-# that previously lived as class-level attributes on
-# ``altrios.lifts.classes.Terminal``. Every site is expected to
+# config_defaults ships eight numeric simulation constants used by the
+# freight helpers. Every site is expected to
 # ``!include resources/config.yaml`` to populate the rest of the
 # config surface (yard, terminal, gates, vessel, yard_stack, energy_use,
 # layout).
@@ -27,14 +26,13 @@ meta:
 name: freight_intermodal
 description: >-
   Intermodal terminal catalog covering truck<->rail, rail<->vessel,
-  and vessel<->truck container flows. Phase 3 Strategy B: graphs are
-  thin shims over the existing Python freight flow modules.
+  and vessel<->truck container flows.
 python_module: altrios.lifts.python_helpers
 
 config_defaults:
-  # Constants previously hard-coded on Terminal.__init__. The freight
-  # generators read these off `terminal.containers_per_crane_move_mean`
-  # etc.; the TerminalAdapter exposes them by mirroring this block.
+  # Numeric simulation constants for the freight catalog. Helpers read
+  # these directly from the run config dict (e.g.
+  # ``config["containers_per_crane_move_mean"]``).
   containers_per_crane_move_mean: 0.03333    # 2 min / 60 min/hr
   crane_move_dev_time: 0.000278              # 1 sec / 3600 sec/hr
   truck_diesel_percentage: 1.0
@@ -548,8 +546,8 @@ schedule_mappings:
   # above) and is responsible for: (1) clearing the module-level
   # consumption_records buffer, (2) attaching container_events: [] to
   # state, (3) instantiating the freight ResourceSpec union and
-  # attaching each pool to state, (4) building and attaching the
-  # TerminalAdapter.
+  # attaching each pool to state, (4) computing and attaching the
+  # yard-distance table to state.distances.
   state_init: freight.build_freight_state
 
   # Per-stream schedule builders. The site's ``schedules:`` block

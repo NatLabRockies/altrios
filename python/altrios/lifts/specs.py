@@ -1,10 +1,13 @@
-"""Catalog of declarative :class:`ResourceSpec` instances for Phase 1 modes.
+"""Catalog of declarative :class:`ResourceSpec` instances for the three
+freight modes (``truck_rail``, ``rail_vessel``, ``vessel_truck``).
 
-Each spec is a module-level constant referenced from one or more
-:class:`TerminalMode` registrations (see ``terminal_sim.py``). When two
-modes reference the same spec object (by identity, not just by name), the
-dispatcher's :func:`merge_specs` deduplicates them and the resulting
-SimPy primitive is shared across both modes — see ``resources_decl.py``.
+Each spec is a module-level constant aggregated into the per-mode
+bundles ``TRUCK_RAIL_SPECS`` / ``RAIL_VESSEL_SPECS`` /
+``VESSEL_TRUCK_SPECS`` at the bottom of this module. The freight
+``state_init`` (``freight.build_freight_state`` in
+:mod:`altrios.lifts.python_helpers`) instantiates the union of all
+three bundles via :func:`altrios.workflow_engine.build_state_from_specs`
+and attaches each pool to ``state``.
 
 Capacity callables read from the ``config`` mapping. The ``vessel:`` and
 ``yard_stack:`` sections are canonical (see ``resources/config.yaml``);
@@ -220,10 +223,10 @@ ROAD_CHASSIS_POOL = ResourceSpec(
 
 
 # ---------------------------------------------------------------------------
-# Mode -> spec bundles. Each tuple is the ResourceSpec list that one Phase 1
-# mode will pass as its ``TerminalMode.resource_specs``. Cross-mode sharing
-# happens through repeated spec objects in different bundles; the dispatcher
-# deduplicates by name with the agreement check in ``merge_specs``.
+# Mode -> spec bundles. Each tuple is the ResourceSpec list for one
+# freight mode. The freight ``state_init`` instantiates the union of
+# all three (deduped by name) so every mode's pools are available on
+# ``state``.
 # ---------------------------------------------------------------------------
 
 TRUCK_RAIL_SPECS: tuple[ResourceSpec, ...] = (

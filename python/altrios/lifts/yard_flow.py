@@ -13,9 +13,9 @@ through the main container stack::
         -> destination-endpoint
 
 This module owns the four operations that touch the stack and its supporting
-equipment, factored out so the three endpoint modules (``train_flow``,
-``vessel_flow``, ``drayage_flow``) can compose them without duplicating the
-crane-selection and yard-tractor logic:
+equipment, factored out so the higher-level train / drayage / vessel
+arrival handlers in :mod:`altrios.lifts.python_helpers` can compose them
+without duplicating the crane-selection and yard-tractor logic:
 
 * :func:`stack_in` -- lift a container off a chassis onto the stack.
 * :func:`stack_out` -- lift a container off the stack onto a chassis.
@@ -27,7 +27,7 @@ crane-selection and yard-tractor logic:
 All four are SimPy generators and must be invoked via ``env.process(...)``
 or ``yield env.process(...)`` from another generator.
 
-These helpers consume the spec-built ``TerminalState`` attributes
+These helpers consume the spec-built ``state`` attributes
 (``state.main_stack_rtgs``, ``state.top_picks``, ``state.container_stack``,
 etc.) defined in :mod:`altrios.lifts.specs`. Energy-use entries are
 recorded with ``resource_type=`` set to the equipment pool name

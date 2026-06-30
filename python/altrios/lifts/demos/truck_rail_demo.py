@@ -7,8 +7,7 @@ with all containers routing through the main container stack.
 This demo runs the ``allouez_truck_rail.yaml`` site definition through
 :func:`altrios.workflow_engine.run_site` and then materializes the
 freight-flavoured ``container_data`` / ``resource_log`` DataFrames via
-:func:`altrios.lifts.python_helpers.assemble_outputs`. The legacy
-``run_terminal_simulation`` entry point was removed in Phase A.8/A.9.
+:func:`altrios.lifts.python_helpers.assemble_outputs`.
 
 Run from the repo root with::
 

@@ -1,8 +1,9 @@
 """Consumption record buffer and per-event recording helpers shared by the
 LIFTS SimPy actor modules. The module-level ``consumption_records`` list
-is appended to by the actor processes (truck/crane/hostler) and
-consumed/cleared by ``terminal_sim.run_terminal_simulation``, which
-converts the buffer into the returned ``resource_log_df``.
+is appended to by the actor processes (truck/crane/hostler) and is
+dual-written to the workflow-engine :class:`OutputCollector` (see
+:func:`altrios.lifts.python_helpers.assemble_outputs`) so freight
+consumption rows appear on the runner's ``RunResult.output``.
 
 The simulation tracks energy consumption in the fuel's native unit
 (gallons for Diesel/Hybrid, kWh for Electric). A coarse CO2-equivalent
@@ -11,22 +12,13 @@ emissions column is appended at end-of-sim using the static
 emission factors; downstream consumers needing rigorous pollutant masses
 (CO2, NOx, PM, ...) should recompute from the energy column with their
 own factor set.
-
-Phase 3A.4 renamed this module from ``energy_use`` to ``consumption`` as
-part of the broader ``record_energy_use`` → ``record_consumption``
-generalization (see ``WORKFLOW_ENGINE_PLAN.md`` decision #11). Phase
-3A.5 then renamed the output dataframe variable
-``vehicle_log_df`` → ``resource_log_df``, renamed the column
-``energy_consumption(gal_or_kWh)`` → ``consumption_value``, and added
-``role`` and ``quantity`` columns so the same dataframe can absorb
-non-energy consumption rows in Phase 3D.
 """
 from altrios.lifts import utilities
 
-# Module-level consumption record buffer; populated by container_process /
-# handle_remaining_oc / crane_unload_process / crane_load_process /
-# truck_entry / truck_exit and consumed by run_terminal_simulation, which
-# materializes it into a polars DataFrame returned to the caller.
+# Module-level consumption record buffer; populated by the SimPy actor
+# helpers and read by ``assemble_outputs`` to build the freight
+# ``resource_log`` DataFrame. Helpers also dual-write each row to the
+# runner's ``OutputCollector`` when one is attached to state.
 consumption_records: list = []
 
 # Approximate CO2-equivalent emission factors, applied at end-of-sim to
@@ -146,11 +138,12 @@ def _record_side_consumption(output, energy_use_config, hostler_obj, train_id, c
 
 
 # ---------------------------------------------------------------------------
-# Phase 1F helpers for the new flow modules (yard_flow / vessel_flow /
-# drayage_flow). As of Phase 1H these pass equipment-specific vehicle keys
-# to ``compute_consumption``, which resolves them against the per-equipment
-# rates in ``energy_use.load_consumption`` / ``energy_use.trip_consumption``
-# (with the legacy ``crane_*`` / ``hostler_*`` keys retained as fallbacks).
+# Per-event consumption recording helpers used by the freight flow code
+# in :mod:`altrios.lifts.yard_flow` and :mod:`altrios.lifts.python_helpers`.
+# They pass equipment-specific vehicle keys to ``compute_consumption``,
+# which resolves them against the per-equipment rates in
+# ``energy_use.load_consumption`` / ``energy_use.trip_consumption``
+# (with ``crane_*`` / ``hostler_*`` keys retained as fallbacks).
 # ---------------------------------------------------------------------------
 
 def _record_stack_lift_consumption(

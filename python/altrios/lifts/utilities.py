@@ -653,13 +653,10 @@ def record_consumption(consumption_records: list | None, vehicle_type: str, fuel
     """Build a consumption record row.
 
     If ``consumption_records`` is non-None, the row is also appended to
-    it (legacy buffer; consumed by
-    :func:`terminal_sim.run_terminal_simulation`). Always returns the row
-    dict so callers can dual-write into a workflow-engine
-    :class:`OutputCollector`.
-
-    The legacy module-level buffer is retained until the legacy
-    ``run_terminal_simulation`` path is deleted in Phase A.9.
+    it (the module-level buffer in :mod:`altrios.lifts.consumption`,
+    consumed by :func:`altrios.lifts.python_helpers.assemble_outputs`).
+    Always returns the row dict so callers can additionally dual-write
+    into a workflow-engine :class:`OutputCollector`.
     """
     row = {
         "resource_type": vehicle_type.lower(),

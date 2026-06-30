@@ -7,19 +7,26 @@ registry; the freight catalog YAML then references the registered
 names from ``schedule_mappings``, ``state_init``, and ``python:`` step
 ``call:`` parameters.
 
-**Phase 3 / Strategy B scope:** this module is the entire "freight
-Python surface" the YAML catalog calls into. Helpers are thin wrappers
-around existing freight code in :mod:`altrios.lifts.train_flow`,
-:mod:`altrios.lifts.drayage_flow`, :mod:`altrios.lifts.vessel_flow`,
-:mod:`altrios.lifts.utilities`, and :mod:`altrios.lifts.consumption`.
-**No domain logic lives in this module under B** — it only adapts
-signatures between the engine's calling conventions and the existing
-helpers' calling conventions.
+This module owns the entire freight Python surface that the YAML
+catalog calls into:
 
-**Phase 3 / Strategy A removes most of this module:** once helpers are
-refactored to take ``(env, state, config, output, ...)`` directly,
-the arrival-wrapper layer and the adapter constructor go away. Only
-the schedule builders and post-process callables survive.
+* ``state_init`` (``freight.build_freight_state``) -- seeds RNG,
+  builds the ResourceSpec union, attaches pools / event buffers /
+  distance table to ``state``.
+* Schedule builders -- ``freight.build_train_schedule``,
+  ``freight.build_drayage_schedule_{synth,csv}``,
+  ``freight.build_vessel_schedule``.
+* Per-arrival ``python:`` escape hatches called from the fine-grained
+  YAML graphs in ``catalog.yaml`` (e.g. ``unload_one_ic``,
+  ``load_one_oc``, ``vessel_drain_unload``, ``vessel_drain_load``,
+  ``drayage_dropoff``, ``drayage_pickup``). These compose the
+  irreducibly stateful pieces (SimPy generators for stack-in/stack-out
+  /yard_tractor_haul, the STS-crane parallel worker pattern, the
+  greedy schedule matcher).
+* ``assemble_outputs`` -- post-run helper that materializes the
+  freight ``container_data`` / ``resource_log`` DataFrames from a
+  :class:`RunResult` (called by demos and the smoke script after
+  :func:`run_site`).
 """
 from __future__ import annotations
 
@@ -50,9 +57,10 @@ from altrios.workflow_engine import build_state_from_specs
 from altrios.workflow_engine.registry import register
 
 
-# Container-event surface for each mode. Mirrors the tuples in the legacy
-# ``terminal_sim`` module; lifted here so the catalog can reference them
-# at post-process time without import gymnastics.
+# Container-event surface for each mode. Looked up by
+# :func:`assemble_outputs` so the wide-form pivot has a stable column
+# order across runs (and so post-process consumers know which events to
+# expect for a given mode).
 _TRUCK_RAIL_EVENT_TYPES: tuple[str, ...] = (
     "train_arrival_expected", "train_arrival_actual",
     "rail_track_rtg_unload",
@@ -108,10 +116,9 @@ def build_freight_state(
 
     Responsibilities:
 
-    1. Seed Python's stdlib :mod:`random` module so per-run draws
-       match the legacy ``run_terminal_simulation`` baselines (the
-       freight generators call ``random.uniform``/``random.random``
-       directly).
+    1. Seed Python's stdlib :mod:`random` module so per-run draws are
+       reproducible at the pinned smoke baselines (the freight
+       helpers call ``random.uniform``/``random.random`` directly).
     2. Reset the module-level ``consumption_records`` buffer so repeat
        runs in the same process produce clean output.
     3. Attach a fresh ``container_events: list`` to ``state`` (the
@@ -229,8 +236,7 @@ def build_drayage_schedule_synth(
 
     When ``schedule is None``, **synthesizes** drayage events from the
     train consist plan (one dropoff before each train, one pickup after
-    each train; matches the legacy
-    ``_synthesize_drayage_from_trains`` default in ``terminal_sim``).
+    each train; see :func:`_synthesize_drayage_from_trains`).
     When ``schedule`` is supplied, delegates to
     :func:`utilities.build_drayage_schedule`.
     """
@@ -242,8 +248,9 @@ def build_drayage_schedule_synth(
             for e in entries
         ]
 
-    # No explicit drayage schedule: synthesize from trains (matches
-    # legacy ``_synthesize_drayage_from_trains`` default behavior).
+    # No explicit drayage schedule: synthesize from trains (one
+    # dropoff per OC just before each train, one pickup per IC just
+    # after; see ``_synthesize_drayage_from_trains``).
     df = pl.read_csv(_resources_root() / "train_consist_plan.csv")
     df = df.with_columns(pl.lit("Intermodal").alias("Train_Type"))
     train_entries = utilities.build_train_timetable(df, terminal_name, as_dicts=True)
@@ -262,8 +269,7 @@ def build_drayage_schedule_csv(
 
     Falls back to the canonical ``drayage_schedule.csv`` when
     ``schedule is None``. Vessel<->truck flows have no train consist
-    plan to synthesize from, so the CSV fallback IS the legacy default
-    (see ``terminal_sim._build_vessel_truck_schedule``)."""
+    plan to synthesize from, so the CSV fallback IS the default."""
     df = _resolve_table(schedule, _resources_root() / "drayage_schedule.csv")
     entries = utilities.build_drayage_schedule(df, terminal_name, as_dicts=True)
     return [
@@ -272,19 +278,17 @@ def build_drayage_schedule_csv(
     ]
 
 
-# ``freight.build_drayage_schedule`` is retained for catalogs that
-# already reference the old name; it dispatches to ``_synth`` because
-# the original (pre-B) behavior was the synthesize-from-trains path
-# (terminal_sim's truck_rail-style default). New catalogs should pick
-# one of ``_synth`` or ``_csv`` explicitly.
+# ``freight.build_drayage_schedule`` is a convenience alias dispatching
+# to ``_synth`` (the truck_rail-style default). New catalogs should
+# pick one of ``_synth`` or ``_csv`` explicitly to make the data source
+# obvious at the call site.
 @register("freight.build_drayage_schedule")
 def build_drayage_schedule(
     *, schedule: Any, terminal_name: str = "Allouez",
     env=None, state=None, config=None, layout=None, rng=None,
 ) -> list[dict]:
     """Default drayage builder. Delegates to
-    :func:`build_drayage_schedule_synth`; kept registered under the
-    bare name so the legacy-style catalog naming still works."""
+    :func:`build_drayage_schedule_synth` (synthesize-from-trains)."""
     return build_drayage_schedule_synth(
         schedule=schedule, terminal_name=terminal_name,
         env=env, state=state, config=config, layout=layout, rng=rng,
@@ -311,9 +315,8 @@ def _synthesize_drayage_from_trains(
     post_arrival_window_hr: float = 1.0,
 ) -> list[dict]:
     """One dropoff per OC just before each train arrival; one pickup per
-    IC just after. Truck-id partitioning matches the legacy logic in
-    :func:`terminal_sim._synthesize_drayage_from_trains` so train-rail
-    parity holds bit-for-bit."""
+    IC just after. Truck-id partitioning is chosen so train-rail
+    baselines match the pinned smoke values bit-for-bit."""
     out: list[dict] = []
     for entry in train_entries:
         train_id = int(entry["train_id"])
@@ -339,17 +342,15 @@ def _synthesize_drayage_from_trains(
     return out
 
 
-# ---- (Phase A.8a) Inlined private helpers ------------------------------
+# ---- Inlined drayage / vessel helpers ------------------------------
 #
-# These helpers used to live in ``train_flow.py`` / ``drayage_flow.py`` /
-# ``vessel_flow.py`` and were called by the legacy
-# ``freight.process_X_arrival`` wrappers, which were removed once the
-# YAML graphs decomposed train, drayage, and vessel arrivals into
-# fine-grained steps (Phases A.4/A.5/A.6). The remaining bodies below
-# are still referenced by the decomposed graphs through this module:
+# Small helpers that have no analogue in the workflow_engine primitive
+# set (they compose multiple SimPy events that share local state).
+# Called from the decomposed YAML graphs through this module:
 #
 #   * ``_truck_factory`` — eager truck construction inside
-#     ``setup_drayage_arrival`` (preserves legacy RNG draw position).
+#     ``setup_drayage_arrival`` (preserves the legacy RNG draw
+#     position so smoke baselines stay stable).
 #   * ``_gate_in`` / ``_gate_out`` / ``_drayage_zone_travel`` —
 #     composed by ``drayage_dropoff`` / ``drayage_pickup``.
 #   * ``_sts_unload_worker`` / ``_sts_load_worker`` — spawned per STS
@@ -482,18 +483,16 @@ def _sts_load_worker(env, state, config, berth_id: int, vessel_id: int,
         yield sts_pool.put(sts_obj)
 
 
-# ---- train-arrival decomposition (Phase A.4) -----------------------
+# ---- train-arrival decomposition -----------------------------------
 #
-# These helpers replace the single-step ``freight.process_train_arrival``
-# wrapper above with a YAML graph whose top-level orchestration
-# (track acquisition, IC/OC fork-join, arrival/depart events) is
-# expressed in workflow_engine primitives. The inner unload/load body
-# remains a python: escape hatch because (a) it composes the
-# yard_flow helpers (stack_in/stack_out/yard_tractor_haul) which are
-# their own SimPy generators, and (b) the lift_time random.uniform
-# draw is interleaved with consumption recording in a way that's
-# clearer in Python than YAML. Phase A would further decompose the
-# helpers themselves if needed.
+# The train-arrival graph in ``catalog.yaml`` orchestrates track
+# acquisition, the IC/OC fork-join, and arrival/depart events through
+# workflow_engine primitives. The inner unload/load body remains a
+# ``python:`` escape hatch because (a) it composes the yard_flow
+# helpers (stack_in/stack_out/yard_tractor_haul), each its own SimPy
+# generator, and (b) the lift_time random.uniform draw is interleaved
+# with consumption recording in a way that's clearer in Python than
+# YAML.
 
 
 @register("freight.setup_train_arrival")
@@ -522,9 +521,7 @@ def setup_train_arrival(*, env, entity) -> SimpleNamespace:
 @register("freight.record_train_arrival_expected")
 def record_train_arrival_expected(*, env, state, meta) -> None:
     """Pre-record ``train_arrival_expected`` for every IC at the
-    train's scheduled arrival time. Mirrors the loop the legacy
-    ``train_flow.process_train_arrival`` runs before yielding the
-    arrival timeout."""
+    train's scheduled arrival time."""
     for ic_id in meta.ic_ids:
         ic_label = container(type="Inbound", id=ic_id, train_id=meta.train_id)
         utilities.record_container_event(
@@ -534,8 +531,8 @@ def record_train_arrival_expected(*, env, state, meta) -> None:
 
 @register("freight.log_train_on_track")
 def log_train_on_track(*, env, meta, track_id) -> None:
-    """One-liner log statement; preserved verbatim from the legacy
-    ``process_train_arrival`` so ``--log_level basic`` output matches."""
+    """One-liner log statement so ``--log_level basic`` output
+    documents each train being placed on its assigned track."""
     utilities.log(
         loggingLevel.BASIC,
         f"Time {env.now:.3f}: Train {meta.train_id} on track {track_id} "
@@ -547,11 +544,9 @@ def log_train_on_track(*, env, meta, track_id) -> None:
 def unload_one_ic(*, env, state, config, track_id, train_id, ic_id):
     """Lift one IC off the train and route it to the stack.
 
-    YAML-driven equivalent of legacy ``train_flow._unload_one_ic``
-    minus the manual fork-join args (parallelism is now the engine's
-    ``loop parallel:true`` primitive). The ``train_arrival_actual``
-    container-event recording (legacy: inline in the spawning loop)
-    moves here so the loop step sees no Python side effects.
+    The ``train_arrival_actual`` container-event is recorded here so
+    the spawning ``loop parallel:true`` step sees no Python side
+    effects.
     """
     ic = container(type="Inbound", id=int(ic_id), train_id=int(train_id))
     utilities.record_container_event(
@@ -590,8 +585,7 @@ def unload_one_ic(*, env, state, config, track_id, train_id, ic_id):
 def load_one_oc(*, env, state, config, track_id, train_id):
     """Pull one OC off the stack and load it onto the train.
 
-    YAML-driven equivalent of legacy ``train_flow._load_one_oc`` minus
-    the fork-join args. The loaded OC is appended to
+    The loaded OC is appended to
     ``state.loaded_ocs_by_train[train_id]`` so the post-load
     ``freight.record_train_depart_events`` step can record the
     ``train_depart`` row for each OC at the actual departure time.
@@ -660,9 +654,9 @@ def record_train_depart_events(*, env, state, train_id) -> None:
 @register("freight.setup_drayage_arrival")
 def setup_drayage_arrival(*, env, entity, config) -> SimpleNamespace:
     """Normalize a ``drayage``-kind entity into a SimpleNamespace and
-    construct the drayage truck object eagerly (matching the legacy
-    ``random.random()`` draw position inside
-    :func:`drayage_flow.process_drayage_arrival`)."""
+    construct the drayage truck object eagerly. The truck-factory call
+    happens here (before any ``yield``) so the ``random.random()``
+    draw position is locked, keeping pinned smoke baselines stable."""
     attrs = dict(entity.attrs) if hasattr(entity, "attrs") else dict(vars(entity))
     truck_id = int(attrs["truck_id"])
     action = str(attrs["action"])
@@ -680,10 +674,9 @@ def setup_drayage_arrival(*, env, entity, config) -> SimpleNamespace:
 
 @register("freight.drayage_dropoff")
 def drayage_dropoff(*, env, state, config, meta):
-    """Dropoff branch of the drayage flow. Mirrors
-    :func:`drayage_flow.process_drayage_arrival` lines under the
-    ``dropoff`` action (truck brings export container into terminal,
-    stack-in onto main stack, exits empty)."""
+    """Dropoff branch of the drayage flow: truck brings an export
+    container into the terminal, stack-in onto the main stack, exits
+    empty."""
     oc = container(type="Outbound", id=meta.truck_id, train_id=0)
     if meta.container_id:
         utilities.record_container_event(
@@ -698,10 +691,8 @@ def drayage_dropoff(*, env, state, config, meta):
 
 @register("freight.drayage_pickup")
 def drayage_pickup(*, env, state, config, meta):
-    """Pickup branch of the drayage flow. Mirrors
-    :func:`drayage_flow.process_drayage_arrival` lines under the
-    ``pickup`` action (empty truck claims a container off the stack
-    and exits loaded)."""
+    """Pickup branch of the drayage flow: empty truck claims a
+    container off the stack and exits loaded."""
     utilities.record_container_event(
         state, f"DrayageTruck-{meta.truck_id}", "drayage_arrival", env.now,
     )
@@ -711,7 +702,7 @@ def drayage_pickup(*, env, state, config, meta):
     yield env.process(_gate_out(env, state, config, meta.truck_obj, container_obj=ic))
 
 
-# ---- A.6: vessel arrival decomposition --------------------------------
+# ---- vessel arrival decomposition --------------------------------
 
 
 @register("freight.setup_vessel_arrival")
@@ -732,8 +723,9 @@ def setup_vessel_arrival(*, env, entity):
 @register("freight.vessel_pre_record_expected")
 def vessel_pre_record_expected(*, env, state, meta):
     """Records ``vessel_arrival_expected`` for each IC at the scheduled
-    arrival time -- mirrors the pre-loop in
-    :func:`vessel_flow.process_vessel_arrival`."""
+    arrival time -- runs before the berth-acquire wait so the
+    "expected" timestamps are pinned to the scheduled arrival rather
+    than the actual one."""
     for ic_id in range(1, meta.ic_count + 1):
         ic = container(type="Inbound", id=ic_id, train_id=meta.vessel_id)
         utilities.record_container_event(
@@ -774,9 +766,7 @@ def prepare_vessel_berth_ctx(*, env, state, meta):
 @register("freight.vessel_drain_unload")
 def vessel_drain_unload(*, env, state, config, meta, berth_ctx):
     """Spawn one STS unload worker per crane slot at this berth and wait
-    for all of them to drain the per-vessel ic_queue.  Wraps the
-    parallel ``AllOf`` block from the legacy
-    :func:`vessel_flow.process_vessel_arrival`."""
+    for all of them to drain the per-vessel ic_queue."""
     procs = [
         env.process(
             _sts_unload_worker(
@@ -838,18 +828,11 @@ def assemble_outputs(
 
     The runner returns a :class:`RunResult` whose ``output``
     :class:`OutputCollector` receives the consumption rows written by
-    the (dual-write) freight Python helpers (Phase A.1). The
-    container-events buffer is still on ``state.container_events``
-    (legacy attribute; Phase A.2 migrates it onto the collector). This
-    helper pivots both buffers into the same
-    ``(container_data, resource_log)`` shape the legacy
-    :func:`terminal_sim.run_terminal_simulation` returned, so demos
-    and parity tests can compare apples to apples.
-
-    Phase A.9 deletes the legacy ``run_terminal_simulation`` path and
-    the dual-write fallback, at which point this helper becomes a
-    direct ``result.output.to_freight_dataframes()`` call (or
-    equivalent).
+    the dual-write freight Python helpers. The container-events buffer
+    is also dual-written, both to ``state.container_events`` and to
+    the collector's ``event_log``. This helper pivots both buffers
+    into the ``(container_data, resource_log)`` shape the freight
+    demos and tests consume.
 
     Parameters
     ----------
@@ -863,15 +846,14 @@ def assemble_outputs(
     Returns
     -------
     (container_data, resource_log)
-        Two polars DataFrames matching the legacy return shape.
+        Two polars DataFrames.
     """
     event_types = list(EVENT_TYPES_BY_MODE[mode_name])
 
-    # Container events: Phase A.2 dual-writes the legacy
-    # ``state.container_events`` tuple list AND the engine's
-    # ``result.output.event_log``. Prefer the collector (authoritative
-    # for the run_site path); fall back to the legacy buffer if the
-    # collector is empty.
+    # Container events are dual-written to ``state.container_events``
+    # AND the engine's ``result.output.event_log``. Prefer the
+    # collector (authoritative for the run_site path); fall back to
+    # the state buffer if the collector is empty.
     event_rows = list(result.output.event_log)
     if event_rows:
         # Collector rows are dicts; pivot expects long-form columns.
@@ -920,12 +902,11 @@ def assemble_outputs(
         .select(pl.col("container_id"), pl.exclude("container_id"))
     )
 
-    # Consumption rows: Phase A.1 dual-writes the legacy module-global
-    # ``consumption_records`` AND the engine's
+    # Consumption rows are dual-written to the module-level
+    # ``consumption_records`` buffer AND the engine's
     # ``result.output.consumption_log``. Prefer the collector
     # (authoritative for the run_site path); fall back to the module
-    # buffer if the collector is empty (defensive — should not happen
-    # under A.1+).
+    # buffer if the collector is empty (defensive).
     output_rows = list(result.output.consumption_log)
     if output_rows:
         consumption_rows = output_rows
@@ -957,10 +938,9 @@ def assemble_outputs(
     )
 
     # Truck_rail derived columns (container_processing_time + train_id
-    # extraction) — kept inline rather than as a separate registered
-    # post-process callable because B doesn't yet plumb post-process
-    # hooks through the runner. Phase A.9 moves this into a registered
-    # callable invoked from catalog post_process.
+    # extraction) — inlined here rather than as a separate registered
+    # post-process callable because the catalog post_process hook
+    # isn't yet plumbed through the runner.
     if mode_name == "truck_rail":
         container_data = _truck_rail_post_process(container_data)
 
@@ -968,9 +948,7 @@ def assemble_outputs(
 
 
 def _truck_rail_post_process(container_data: pl.DataFrame) -> pl.DataFrame:
-    """Truck_rail-specific derived columns. Lifted verbatim from
-    :func:`terminal_sim._truck_rail_post_process` (the resource_log
-    branch was a no-op there too, so we drop it).
+    """Truck_rail-specific derived columns.
 
     Adds:
     - ``container_processing_time``: gate-out minus expected arrival
