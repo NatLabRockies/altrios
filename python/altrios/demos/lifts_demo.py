@@ -87,7 +87,6 @@ _lifts_result = run_site(
     schedule_overrides={"train_arrivals": train_consist_plan},
 )
 container_data, resource_log_df = assemble_outputs(_lifts_result, mode_name="truck_rail")
-terminal_obj = _lifts_result.state.terminal_adapter
 
 t2_main = time.perf_counter()
 print(f"Elapsed time to run LIFTS simulation: {t2_main - t1_main:.3g} s")

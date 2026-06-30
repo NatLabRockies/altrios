@@ -48,19 +48,19 @@ def _fuel_type_for(vehicle_obj) -> str:
     return str(t).capitalize()
 
 
-def _record_trip_consumption(output, terminal, vehicle_obj, vehicle_kind, status, train_id,
+def _record_trip_consumption(output, energy_use_config, vehicle_obj, vehicle_kind, status, train_id,
                              container_id, event_type, travel_time, env_now, track_id=""):
     """Helper to compute + append a trip consumption record.
 
     ``output`` (``OutputCollector`` or ``None``) receives the row via
     :meth:`OutputCollector.record_consumption` when non-None; the
     module-level :data:`consumption_records` buffer is also populated
-    for the legacy ``run_terminal_simulation`` path. Phase A.9 deletes
-    the legacy buffer.
+    for the legacy parity tests. ``energy_use_config`` is the
+    ``config["energy_use"]`` sub-dict.
     """
     fuel_type = _fuel_type_for(vehicle_obj)
     consumption_value = utilities.compute_consumption(
-        terminal, status=status, move="trip", vehicle=vehicle_kind,
+        energy_use_config, status=status, move="trip", vehicle=vehicle_kind,
         energy_type=fuel_type, travel_time=travel_time,
     )
     row = utilities.record_consumption(
@@ -82,12 +82,12 @@ def _record_trip_consumption(output, terminal, vehicle_obj, vehicle_kind, status
         output.record_consumption(row)
 
 
-def _record_load_consumption(output, terminal, crane_obj, status, train_id, container_id,
+def _record_load_consumption(output, energy_use_config, crane_obj, status, train_id, container_id,
                              event_type, env_now, track_id):
     """Helper to compute + append a per-lift crane consumption record."""
     fuel_type = _fuel_type_for(crane_obj)
     consumption_value = utilities.compute_consumption(
-        terminal, status=status, move="load", vehicle="crane",
+        energy_use_config, status=status, move="load", vehicle="crane",
         energy_type=fuel_type, travel_time=0.0,
     )
     row = utilities.record_consumption(
@@ -109,7 +109,7 @@ def _record_load_consumption(output, terminal, crane_obj, status, train_id, cont
         output.record_consumption(row)
 
 
-def _record_side_consumption(output, terminal, hostler_obj, train_id, container_id, env_now):
+def _record_side_consumption(output, energy_use_config, hostler_obj, train_id, container_id, env_now):
     """Helper to compute + append a side-pick consumption record.
 
     The side-pick is logically performed by a side-loading crane, but no
@@ -123,7 +123,7 @@ def _record_side_consumption(output, terminal, hostler_obj, train_id, container_
     """
     fuel_type = _fuel_type_for(hostler_obj)
     consumption_value = utilities.compute_consumption(
-        terminal, status="loaded", move="side", vehicle="hostler",
+        energy_use_config, status="loaded", move="side", vehicle="hostler",
         energy_type=fuel_type, travel_time=0.0,
     )
     row = utilities.record_consumption(
@@ -154,7 +154,7 @@ def _record_side_consumption(output, terminal, hostler_obj, train_id, container_
 # ---------------------------------------------------------------------------
 
 def _record_stack_lift_consumption(
-    output, terminal, crane_obj, pool_name, status, train_id,
+    output, energy_use_config, crane_obj, pool_name, status, train_id,
     container_id, event_type, env_now, zone="stack",
 ):
     """Per-lift consumption record for a stack-lift equipment piece.
@@ -167,7 +167,7 @@ def _record_stack_lift_consumption(
     """
     fuel_type = _fuel_type_for(crane_obj)
     consumption_value = utilities.compute_consumption(
-        terminal, status=status, move="load", vehicle=pool_name,
+        energy_use_config, status=status, move="load", vehicle=pool_name,
         energy_type=fuel_type, travel_time=0.0,
     )
     row = utilities.record_consumption(
@@ -192,7 +192,7 @@ def _record_stack_lift_consumption(
 
 
 def _record_yard_tractor_trip_consumption(
-    output, terminal, tractor_obj, status, train_id,
+    output, energy_use_config, tractor_obj, status, train_id,
     container_id, event_type, travel_time, env_now,
 ):
     """Per-trip consumption record for a yard tractor haul. Looks up the
@@ -200,7 +200,7 @@ def _record_yard_tractor_trip_consumption(
     (with the legacy ``hostler_*`` keys as fallback)."""
     fuel_type = _fuel_type_for(tractor_obj)
     consumption_value = utilities.compute_consumption(
-        terminal, status=status, move="trip", vehicle="yard_tractor",
+        energy_use_config, status=status, move="trip", vehicle="yard_tractor",
         energy_type=fuel_type, travel_time=travel_time,
     )
     row = utilities.record_consumption(

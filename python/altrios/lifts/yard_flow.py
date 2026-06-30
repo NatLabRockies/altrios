@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     import simpy  # noqa: F401
 
 
-def _choose_stack_crane(env, terminal, strategy: str = "availability"):
+def _choose_stack_crane(env, state, strategy: str = "availability"):
     """Acquire one stack crane from either ``main_stack_rtgs`` or
     ``top_picks`` according to ``strategy``.
 
@@ -74,7 +74,6 @@ def _choose_stack_crane(env, terminal, strategy: str = "availability"):
     ``"top_pick_only"``
         Always wait on ``top_picks``.
     """
-    state = terminal.state
     rtg_pool = state.main_stack_rtgs
     tp_pool = state.top_picks
 
@@ -96,14 +95,14 @@ def _choose_stack_crane(env, terminal, strategy: str = "availability"):
     return ("top_pick", crane_obj)
 
 
-def _stack_crane_strategy(terminal) -> str:
-    """Read the configured routing strategy from ``yard_stack.routing_strategy``
-    on the terminal config; default ``"availability"``."""
-    cfg = terminal.config.get("yard_stack", {}) or {}
+def _stack_crane_strategy(config) -> str:
+    """Read the configured routing strategy from ``yard_stack.routing_strategy``;
+    default ``"availability"``."""
+    cfg = config.get("yard_stack", {}) or {}
     return str(cfg.get("routing_strategy", "availability"))
 
 
-def stack_in(env, terminal, container_obj, source_chassis=None):
+def stack_in(env, state, config, container_obj, source_chassis=None):
     """Lift ``container_obj`` off ``source_chassis`` onto the main stack.
 
     ``source_chassis`` may be ``None`` for endpoints that don't carry the
@@ -113,24 +112,23 @@ def stack_in(env, terminal, container_obj, source_chassis=None):
     back to its pool (terminal chassis) or to keep it with the endpoint
     vehicle (drayage road chassis).
     """
-    state = terminal.state
     pool_name, crane_obj = yield env.process(
-        _choose_stack_crane(env, terminal, _stack_crane_strategy(terminal))
+        _choose_stack_crane(env, state, _stack_crane_strategy(config))
     )
     pool = state.main_stack_rtgs if pool_name == "main_stack_rtg" else state.top_picks
     try:
         lift_time = (
-            terminal.CONTAINERS_PER_CRANE_MOVE_MEAN
-            + random.uniform(0, terminal.CRANE_MOVE_DEV_TIME)
+            config["containers_per_crane_move_mean"]
+            + random.uniform(0, config["crane_move_dev_time"])
         )
         yield env.timeout(lift_time)
         yield state.container_stack.put(container_obj)
         utilities.record_container_event(
-            terminal, container_obj, "stack_in", env.now,
+            state, container_obj, "stack_in", env.now,
         )
         _record_stack_lift_consumption(
-            getattr(terminal, "output", None),
-            terminal, crane_obj, pool_name, status="loaded",
+            getattr(state, "output", None),
+            config["energy_use"], crane_obj, pool_name, status="loaded",
             train_id=getattr(container_obj, "train_id", ""),
             container_id=container_obj.to_string(),
             event_type=f"{pool_name}_stack_in",
@@ -140,7 +138,7 @@ def stack_in(env, terminal, container_obj, source_chassis=None):
         yield pool.put(crane_obj)
 
 
-def stack_out(env, terminal, container_obj=None, dest_chassis=None):
+def stack_out(env, state, config, container_obj=None, dest_chassis=None):
     """Pull one container off the main stack.
 
     Either takes ``container_obj`` as the *specific* container to remove
@@ -152,7 +150,6 @@ def stack_out(env, terminal, container_obj=None, dest_chassis=None):
     ``dest_chassis`` is recorded as a label; the caller manages the chassis
     lifecycle (see :func:`stack_in` for the rationale).
     """
-    state = terminal.state
     # Phase 1: stack is a flat Store; pick the head item. Callers that need
     # a specific container should pre-stage it or use a FilterStore in a
     # future phase.
@@ -165,21 +162,21 @@ def stack_out(env, terminal, container_obj=None, dest_chassis=None):
         _ = yield state.container_stack.get()
 
     pool_name, crane_obj = yield env.process(
-        _choose_stack_crane(env, terminal, _stack_crane_strategy(terminal))
+        _choose_stack_crane(env, state, _stack_crane_strategy(config))
     )
     pool = state.main_stack_rtgs if pool_name == "main_stack_rtg" else state.top_picks
     try:
         lift_time = (
-            terminal.CONTAINERS_PER_CRANE_MOVE_MEAN
-            + random.uniform(0, terminal.CRANE_MOVE_DEV_TIME)
+            config["containers_per_crane_move_mean"]
+            + random.uniform(0, config["crane_move_dev_time"])
         )
         yield env.timeout(lift_time)
         utilities.record_container_event(
-            terminal, container_obj, "stack_out", env.now,
+            state, container_obj, "stack_out", env.now,
         )
         _record_stack_lift_consumption(
-            getattr(terminal, "output", None),
-            terminal, crane_obj, pool_name, status="loaded",
+            getattr(state, "output", None),
+            config["energy_use"], crane_obj, pool_name, status="loaded",
             train_id=getattr(container_obj, "train_id", ""),
             container_id=container_obj.to_string(),
             event_type=f"{pool_name}_stack_out",
@@ -191,7 +188,7 @@ def stack_out(env, terminal, container_obj=None, dest_chassis=None):
 
 
 def yard_tractor_haul(
-    env, terminal, tractor_pool, container_obj, from_zone: str, to_zone: str,
+    env, state, config, tractor_pool, container_obj, from_zone: str, to_zone: str,
     travel_time: float | None = None,
 ):
     """Yard tractor pulled from ``tractor_pool`` hauls one container from
@@ -216,16 +213,16 @@ def yard_tractor_haul(
             # ``in_flight_hostler_count`` definition.
             in_flight = tractor_pool.capacity - len(tractor_pool.items)
             travel_time, _, _, _ = distances.simulate_hostler_track_travel(
-                tractor, in_flight, params=terminal.distances,
+                tractor, in_flight, params=state.distances,
             )
         yield env.timeout(travel_time)
         event_label = f"yard_tractor_{from_zone}_to_{to_zone}"
         utilities.record_container_event(
-            terminal, container_obj, event_label, env.now,
+            state, container_obj, event_label, env.now,
         )
         _record_yard_tractor_trip_consumption(
-            getattr(terminal, "output", None),
-            terminal, tractor, status="loaded",
+            getattr(state, "output", None),
+            config["energy_use"], tractor, status="loaded",
             train_id=getattr(container_obj, "train_id", ""),
             container_id=container_obj.to_string(),
             event_type=event_label,

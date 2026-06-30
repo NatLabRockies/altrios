@@ -556,14 +556,13 @@ def build_drayage_schedule_poisson(
     return df
 
 
-def record_container_event(terminal, container, event_type, timestamp):
+def record_container_event(state, container, event_type, timestamp):
     """Record a container-event row.
 
-    Phase A.2: dual-writes to the legacy
-    ``terminal.state.container_events`` tuple list (consumed by
-    :func:`terminal_sim.run_terminal_simulation`) AND to the engine's
-    :class:`OutputCollector` via ``terminal.output.record_event`` when
-    available. Phase A.9 deletes the legacy buffer.
+    Appends to ``state.container_events`` (the freight state_init seeds
+    it as an empty list). When ``state.output`` is set by the
+    workflow_engine runner, the row is also forwarded to the
+    :class:`OutputCollector` for engine-side dual write.
     """
     if type(container) is str:
         container_string = container
@@ -572,9 +571,9 @@ def record_container_event(terminal, container, event_type, timestamp):
 
     # Flat append is much cheaper in the hot path than the previous
     # dict-of-dict setdefault+assignment; the consumer pivots at end-of-sim.
-    terminal.state.container_events.append((container_string, event_type, timestamp))
+    state.container_events.append((container_string, event_type, timestamp))
 
-    output = getattr(terminal, "output", None)
+    output = getattr(state, "output", None)
     if output is not None:
         output.record_event({
             "container_id": container_string,
@@ -583,11 +582,14 @@ def record_container_event(terminal, container, event_type, timestamp):
         })
 
 
-def compute_consumption(terminal, status: str, move: str, vehicle: str, energy_type: str, travel_time: float) -> float:
+def compute_consumption(energy_use_config, status: str, move: str, vehicle: str, energy_type: str, travel_time: float) -> float:
     """Return the per-event consumption for one resource action.
 
     The returned value is in the native unit of the configured
     ``*_consumption`` block: gallons for Diesel/Hybrid, kWh for Electric.
+
+    ``energy_use_config`` is the ``config["energy_use"]`` sub-dict
+    (consumption-rate table).
 
     Per-equipment rates: when ``vehicle`` is a specific equipment name
     (e.g. ``"main_stack_rtg"``, ``"sts_crane"``, ``"yard_tractor"``) the
@@ -597,7 +599,7 @@ def compute_consumption(terminal, status: str, move: str, vehicle: str, energy_t
     (``vehicle="crane"``, ``vehicle="hostler"``, ``vehicle="truck"``) hit
     the legacy key directly.
     """
-    cfg = terminal.energy_use_config
+    cfg = energy_use_config
 
     move = move.lower()
     status = status.lower()

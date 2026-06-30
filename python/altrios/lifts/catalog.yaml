@@ -90,7 +90,7 @@ modes:
               call: freight.record_train_arrival_expected
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
                 meta: "{bindings.meta}"
             next: wait_for_arrival
           - id: wait_for_arrival
@@ -110,7 +110,6 @@ modes:
               call: freight.log_train_on_track
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
                 meta: "{bindings.meta}"
                 track_id: "{bindings.track_id}"
             next: unload_loop
@@ -128,7 +127,8 @@ modes:
               call: freight.unload_one_ic
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
+                config: "{config}"
                 track_id: "{bindings.track_id}"
                 train_id: "{bindings.meta.train_id}"
                 ic_id: "{bindings.ic_id}"
@@ -146,7 +146,8 @@ modes:
               call: freight.load_one_oc
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
+                config: "{config}"
                 track_id: "{bindings.track_id}"
                 train_id: "{bindings.meta.train_id}"
           - id: wait_for_depart
@@ -160,7 +161,7 @@ modes:
               call: freight.record_train_depart_events
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
                 train_id: "{bindings.meta.train_id}"
             next: release_track
           - id: release_track
@@ -181,7 +182,7 @@ modes:
               args:
                 env: "{env}"
                 entity: "{entity}"
-                terminal: "{state.terminal_adapter}"
+                config: "{config}"
               bind: meta
             next: wait_for_arrival
           - id: wait_for_arrival
@@ -201,7 +202,8 @@ modes:
               call: freight.drayage_dropoff
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
+                config: "{config}"
                 meta: "{bindings.meta}"
           - id: do_pickup
             type: python
@@ -209,7 +211,8 @@ modes:
               call: freight.drayage_pickup
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
+                config: "{config}"
                 meta: "{bindings.meta}"
 
   # ---- rail_vessel ----
@@ -239,7 +242,7 @@ modes:
               call: freight.record_train_arrival_expected
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
                 meta: "{bindings.meta}"
             next: wait_for_arrival
           - id: wait_for_arrival
@@ -259,7 +262,6 @@ modes:
               call: freight.log_train_on_track
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
                 meta: "{bindings.meta}"
                 track_id: "{bindings.track_id}"
             next: unload_loop
@@ -277,7 +279,8 @@ modes:
               call: freight.unload_one_ic
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
+                config: "{config}"
                 track_id: "{bindings.track_id}"
                 train_id: "{bindings.meta.train_id}"
                 ic_id: "{bindings.ic_id}"
@@ -295,7 +298,8 @@ modes:
               call: freight.load_one_oc
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
+                config: "{config}"
                 track_id: "{bindings.track_id}"
                 train_id: "{bindings.meta.train_id}"
           - id: wait_for_depart
@@ -309,7 +313,7 @@ modes:
               call: freight.record_train_depart_events
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
                 train_id: "{bindings.meta.train_id}"
             next: release_track
           - id: release_track
@@ -340,7 +344,7 @@ modes:
               call: freight.vessel_pre_record_expected
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
                 meta: "{bindings.meta}"
             next: wait_for_arrival
           - id: wait_for_arrival
@@ -360,7 +364,7 @@ modes:
               call: freight.prepare_vessel_berth_ctx
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
                 meta: "{bindings.meta}"
               bind: berth_ctx
             next: drain_unload
@@ -370,7 +374,8 @@ modes:
               call: freight.vessel_drain_unload
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
+                config: "{config}"
                 meta: "{bindings.meta}"
                 berth_ctx: "{bindings.berth_ctx}"
             next: drain_load
@@ -380,7 +385,8 @@ modes:
               call: freight.vessel_drain_load
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
+                config: "{config}"
                 meta: "{bindings.meta}"
                 berth_ctx: "{bindings.berth_ctx}"
             next: wait_for_depart
@@ -395,7 +401,7 @@ modes:
               call: freight.record_vessel_depart
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
                 vessel_id: "{bindings.meta.vessel_id}"
             next: release_berth
           - id: release_berth
@@ -428,7 +434,7 @@ modes:
               call: freight.vessel_pre_record_expected
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
                 meta: "{bindings.meta}"
             next: wait_for_arrival
           - id: wait_for_arrival
@@ -448,7 +454,7 @@ modes:
               call: freight.prepare_vessel_berth_ctx
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
                 meta: "{bindings.meta}"
               bind: berth_ctx
             next: drain_unload
@@ -458,7 +464,8 @@ modes:
               call: freight.vessel_drain_unload
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
+                config: "{config}"
                 meta: "{bindings.meta}"
                 berth_ctx: "{bindings.berth_ctx}"
             next: drain_load
@@ -468,7 +475,8 @@ modes:
               call: freight.vessel_drain_load
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
+                config: "{config}"
                 meta: "{bindings.meta}"
                 berth_ctx: "{bindings.berth_ctx}"
             next: wait_for_depart
@@ -483,7 +491,7 @@ modes:
               call: freight.record_vessel_depart
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
                 vessel_id: "{bindings.meta.vessel_id}"
             next: release_berth
           - id: release_berth
@@ -501,7 +509,7 @@ modes:
               args:
                 env: "{env}"
                 entity: "{entity}"
-                terminal: "{state.terminal_adapter}"
+                config: "{config}"
               bind: meta
             next: wait_for_arrival
           - id: wait_for_arrival
@@ -521,7 +529,8 @@ modes:
               call: freight.drayage_dropoff
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
+                config: "{config}"
                 meta: "{bindings.meta}"
           - id: do_pickup
             type: python
@@ -529,7 +538,8 @@ modes:
               call: freight.drayage_pickup
               args:
                 env: "{env}"
-                terminal: "{state.terminal_adapter}"
+                state: "{state}"
+                config: "{config}"
                 meta: "{bindings.meta}"
 
 schedule_mappings:
