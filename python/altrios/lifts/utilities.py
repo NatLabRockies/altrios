@@ -557,6 +557,14 @@ def build_drayage_schedule_poisson(
 
 
 def record_container_event(terminal, container, event_type, timestamp):
+    """Record a container-event row.
+
+    Phase A.2: dual-writes to the legacy
+    ``terminal.state.container_events`` tuple list (consumed by
+    :func:`terminal_sim.run_terminal_simulation`) AND to the engine's
+    :class:`OutputCollector` via ``terminal.output.record_event`` when
+    available. Phase A.9 deletes the legacy buffer.
+    """
     if type(container) is str:
         container_string = container
     else:
@@ -565,6 +573,14 @@ def record_container_event(terminal, container, event_type, timestamp):
     # Flat append is much cheaper in the hot path than the previous
     # dict-of-dict setdefault+assignment; the consumer pivots at end-of-sim.
     terminal.state.container_events.append((container_string, event_type, timestamp))
+
+    output = getattr(terminal, "output", None)
+    if output is not None:
+        output.record_event({
+            "container_id": container_string,
+            "event_type": event_type,
+            "timestamp": float(timestamp),
+        })
 
 
 def compute_consumption(terminal, status: str, move: str, vehicle: str, energy_type: str, travel_time: float) -> float:
@@ -631,8 +647,19 @@ def compute_consumption(terminal, status: str, move: str, vehicle: str, energy_t
     return consumption
 
 
-def record_consumption(consumption_records: list, vehicle_type: str, fuel_type: str, resource_id: str, track_id: str, train_id: str, container_id: str, event_type: str, zone: str, consumption_value: float, travel_time: float, env_now: float, role: str, quantity: str = "energy") -> None:
-    consumption_records.append({
+def record_consumption(consumption_records: list | None, vehicle_type: str, fuel_type: str, resource_id: str, track_id: str, train_id: str, container_id: str, event_type: str, zone: str, consumption_value: float, travel_time: float, env_now: float, role: str, quantity: str = "energy") -> dict:
+    """Build a consumption record row.
+
+    If ``consumption_records`` is non-None, the row is also appended to
+    it (legacy buffer; consumed by
+    :func:`terminal_sim.run_terminal_simulation`). Always returns the row
+    dict so callers can dual-write into a workflow-engine
+    :class:`OutputCollector`.
+
+    The legacy module-level buffer is retained until the legacy
+    ``run_terminal_simulation`` path is deleted in Phase A.9.
+    """
+    row = {
         "resource_type": vehicle_type.lower(),
         "role": role,
         "fuel_type": fuel_type,
@@ -646,5 +673,8 @@ def record_consumption(consumption_records: list, vehicle_type: str, fuel_type: 
         "consumption_value": float(consumption_value),
         "load/travel_time(hr)": float(travel_time),
         "record_timestamp": float(env_now),
-    })
+    }
+    if consumption_records is not None:
+        consumption_records.append(row)
+    return row
 

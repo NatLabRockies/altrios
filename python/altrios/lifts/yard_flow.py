@@ -129,6 +129,7 @@ def stack_in(env, terminal, container_obj, source_chassis=None):
             terminal, container_obj, "stack_in", env.now,
         )
         _record_stack_lift_consumption(
+            getattr(terminal, "output", None),
             terminal, crane_obj, pool_name, status="loaded",
             train_id=getattr(container_obj, "train_id", ""),
             container_id=container_obj.to_string(),
@@ -177,6 +178,7 @@ def stack_out(env, terminal, container_obj=None, dest_chassis=None):
             terminal, container_obj, "stack_out", env.now,
         )
         _record_stack_lift_consumption(
+            getattr(terminal, "output", None),
             terminal, crane_obj, pool_name, status="loaded",
             train_id=getattr(container_obj, "train_id", ""),
             container_id=container_obj.to_string(),
@@ -222,6 +224,7 @@ def yard_tractor_haul(
             terminal, container_obj, event_label, env.now,
         )
         _record_yard_tractor_trip_consumption(
+            getattr(terminal, "output", None),
             terminal, tractor, status="loaded",
             train_id=getattr(container_obj, "train_id", ""),
             container_id=container_obj.to_string(),

@@ -132,6 +132,14 @@ class TerminalAdapter:
         self.state = state
         self.config = config
         self.layout = layout
+        # Engine output collector, set on state by the runner BEFORE
+        # state_init runs (so this adapter, built inside state_init,
+        # sees the live collector). The freight Python helpers reach
+        # the collector via ``getattr(terminal, "output", None)``;
+        # ``None`` here would silently disable the engine-side dual
+        # write, so we mirror it explicitly. Phase A.11 deletes the
+        # adapter; until then this is the single bridge.
+        self.output = getattr(state, "output", None)
 
         # Energy/consumption rate table (compute_consumption indexes
         # into this). Required for any freight run that records

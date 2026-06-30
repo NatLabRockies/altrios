@@ -49,6 +49,7 @@ def _unload_one_ic(
             terminal, ic, "rail_track_rtg_unload", env.now,
         )
         _record_stack_lift_consumption(
+            getattr(terminal, "output", None),
             terminal, rtg_obj, "rail_track_rtg", status="loaded",
             train_id=train_id, container_id=ic.to_string(),
             event_type="rail_track_rtg_unload", env_now=env.now,
@@ -104,6 +105,7 @@ def _load_one_oc(
             terminal, oc, "rail_track_rtg_load", env.now,
         )
         _record_stack_lift_consumption(
+            getattr(terminal, "output", None),
             terminal, rtg_obj, "rail_track_rtg", status="loaded",
             train_id=train_id, container_id=oc.to_string(),
             event_type="rail_track_rtg_load", env_now=env.now,

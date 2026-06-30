@@ -71,6 +71,7 @@ def _sts_unload_worker(env, terminal, berth_id: int, vessel_id: int,
                 terminal, ic, "sts_unload", env.now,
             )
             _record_stack_lift_consumption(
+                getattr(terminal, "output", None),
                 terminal, sts_obj, "sts_crane", status="loaded",
                 train_id=vessel_id,
                 container_id=ic.to_string(),
@@ -106,6 +107,7 @@ def _sts_load_worker(env, terminal, berth_id: int, vessel_id: int,
                 terminal, oc, "sts_load", env.now,
             )
             _record_stack_lift_consumption(
+                getattr(terminal, "output", None),
                 terminal, sts_obj, "sts_crane", status="loaded",
                 train_id=vessel_id,
                 container_id=oc.to_string(),

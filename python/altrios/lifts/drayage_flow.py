@@ -76,6 +76,7 @@ def _gate_in(env, terminal, truck_obj):
         terminal, f"DrayageTruck-{truck_obj.id}", "drayage_gate_in", env.now,
     )
     _record_trip_consumption(
+        getattr(terminal, "output", None),
         terminal, truck_obj, "truck", "loaded",
         getattr(truck_obj, "train_id", ""), "", "drayage_gate_in",
         travel_time, env.now,
@@ -98,6 +99,7 @@ def _gate_out(env, terminal, truck_obj, container_obj=None):
         terminal, container_label, "drayage_gate_out", env.now,
     )
     _record_trip_consumption(
+        getattr(terminal, "output", None),
         terminal, truck_obj, "truck",
         "loaded" if container_obj is not None else "empty",
         getattr(truck_obj, "train_id", ""),

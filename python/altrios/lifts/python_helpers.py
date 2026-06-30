@@ -392,17 +392,19 @@ def assemble_outputs(
     """End-of-run output assembly for B-phase freight runs.
 
     The runner returns a :class:`RunResult` whose ``output``
-    :class:`OutputCollector` is empty for freight under B (the legacy
-    generators append directly to ``state.container_events`` and
-    module-level ``consumption_records``, NOT to the engine's
-    collector). This helper pivots those buffers into the same
+    :class:`OutputCollector` receives the consumption rows written by
+    the (dual-write) freight Python helpers (Phase A.1). The
+    container-events buffer is still on ``state.container_events``
+    (legacy attribute; Phase A.2 migrates it onto the collector). This
+    helper pivots both buffers into the same
     ``(container_data, resource_log)`` shape the legacy
     :func:`terminal_sim.run_terminal_simulation` returned, so demos
     and parity tests can compare apples to apples.
 
-    Phase A migrates the underlying buffers onto
-    :class:`OutputCollector` and replaces this function with a direct
-    ``result.output.to_freight_dataframes()`` call (or equivalent).
+    Phase A.9 deletes the legacy ``run_terminal_simulation`` path and
+    the dual-write fallback, at which point this helper becomes a
+    direct ``result.output.to_freight_dataframes()`` call (or
+    equivalent).
 
     Parameters
     ----------
@@ -419,17 +421,34 @@ def assemble_outputs(
         Two polars DataFrames matching the legacy return shape.
     """
     event_types = list(EVENT_TYPES_BY_MODE[mode_name])
-    container_events = list(getattr(result.state, "container_events", []) or [])
 
-    events_long = pl.DataFrame(
-        container_events,
-        schema={
-            "container_id": pl.Utf8,
-            "event_type": pl.Utf8,
-            "timestamp": pl.Float64,
-        },
-        orient="row",
-    )
+    # Container events: Phase A.2 dual-writes the legacy
+    # ``state.container_events`` tuple list AND the engine's
+    # ``result.output.event_log``. Prefer the collector (authoritative
+    # for the run_site path); fall back to the legacy buffer if the
+    # collector is empty.
+    event_rows = list(result.output.event_log)
+    if event_rows:
+        # Collector rows are dicts; pivot expects long-form columns.
+        events_long = pl.DataFrame(
+            event_rows,
+            schema={
+                "container_id": pl.Utf8,
+                "event_type": pl.Utf8,
+                "timestamp": pl.Float64,
+            },
+        )
+    else:
+        container_events = list(getattr(result.state, "container_events", []) or [])
+        events_long = pl.DataFrame(
+            container_events,
+            schema={
+                "container_id": pl.Utf8,
+                "event_type": pl.Utf8,
+                "timestamp": pl.Float64,
+            },
+            orient="row",
+        )
     if events_long.height == 0:
         container_data = pl.DataFrame(
             schema={
@@ -456,8 +475,20 @@ def assemble_outputs(
         .select(pl.col("container_id"), pl.exclude("container_id"))
     )
 
+    # Consumption rows: Phase A.1 dual-writes the legacy module-global
+    # ``consumption_records`` AND the engine's
+    # ``result.output.consumption_log``. Prefer the collector
+    # (authoritative for the run_site path); fall back to the module
+    # buffer if the collector is empty (defensive — should not happen
+    # under A.1+).
+    output_rows = list(result.output.consumption_log)
+    if output_rows:
+        consumption_rows = output_rows
+    else:
+        consumption_rows = list(consumption_records)
+
     resource_log = pl.DataFrame(
-        consumption_records,
+        consumption_rows,
         schema={
             "resource_type": pl.Utf8,
             "role": pl.Utf8,

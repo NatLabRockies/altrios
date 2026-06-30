@@ -226,6 +226,16 @@ def run_site(
 
     layout = Layout.from_model(site.layout) if site.layout is not None else None
 
+    output = OutputCollector()
+
+    # Stash output on state so state_init hooks and python: step helpers
+    # can write into it without needing to thread it through every
+    # signature. The runner's per-graph ExecutionContext.output (built
+    # below) is the authoritative reference, but ``state.output`` is the
+    # ergonomic access path for Python escape-hatch helpers that don't
+    # otherwise see the ExecutionContext.
+    state.output = output
+
     # Run the catalog's state initializer, if one is registered.
     registry = get_registry()
     init_call = state_init or catalog.schedule_mappings.get("state_init")
@@ -240,8 +250,6 @@ def run_site(
                 f"{sorted(registry.names())}."
             ) from exc
         init_fn(env=env, state=state, config=config, layout=layout)
-
-    output = OutputCollector()
 
     # Resolve arrivals. arrival_entries arg wins; otherwise pull from
     # site.schedules via per-stream builders.
