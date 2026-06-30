@@ -1,0 +1,14 @@
+# Example site for the mining_haul catalog.
+#
+# Activates the haul_cycle mode with 8 trucks dispatched every 6
+# minutes against the default fleet (2 shovels, 1 crusher bay).
+meta:
+  schema_version: 1
+name: example_mine_site
+catalog: ../mining_haul.yaml
+modes: [haul_cycle]
+seed: 1234
+schedules:
+  haul_cycle.truck_dispatch:
+    count: 8
+    dispatch_interval_hr: 0.1

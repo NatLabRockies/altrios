@@ -39,6 +39,7 @@ from altrios.workflow_engine.resources import (
     build_state_from_specs,
     merge_specs,
 )
+from altrios.workflow_engine.runner import RunError, RunResult, run_site
 
 __all__ = [
     "CapacitySpec",
@@ -55,10 +56,13 @@ __all__ = [
     "OutputCollector",
     "PartitionKeys",
     "ResourceSpec",
+    "RunError",
+    "RunResult",
     "WorkflowMode",
     "build_state_from_specs",
     "load_catalog",
     "load_site",
     "merge_entity_kinds",
     "merge_specs",
+    "run_site",
 ]

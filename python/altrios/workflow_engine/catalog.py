@@ -98,6 +98,13 @@ class Catalog:
     entity_kinds
         Map from kind name to :class:`EntityKindSpec`. Each mode's
         ``arrival_routing`` keys must appear here.
+    config_defaults
+        Catalog-shipped default values for the run's flat ``config``
+        dict. A site's ``config:`` block deep-overlays this dict
+        (site keys win). Catalogs use this to ship domain-specific
+        scalar defaults (e.g. the freight catalog ships
+        ``crane_move_dev_time: 0.000278``) without forcing every
+        site to redeclare them.
     consumption_rates
         Free-form dict of consumption-rate tables (keyed by resource
         type or by some catalog-defined scheme). Consumed by
@@ -119,6 +126,7 @@ class Catalog:
     schema_version: int
     modes: tuple[WorkflowMode, ...]
     entity_kinds: Mapping[str, EntityKindSpec]
+    config_defaults: Mapping[str, Any] = field(default_factory=dict)
     consumption_rates: Mapping[str, Any] = field(default_factory=dict)
     schedule_mappings: Mapping[str, Any] = field(default_factory=dict)
     python_module: str | None = None
@@ -150,6 +158,9 @@ class Catalog:
                     )
         object.__setattr__(
             self, "entity_kinds", MappingProxyType(dict(self.entity_kinds))
+        )
+        object.__setattr__(
+            self, "config_defaults", MappingProxyType(dict(self.config_defaults))
         )
         object.__setattr__(
             self, "consumption_rates", MappingProxyType(dict(self.consumption_rates))

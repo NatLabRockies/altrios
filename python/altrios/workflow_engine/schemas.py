@@ -389,6 +389,7 @@ class CatalogModel(BaseModel):
     python_module: Optional[str] = Field(default=None, min_length=1)
     entity_kinds: list[EntityKindSpecModel] = Field(default_factory=list)
     modes: list[WorkflowModeModel] = Field(default_factory=list)
+    config_defaults: dict[str, Any] = Field(default_factory=dict)
     consumption_rates: dict[str, Any] = Field(default_factory=dict)
     schedule_mappings: dict[str, Any] = Field(default_factory=dict)
 
@@ -433,6 +434,7 @@ class CatalogModel(BaseModel):
             schema_version=self.meta.schema_version,
             modes=modes,
             entity_kinds=kinds,
+            config_defaults=dict(self.config_defaults),
             consumption_rates=dict(self.consumption_rates),
             schedule_mappings=dict(self.schedule_mappings),
             python_module=self.python_module,

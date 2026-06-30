@@ -90,6 +90,12 @@ include = [
     { format = "sdist", path = "altrios-core/proc-macros/src/*" },
 ]
 
+[tool.pytest.ini_options]
+# Register custom marks used by tests.
+markers = [
+    "parity: cross-checks new-path (workflow_engine.run_site) results against legacy run_terminal_simulation",
+]
+
 [tool.pixi.project]
 channels = ["conda-forge"]
 platforms = ["osx-64", "osx-arm64", "linux-64", "win-64"]

@@ -1,7 +1,7 @@
 # Workflow Engine — Phase 3 Refactor Plan
 
-**Status:** Phase 3A + 3B + 3C + 3D complete; next: Phase 3E (translate `truck_rail` to YAML)
-**Last updated:** 2026-06-29
+**Status:** Phases 3A–3D + 3E.runner + 3E.config_defaults + 3H complete; remaining freight migration runs B (adapter shim) then A (full refactor) per Decision D7
+**Last updated:** 2026-06-30
 **Owner:** LIFTS subsystem maintainers
 
 This document records the design and implementation plan for replacing the
@@ -38,10 +38,12 @@ update the corresponding section below.
 | 3C.5 | `layout.py` (`Layout.distance` / `Layout.node`) | **Done** (2026-06-29) — 18 tests |
 | 3C.6 | `loader.py` (`load_catalog` / `load_site` + `extends:` merge + python_module import) | **Done** (2026-06-29) — 22 tests; **219 total workflow_engine tests pass** |
 | 3D | `distributions.py` (Constant + Uniform + Poisson — only what LIFTS uses today; extensible registry) + wire into `timeout.duration` | **Done** (2026-06-29) — 25 tests + 4 timeout-integration tests; **244 total workflow_engine tests pass** |
-| 3E | Translate `truck_rail` to YAML; parity test | Planned (next) |
-| 3F | Translate `rail_vessel` + `vessel_truck` to YAML | Planned |
-| 3G | Retire Python-coded modes | Planned |
-| 3H | Docs + non-freight (mining) smoke test | Planned |
+| 3E.runner | `runner.py` (`run_site` canonical entry point: load → state → dispatch → run → RunResult) + `__init__.py` export | **Done** (2026-06-30) — 15 tests; **259 total workflow_engine tests pass** |
+| 3E.config_defaults | `Catalog.config_defaults` field; merged below site `config:` so catalogs ship domain defaults | **Done** (2026-06-30) — 2 tests; **265 total workflow_engine tests pass** |
+| 3H | Mining example catalog + smoke test (proves engine is domain-neutral) | **Done** (2026-06-30) — `examples/mining_haul.yaml` + 4 tests |
+| **B (3E.freight + 3F via adapter)** | `TerminalAdapter` pure-proxy class + `lifts/catalog.yaml` with 1-step `python:` graphs + `lifts/python_helpers.py` + 3 site files + parity harness | **Done** (2026-06-30) — 3 parity tests; **268 total tests pass**; see §8.B |
+| **CHECKPOINT** | Git tag `phase3-b-shim`. Two freight entry points coexist (`run_terminal_simulation` legacy + `run_site` via adapter); banner in `python/altrios/lifts/README.md` points new code at `run_site`. | **Ready** (tag not yet pushed) |
+| **A (3G full refactor)** | Migrate module globals to `OutputCollector`, refactor helper signatures, decompose freight workflows into fine-grained YAML graphs using the 19 primitives, delete `train_flow.py` / `drayage_flow.py` / `vessel_flow.py`, delete `TerminalAdapter`, delete `TerminalMode` + `run_terminal_simulation`, migrate demos and verify-scripts | Planned (immediately after B) — see §8.A |
 
 ---
 
@@ -439,6 +441,68 @@ demonstrating shovels → haul trucks → crusher / waste dump cycles with
 stochastic durations. Smoke test confirms the engine works for a
 non-freight domain without engine modification.
 
+### B — Adapter shim (3E.freight + 3F via 1-step `python:` graphs)
+
+**Goal:** Make `run_site` drive every existing freight demo end-to-end
+without modifying any freight helper. Validate the runner against a
+real workload, ship the parity harness, leave all decomposition to
+phase A.
+
+**Discipline (locked, see Decision D7):**
+1. `TerminalAdapter` is a pure attribute proxy — no methods with
+   logic, no conditional behaviour, no new state. Anything substantive
+   belongs in A.
+2. A is scheduled before B merges (no open-ended deferral).
+3. The parity harness gates both B's PR and A's PR.
+
+**Sub-steps:**
+
+| Sub-step | Description |
+|---|---|
+| **B.1** | ✅ `lifts/terminal_adapter.py` — `TerminalAdapter` class. Wraps `(env, state, config, output)` from the runner and exposes the surface area `train_flow.py` / `drayage_flow.py` / `vessel_flow.py` actually read: `state` (the SimpleNamespace pool bag), `env`, `config` (constants like `CRANE_MOVE_DEV_TIME` resolved through `__getattr__` from the merged config dict), `log(level, msg)` (delegates to `utilities.log`), `layout`, `log_level`. Module-level `consumption_records` / `container_events` accumulators are **left in place** (helpers keep appending to them); the adapter's post-process step copies them into the runner's `OutputCollector` so `RunResult.output` is populated for downstream tests. |
+| **B.2** | ✅ `lifts/python_helpers.py` — registers (a) `freight.build_freight_state` as `state_init`: attaches `container_events: []` to state, builds the union of every freight ResourceSpec via `build_state_from_specs`, attaches each pool to state, constructs the adapter and assigns it to `state.terminal_adapter`, resets `consumption_records`, and seeds Python stdlib `random.seed(42)` to match the legacy demo. (b) Schedule builders: `freight.build_train_schedule` (Train_Type force-override to Intermodal), `freight.build_drayage_schedule_synth` (truck_rail mode default: synthesizes from trains), `freight.build_drayage_schedule_csv` (vessel_truck mode default: reads canonical CSV), `freight.build_vessel_schedule`. (c) Three arrival wrappers (`freight.process_train_arrival`, `freight.process_drayage_arrival`, `freight.process_vessel_arrival`) each take `(env, state, entity)`, reconstruct the entry-dict via `vars(entity)`, and `yield from` the legacy generator with `state.terminal_adapter`. (d) `assemble_outputs(result, mode_name=)` post-run helper: pivots `state.container_events` to wide form and assembles `resource_log` from module-level `consumption_records` (matches legacy `_build_generic_outputs_with_event_types`). |
+| **B.3** | ✅ `lifts/catalog.yaml` — declares 3 modes (`truck_rail`, `rail_vessel`, `vessel_truck`). Each mode has a 1-step `python:` graph per arrival kind. **Resource specs are NOT declared inline** because the freight `ResourceSpec` callables (capacity / partition_by / init_items lambdas) can't be expressed in YAML form; instead, `build_freight_state` instantiates the spec union at run start. (Phase A.6 will translate these to YAML form.) `config_defaults:` ships the 8 numeric freight constants from `classes.Terminal`. `python_module: altrios.lifts.python_helpers`. |
+| **B.4** | ✅ `lifts/sites/allouez_truck_rail.yaml`, `allouez_rail_vessel.yaml`, `allouez_vessel_truck.yaml` — each `!include`s `../resources/config.yaml` for the bulk of freight config; activates one mode; references catalog schedules with `null` (CSV fallback); sets `seed: 42`. |
+| **B.5** | ✅ `lifts/tests/test_freight_parity.py` — three tests, all passing. Each: (a) runs the legacy `run_terminal_simulation`. (b) runs `run_site(<site>, seed=42)` + `assemble_outputs(result, mode_name=)`. (c) asserts container counts exactly match (IC=914 / OC=980 for truck_rail; 644 rows for rail_vessel; 719 for vessel_truck) and total energy + resource_log row count + max train_depart within ±0.5%. **268 total workflow_engine+lifts tests pass.** |
+| **B.6** | ✅ `python/altrios/lifts/README.md` — banner section directing new callers to `run_site`. Existing demos are NOT migrated under B (they're touched under A.10). |
+
+**Out of scope for B:** any change to `train_flow.py`, `drayage_flow.py`,
+`vessel_flow.py`, `yard_flow.py`, `consumption.py`, `terminal_sim.py`,
+`classes.py`. Any fine-grained YAML decomposition. Any module-global
+migration.
+
+### A — Full refactor (3G: decomposition + deletion)
+
+**Goal:** Decompose every freight workflow into fine-grained YAML using
+the 19 engine primitives. Delete every Python flow module and the
+adapter. `run_site` becomes the only freight entry point.
+
+**Sub-steps:**
+
+| Sub-step | Description |
+|---|---|
+| **A.1** | Migrate module-level `consumption_records` (in `lifts/consumption.py`) onto `OutputCollector`. Refactor the five `_record_*_consumption` helpers to take an `output: OutputCollector` argument and call `output.record_consumption(row)` instead of `consumption_records.append(row)`. Delete the module-level list. |
+| **A.2** | Migrate `terminal.state.container_events` (per-state accumulator) onto `OutputCollector`. Refactor `utilities.record_container_event(terminal, ...)` to `record_container_event(output, ...)` calling `output.record_event(row)`. |
+| **A.3** | Refactor helper signatures: `(env, terminal, ...)` → `(env, state, config, output, ...)` across `train_flow.py`, `drayage_flow.py`, `vessel_flow.py`, `yard_flow.py`, `consumption.py`. `terminal.state.tracks` → `state.tracks` etc. `terminal.CRANE_MOVE_DEV_TIME` → `config["crane_move_dev_time"]`. `terminal.log(level, msg)` → `logging.getLogger("altrios.lifts").log(level, msg)`. |
+| **A.4** | Decompose `process_train_arrival` into a YAML graph in `lifts/catalog.yaml`. Sub-graphs: `unload_one_ic`, `load_one_oc` (spawned with `parallel: {join: all}`). Steps use `request`/`release` for tracks and RTGs, `timeout` with `{dist: constant, value: ...}` or `{dist: uniform, ...}` for stochastic timings, `record_event` for `train_arrival_actual` / `train_depart`, `record_consumption` for crane lifts. Python escape hatches: `choose_stack_crane`, `yard_tractor_haul` (still irreducibly stateful). |
+| **A.5** | Decompose `process_drayage_arrival` into a YAML graph. `branch` on `entity.attrs.action == "dropoff" \| "pickup"`. Steps for gate-in, zone travel, stack-in/stack-out, gate-out. Python escape hatch: `truck_factory`. |
+| **A.6** | Decompose `process_vessel_arrival` (STS lifts + yard moves). Parallel STS cranes via `parallel: {join: all}` over `spawn`ed sub-workflows. |
+| **A.7** | Re-run parity test from B.5. Acceptance: same tolerances (counts exact, ±0.5% on totals) but now validating the **decomposed YAML**, not the proxied generators. Any divergence is a real bug in the decomposition. |
+| **A.8** | Delete `lifts/train_flow.py`, `lifts/drayage_flow.py`, `lifts/vessel_flow.py`. |
+| **A.9** | Delete `TerminalMode` class, `_MODES` registry, `get_mode`, `list_modes`, `run_terminal_simulation` from `lifts/terminal_sim.py`. The `_build_generic_outputs_with_event_types` and `_truck_rail_post_process` / `_vessel_post_process` functions move to `lifts/python_helpers.py` as registered post-process callables invoked from the catalog. |
+| **A.10** | Migrate `python/altrios/lifts/demos/truck_rail_demo.py`, `rail_vessel_demo.py`, `vessel_truck_demo.py`, `multi_mode_demo.py` to call `run_site` directly. Drop the adapter import. Inputs become YAML site files (per B.4) plus per-demo `schedule_overrides` kwargs for any DataFrame inputs that aren't easily CSV-able. |
+| **A.11** | Delete `lifts/terminal_adapter.py`. Delete `freight.build_freight_state` state_init (replaced by direct attachment of `container_events` / `consumption_records` to state — but those are gone now too, so `state_init` may not be needed at all). Delete the arrival-wrapper helpers from `python_helpers.py` (graphs now invoke primitives directly, not the wrapper-of-a-generator pattern). |
+| **A.12** | Migrate `scripts/verify_lifts_phase1.py`, `scripts/verify_lifts_phase2.py` to call `run_site`. Delete any verification logic that asserts on `TerminalMode`-class internals. |
+| **A.13** | Update `WORKFLOW_ENGINE_PLAN.md` (this file) marking 3E.freight / 3F / 3G as Done. Move the §10 open question to Resolved. |
+
+**Acceptance criteria for A:**
+- Zero references to `train_flow`, `drayage_flow`, `vessel_flow`,
+  `TerminalMode`, `run_terminal_simulation`, `TerminalAdapter` in the
+  codebase (`grep -r` is empty).
+- All four demos and both verification scripts pass via `run_site`.
+- Parity test from B.5 still passes with the decomposed YAML.
+- Total workflow_engine + lifts test count grows, not shrinks.
+
 ---
 
 ## 9. Decisions log
@@ -466,6 +530,7 @@ table and the implementation.
 | 16 | **Catalog reference syntax** = Python import path (e.g., `altrios.lifts`) for shipped catalogs; filesystem paths for user catalogs | 2026-06-29 | Both styles supported in the YAML loader. No named registry. |
 | 17 | **Demo migration policy** = rewrite demos to use `run_site()` | 2026-06-29 | After 3G, the YAML scenario IS the contract. No transitional shims. |
 | 18 | **Schema versioning** = mandatory `meta.schema_version: 1` on every YAML | 2026-06-29 | Enables future migrations. v1 is the only version in Phase 3. |
+| D7 | **Freight YAML-translation strategy** = B then A | 2026-06-30 | The `run_site` runner expects state built by `build_state_from_specs` (a `SimpleNamespace` of pools). The existing freight helpers (`process_train_arrival`, `_unload_one_ic`, `yard_tractor_haul`, ...) expect a `Terminal` object with `terminal.state.tracks`, `terminal.config`, `terminal.log()`, `terminal.CRANE_MOVE_DEV_TIME`, and module-level `container_events` / `consumption_records` lists. **Chosen path:** ship **(B) Terminal-adapter shim** first — 1-step `python:` YAML graphs that call existing generators unchanged — then immediately follow with **(A) full refactor**: migrate module globals to `OutputCollector`, refactor helper signatures to `(env, state, config, output)`, decompose freight workflows into fine-grained YAML using the 19 primitives, delete the Python flow modules and the adapter. Discipline rules: B's adapter is a pure attribute proxy with no logic; A is scheduled before B merges; the parity test gates both PRs. See §8.B and §8.A for sub-step detail. |
 
 ---
 
@@ -477,6 +542,7 @@ table and the implementation.
 | 2 | `init_items` form: pure DSL or Python callback? | Start with `init_items_python:` callback; add DSL only if asked. |
 | 3 | Schedule mapping richness: how rich a DSL for matching arrivals to departures (e.g., greedy gap matcher)? | Expose as a `pairing_python:` callback; do not build a YAML DSL for it. |
 | 4 | Hot-path perf: ~500 K step invocations expected for freight runs. | Measure in 3E. Consider a step-fusion pre-pass if measurable. |
+| 5 | Freight migration strategy (A/B/C in Decision D7). **Resolved 2026-06-30.** | **Decided:** B (adapter shim) then A (full refactor). Git tag `phase3-b-shim` between them as a rollback point. See §9 Decision D7 and §8.B / §8.A for the locked sub-step plans. |
 
 ---
 

@@ -1,0 +1,177 @@
+# ---------------------------------------------------------------------------
+# Freight intermodal catalog (Phase 3 / Strategy B).
+#
+# Three modes: truck_rail, rail_vessel, vessel_truck. Each mode's graph
+# consists of a single ``python:`` step that delegates to the existing
+# freight generators in altrios.lifts.{train_flow,drayage_flow,vessel_flow}
+# via thin wrappers in altrios.lifts.python_helpers.
+#
+# Resource pools are NOT declared here. The freight ResourceSpec
+# instances in altrios.lifts.specs use Python lambdas for capacity /
+# partition_by / init_items, which the YAML resource-spec form doesn't
+# accept directly. Instead, the catalog's state_init callable
+# (``freight.build_freight_state``) instantiates the spec union at run
+# start and attaches every primitive to state. **Phase A.6 translates
+# these specs into YAML form and moves them under each mode's
+# ``resources:`` block.**
+#
+# config_defaults ships only the eight numeric simulation constants
+# that previously lived as class-level attributes on
+# ``altrios.lifts.classes.Terminal``. Every site is expected to
+# ``!include resources/config.yaml`` to populate the rest of the
+# config surface (yard, terminal, gates, vessel, yard_stack, energy_use,
+# layout).
+# ---------------------------------------------------------------------------
+meta:
+  schema_version: 1
+name: freight_intermodal
+description: >-
+  Intermodal terminal catalog covering truck<->rail, rail<->vessel,
+  and vessel<->truck container flows. Phase 3 Strategy B: graphs are
+  thin shims over the existing Python freight flow modules.
+python_module: altrios.lifts.python_helpers
+
+config_defaults:
+  # Constants previously hard-coded on Terminal.__init__. The freight
+  # generators read these off `terminal.containers_per_crane_move_mean`
+  # etc.; the TerminalAdapter exposes them by mirroring this block.
+  containers_per_crane_move_mean: 0.03333    # 2 min / 60 min/hr
+  crane_move_dev_time: 0.000278              # 1 sec / 3600 sec/hr
+  truck_diesel_percentage: 1.0
+  truck_arrival_mean: 0.03333
+  truck_ingate_time: 0.03333
+  truck_ingate_time_dev: 0.03333
+  truck_outgate_time: 0.03333
+  truck_outgate_time_dev: 0.03333
+
+entity_kinds:
+  - name: train
+    attrs:
+      arrival_time: float
+      train_id: int
+      full_cars: int
+      oc_number: int
+  - name: drayage
+    attrs:
+      arrival_time: float
+      truck_id: int
+      action: str
+  - name: vessel
+    attrs:
+      arrival_time: float
+      vessel_id: int
+
+modes:
+  # ---- truck_rail ----
+  - name: truck_rail
+    arrival_routing:
+      train: handle_train_arrival
+      drayage: handle_drayage_arrival
+    graphs:
+      - name: handle_train_arrival
+        entry: call_legacy
+        steps:
+          - id: call_legacy
+            type: python
+            params:
+              call: freight.process_train_arrival
+              args:
+                env: "{env}"
+                state: "{state}"
+                entity: "{entity}"
+      - name: handle_drayage_arrival
+        entry: call_legacy
+        steps:
+          - id: call_legacy
+            type: python
+            params:
+              call: freight.process_drayage_arrival
+              args:
+                env: "{env}"
+                state: "{state}"
+                entity: "{entity}"
+
+  # ---- rail_vessel ----
+  - name: rail_vessel
+    arrival_routing:
+      train: handle_train_arrival
+      vessel: handle_vessel_arrival
+    graphs:
+      - name: handle_train_arrival
+        entry: call_legacy
+        steps:
+          - id: call_legacy
+            type: python
+            params:
+              call: freight.process_train_arrival
+              args:
+                env: "{env}"
+                state: "{state}"
+                entity: "{entity}"
+      - name: handle_vessel_arrival
+        entry: call_legacy
+        steps:
+          - id: call_legacy
+            type: python
+            params:
+              call: freight.process_vessel_arrival
+              args:
+                env: "{env}"
+                state: "{state}"
+                entity: "{entity}"
+
+  # ---- vessel_truck ----
+  - name: vessel_truck
+    arrival_routing:
+      vessel: handle_vessel_arrival
+      drayage: handle_drayage_arrival
+    graphs:
+      - name: handle_vessel_arrival
+        entry: call_legacy
+        steps:
+          - id: call_legacy
+            type: python
+            params:
+              call: freight.process_vessel_arrival
+              args:
+                env: "{env}"
+                state: "{state}"
+                entity: "{entity}"
+      - name: handle_drayage_arrival
+        entry: call_legacy
+        steps:
+          - id: call_legacy
+            type: python
+            params:
+              call: freight.process_drayage_arrival
+              args:
+                env: "{env}"
+                state: "{state}"
+                entity: "{entity}"
+
+schedule_mappings:
+  # Engine state_init hook. Runs after build_state_from_specs (which
+  # produces an empty state for freight since no resources are declared
+  # above) and is responsible for: (1) clearing the module-level
+  # consumption_records buffer, (2) attaching container_events: [] to
+  # state, (3) instantiating the freight ResourceSpec union and
+  # attaching each pool to state, (4) building and attaching the
+  # TerminalAdapter.
+  state_init: freight.build_freight_state
+
+  # Per-stream schedule builders. The site's ``schedules:`` block
+  # keys reference these names; values are passed as ``schedule=`` to
+  # the builder. Builders return list[dict] with kind / id /
+  # arrival_time / per-entry attrs.
+  train_arrivals:
+    builder: freight.build_train_schedule
+    terminal_name: Allouez
+  truck_rail_drayage_arrivals:
+    builder: freight.build_drayage_schedule_synth
+    terminal_name: Allouez
+  vessel_truck_drayage_arrivals:
+    builder: freight.build_drayage_schedule_csv
+    terminal_name: Allouez
+  vessel_arrivals:
+    builder: freight.build_vessel_schedule
+    terminal_name: Allouez

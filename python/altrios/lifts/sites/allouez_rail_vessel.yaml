@@ -1,0 +1,21 @@
+# Allouez rail<->vessel demo site.
+#
+# Activates the rail_vessel mode only. Matches the legacy
+# ``run_terminal_simulation(modes=["rail_vessel"], inputs={"rail_vessel": {}})``
+# default: vessels only, no train_consist_plan supplied.
+#
+# To add trains to this site, declare ``train_arrivals: null`` (canonical
+# CSV fallback) or ``train_arrivals: <path-to-csv>``; the legacy mode
+# accepts trains too via ``inputs={"rail_vessel": {"train_consist_plan": df}}``.
+meta:
+  schema_version: 1
+name: allouez_rail_vessel
+catalog: altrios.lifts
+modes: [rail_vessel]
+
+config: !include ../resources/config.yaml
+
+schedules:
+  vessel_arrivals: null     # canonical vessel_call_list.csv
+
+seed: 42
