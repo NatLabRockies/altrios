@@ -1,12 +1,10 @@
 # %%
 from altrios import sim_manager
-from altrios import utilities, defaults
+from altrios import defaults
 import altrios as alt
 from altrios.train_planner import planner_config
 from altrios.lifts.python_helpers import assemble_outputs
 from altrios.workflow_engine import run_site
-import numpy as np
-import matplotlib.pyplot as plt
 import time
 import seaborn as sns
 from pathlib import Path

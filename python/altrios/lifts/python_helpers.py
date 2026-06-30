@@ -33,12 +33,12 @@ from __future__ import annotations
 import random
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 import polars as pl
 import simpy
 
-from altrios.lifts import consumption, utilities
+from altrios.lifts import utilities
 from altrios.lifts.classes import container, loggingLevel, truck
 from altrios.lifts.consumption import (
     CO2_KG_PER_UNIT,
