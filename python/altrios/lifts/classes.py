@@ -255,5 +255,3 @@ class TerminalState:
         # end-of-sim. Keeping it flat avoids per-event dict-of-dict
         # insertions in the hot path.
         self.container_events: list = []
-        self.time_per_train: dict = {}
-        self.train_delay_time: dict = {}

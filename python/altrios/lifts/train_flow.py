@@ -196,7 +196,5 @@ def process_train_arrival(env, terminal, train_schedule: dict[str, Any]):
             utilities.record_container_event(
                 terminal, oc, "train_depart", env.now,
             )
-        state.time_per_train[train_id] = env.now - arrival_time
-        state.train_delay_time[train_id] = max(0.0, env.now - departure_time)
     finally:
         yield state.tracks.put(track_id)
