@@ -8,4 +8,18 @@ workflow engine is domain-neutral (the same engine that drives the
 freight intermodal terminal in :mod:`altrios.lifts.terminal` also
 drives this open-pit mining model) and to exercise the
 python-escape-hatch pattern.
+
+Example::
+
+    from altrios.lifts import mine
+
+    result = mine.run("example_mine", seed=42)
 """
+from __future__ import annotations
+
+from altrios.lifts.workflow_engine import make_runner, make_site_path
+
+site_path = make_site_path(__file__, kind="mine")
+run = make_runner(site_path)
+
+__all__ = ["run", "site_path"]

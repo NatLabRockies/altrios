@@ -3,8 +3,8 @@ from altrios import sim_manager
 from altrios import defaults
 import altrios as alt
 from altrios.train_planner import planner_config
+from altrios.lifts import terminal
 from altrios.lifts.terminal.python_helpers import assemble_outputs
-from altrios.lifts.workflow_engine import run_site
 import time
 import seaborn as sns
 from pathlib import Path
@@ -75,16 +75,12 @@ t0_main = time.perf_counter()
 t1_main = time.perf_counter()
 print(f"Elapsed time to run `sim_manager.main()`: {t1_main - t0_main:.3g} s")
 
-_LIFTS_SITE = (
-    Path(alt.__file__).resolve().parent
-    / "lifts" / "terminal" / "sites" / "allouez_truck_rail.yaml"
-)
-_lifts_result = run_site(
-    str(_LIFTS_SITE),
+lifts_result = terminal.run(
+    "allouez_truck_rail",
     seed=42,
     schedule_overrides={"train_arrivals": train_consist_plan},
 )
-container_data, resource_log_df = assemble_outputs(_lifts_result, mode_name="truck_rail")
+container_data, resource_log_df = assemble_outputs(lifts_result, mode_name="truck_rail")
 
 t2_main = time.perf_counter()
 print(f"Elapsed time to run LIFTS simulation: {t2_main - t1_main:.3g} s")

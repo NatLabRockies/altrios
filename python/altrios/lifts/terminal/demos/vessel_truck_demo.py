@@ -19,18 +19,15 @@ or directly with::
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 import polars as pl
 
+from altrios.lifts import terminal
 from altrios.lifts.terminal.python_helpers import assemble_outputs
-from altrios.lifts.workflow_engine import run_site
 
 
 TERMINAL = "Allouez"
-SITE_FILE = (
-    Path(__file__).resolve().parent.parent / "sites" / "allouez_vessel_truck.yaml"
-)
+SITE_NAME = "allouez_vessel_truck"
 
 
 def _print_summary(container_data: pl.DataFrame, resource_log: pl.DataFrame) -> None:
@@ -88,6 +85,10 @@ def main() -> None:
     throughput and energy.
     """
     t0 = time.perf_counter()
+    result = terminal.run(SITE_NAME, seed=42)
+    container_data, resource_log = assemble_outputs(result, mode_name="vessel_truck")
+    elapsed = time.perf_counter() - t0
+    print(f"\nLIFTS vessel_truck run: {elapsed:.2f} s")
 
     _print_summary(container_data, resource_log)
 

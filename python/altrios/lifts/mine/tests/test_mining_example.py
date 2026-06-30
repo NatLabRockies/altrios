@@ -8,11 +8,9 @@ the expected output shape. This is the keystone deliverable for the
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
-from altrios.lifts.workflow_engine import run_site
+from altrios.lifts import mine
 
 # Importing the helper module here ensures @register decorators have
 # fired before the loader looks the names up. (The catalog's
@@ -21,13 +19,13 @@ from altrios.lifts.workflow_engine import run_site
 from altrios.lifts.mine import mining_helpers  # noqa: F401
 
 
-EXAMPLE_SITE = Path(__file__).resolve().parents[1] / "sites" / "example_mine.yaml"
+EXAMPLE_SITE = "example_mine"
 
 
 def test_mining_haul_runs_to_completion():
     """Loads and runs the bundled mining_haul site; checks counts and
     that all trucks reached the ``dump_complete`` event."""
-    result = run_site(EXAMPLE_SITE)
+    result = mine.run(EXAMPLE_SITE)
 
     # 8 trucks dispatched, 8 dump_complete events.
     assert len(result.entities) == 8
@@ -56,7 +54,7 @@ def test_mining_haul_respects_capacity_contention():
     """With only 1 crusher bay and 8 trucks, sim time must exceed the
     minimum cycle time × number of trucks / number of bays. This is a
     sanity check that the resource really serializes."""
-    result = run_site(EXAMPLE_SITE)
+    result = mine.run(EXAMPLE_SITE)
     # Min crusher-bay-side work per truck: dump time = 0.02 hr.
     # 8 trucks * 0.02 = 0.16 hr at minimum across the single bay.
     # Plus the first truck has to drive empty + load + drive loaded
@@ -70,8 +68,8 @@ def test_mining_haul_respects_capacity_contention():
 
 def test_mining_haul_seed_kwarg_overrides_site():
     """Site declares seed: 1234. kwarg seed=99 should win."""
-    r1 = run_site(EXAMPLE_SITE, seed=99)
-    r2 = run_site(EXAMPLE_SITE, seed=99)
+    r1 = mine.run(EXAMPLE_SITE, seed=99)
+    r2 = mine.run(EXAMPLE_SITE, seed=99)
     # Two runs with the same seed should produce identical event times
     # (the only stochastic step is the Uniform load duration).
     times_1 = sorted(r["record_timestamp"] for r in r1.output.event_log)
@@ -81,8 +79,8 @@ def test_mining_haul_seed_kwarg_overrides_site():
 
 def test_mining_haul_different_seeds_diverge():
     """Different seeds → at least one event time differs."""
-    r1 = run_site(EXAMPLE_SITE, seed=1)
-    r2 = run_site(EXAMPLE_SITE, seed=2)
+    r1 = mine.run(EXAMPLE_SITE, seed=1)
+    r2 = mine.run(EXAMPLE_SITE, seed=2)
     times_1 = sorted(r["record_timestamp"] for r in r1.output.event_log)
     times_2 = sorted(r["record_timestamp"] for r in r2.output.event_log)
     assert times_1 != times_2

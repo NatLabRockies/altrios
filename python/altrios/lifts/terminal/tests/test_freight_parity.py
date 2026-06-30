@@ -9,15 +9,10 @@ signals a real divergence worth investigating.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import polars as pl
 
+from altrios.lifts import terminal
 from altrios.lifts.terminal.python_helpers import assemble_outputs
-from altrios.lifts.workflow_engine import run_site
-
-
-_SITES_DIR = Path(__file__).parent.parent / "sites"
 
 
 # (cd_rows, rl_rows, energy, env_now) baseline per mode. Recorded after
@@ -37,15 +32,15 @@ def _approx(actual: float, expected: float, rel_tol: float = _REL_TOL) -> bool:
     return abs(actual - expected) / abs(expected) <= rel_tol
 
 
-def _run(site_filename: str, mode_name: str) -> tuple[pl.DataFrame, pl.DataFrame, float]:
-    result = run_site(str(_SITES_DIR / site_filename), seed=42)
+def _run(site_name: str, mode_name: str) -> tuple[pl.DataFrame, pl.DataFrame, float]:
+    result = terminal.run(site_name, seed=42)
     cd, rl = assemble_outputs(result, mode_name=mode_name)
     return cd, rl, float(result.env.now)
 
 
-def _assert_baseline(mode_name: str, site_filename: str) -> None:
+def _assert_baseline(mode_name: str, site_name: str) -> None:
     cd_rows_exp, rl_rows_exp, energy_exp, env_now_exp = _BASELINES[mode_name]
-    cd, rl, env_now = _run(site_filename, mode_name)
+    cd, rl, env_now = _run(site_name, mode_name)
 
     assert cd.height == cd_rows_exp, (
         f"{mode_name}: container_data row count drifted: "
@@ -69,17 +64,17 @@ def _assert_baseline(mode_name: str, site_filename: str) -> None:
 
 def test_truck_rail_smoke():
     """truck_rail run_site path produces expected counts + energy."""
-    _assert_baseline("truck_rail", "allouez_truck_rail.yaml")
+    _assert_baseline("truck_rail", "allouez_truck_rail")
 
 
 def test_rail_vessel_smoke():
     """rail_vessel run_site path produces expected counts + energy."""
-    _assert_baseline("rail_vessel", "allouez_rail_vessel.yaml")
+    _assert_baseline("rail_vessel", "allouez_rail_vessel")
 
 
 def test_vessel_truck_smoke():
     """vessel_truck run_site path produces expected counts + energy."""
-    _assert_baseline("vessel_truck", "allouez_vessel_truck.yaml")
+    _assert_baseline("vessel_truck", "allouez_vessel_truck")
 
 
 # ---- Multi-mode smoke ----------------------------------------------
@@ -136,9 +131,7 @@ def test_combined_truck_rail_vessel_truck_smoke():
     """allouez_combined activates two modes against shared pools; pin
     arrival counts, event/consumption row counts, total consumption,
     and sim-end time."""
-    result = run_site(
-        str(_SITES_DIR / "allouez_combined.yaml"), seed=42,
-    )
+    result = terminal.run("allouez_combined", seed=42)
 
     by_kind: dict[str, int] = {}
     for ent in result.entities:
@@ -191,9 +184,7 @@ def test_combined_all_modes_smoke():
     modes), event/consumption row counts, total consumption, and
     sim-end time. Also exercise multi-mode assemble_outputs by passing
     the active mode list."""
-    result = run_site(
-        str(_SITES_DIR / "allouez_all_modes.yaml"), seed=42,
-    )
+    result = terminal.run("allouez_all_modes", seed=42)
 
     by_kind: dict[str, int] = {}
     for ent in result.entities:

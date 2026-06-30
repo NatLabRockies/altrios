@@ -29,7 +29,7 @@ from __future__ import annotations
 import importlib
 import os
 from pathlib import Path
-from typing import Any, Mapping, Optional, Union
+from typing import Any, Callable, Mapping, Optional, Union
 
 from .catalog import Catalog
 from .registry import RegistryError, get_registry
@@ -47,6 +47,110 @@ class LoaderError(Exception):
 
 
 PathLike = Union[str, os.PathLike]
+
+
+# ---- Catalog site-path resolver --------------------------------------
+
+
+def make_site_path(
+    package_file: PathLike, *, kind: str
+) -> Callable[[str], Path]:
+    """Build a ``site_path(name) -> Path`` resolver for a catalog package.
+
+    Convention: every catalog package ships its bundled site YAMLs in a
+    ``sites/`` subdirectory next to its ``__init__.py``. This factory
+    captures that directory once and returns a small lookup function the
+    catalog re-exports for callers (demos, tests, downstream users).
+
+    Typical use in a catalog ``__init__.py``::
+
+        from altrios.lifts.workflow_engine import make_site_path
+
+        site_path = make_site_path(__file__, kind="terminal")
+
+    Parameters
+    ----------
+    package_file : str or os.PathLike
+        Usually ``__file__`` of the catalog package's ``__init__.py``.
+        The ``sites/`` directory is resolved relative to its parent.
+    kind : str
+        Short label for the catalog (e.g. ``"terminal"``, ``"mine"``).
+        Used only in the :class:`FileNotFoundError` message so a missing
+        site name surfaces a useful hint.
+
+    Returns
+    -------
+    Callable[[str], Path]
+        A function that accepts a site name (with or without the
+        ``.yaml`` extension) and returns the absolute path to the
+        matching file. Raises :class:`FileNotFoundError` listing the
+        available sites if the name does not match a bundled YAML.
+    """
+    sites_dir = Path(os.fspath(package_file)).resolve().parent / "sites"
+
+    def site_path(name: str) -> Path:
+        filename = name if name.endswith(".yaml") else f"{name}.yaml"
+        path = sites_dir / filename
+        if not path.is_file():
+            available = sorted(p.stem for p in sites_dir.glob("*.yaml"))
+            raise FileNotFoundError(
+                f"No {kind} site named {filename!r} under {sites_dir}. "
+                f"Available: {available}"
+            )
+        return path
+
+    site_path.__doc__ = (
+        f"Return the absolute path to a bundled {kind} site YAML by name. "
+        f"Accepts ``name`` with or without the ``.yaml`` extension."
+    )
+    return site_path
+
+
+def make_runner(
+    site_path_fn: Callable[[str], Path],
+) -> Callable[..., "RunResult"]:
+    """Build a name-based site runner that composes :func:`run_site`.
+
+    The returned ``run(name, **kwargs)`` resolves ``name`` via
+    ``site_path_fn`` and forwards the resulting path plus all kwargs
+    to :func:`altrios.lifts.workflow_engine.runner.run_site`. Pair
+    with :func:`make_site_path` in a catalog ``__init__.py`` so callers
+    can launch bundled sites without juggling paths::
+
+        from altrios.lifts.workflow_engine import make_site_path, make_runner
+
+        site_path = make_site_path(__file__, kind="terminal")
+        run = make_runner(site_path)
+
+    Then::
+
+        from altrios.lifts import terminal
+        result = terminal.run("allouez_truck_rail", seed=42)
+
+    The runner import is deferred so ``import <catalog>`` stays cheap.
+
+    Parameters
+    ----------
+    site_path_fn
+        A callable produced by :func:`make_site_path` (or any
+        ``str -> Path`` resolver).
+
+    Returns
+    -------
+    Callable[..., RunResult]
+        A function ``run(name, **kwargs) -> RunResult``.
+    """
+    def run(name: str, **kwargs: Any) -> "RunResult":
+        # Lazy import — pulls in simpy and the full engine runtime.
+        from altrios.lifts.workflow_engine.runner import run_site
+        return run_site(site_path_fn(name), **kwargs)
+
+    run.__doc__ = (
+        "Run a bundled site by name. Resolves ``name`` via the catalog's "
+        "site_path resolver and forwards kwargs to "
+        ":func:`altrios.lifts.workflow_engine.run_site`."
+    )
+    return run
 
 
 # ---- Catalog --------------------------------------------------------

@@ -6,18 +6,21 @@ YAML step graphs that the
 [`altrios.lifts.workflow_engine`](../workflow_engine/) executes; this package
 provides the freight-specific catalog, Python helpers, and demo sites.
 
-## Entry point: `run_site`
+## Entry point: `terminal.run`
 
 ```python
-from altrios.lifts.workflow_engine import run_site
+from altrios.lifts import terminal
 from altrios.lifts.terminal.python_helpers import assemble_outputs
 
-result = run_site(
-    "python/altrios/lifts/sites/allouez_truck_rail.yaml",
-    seed=42,
-)
+result = terminal.run("allouez_truck_rail", seed=42)
 container_data, resource_log = assemble_outputs(result, mode_name="truck_rail")
 ```
+
+`terminal.run` resolves the named site under `sites/`, validates
+the YAML, and dispatches to the workflow engine. If you need an
+explicit path instead, use `terminal.site_path("allouez_truck_rail")`
+or go through the engine directly with
+`altrios.lifts.workflow_engine.run_site(...)`.
 
 The three bundled sites — `allouez_truck_rail.yaml`,
 `allouez_rail_vessel.yaml`, `allouez_vessel_truck.yaml` — are exercised

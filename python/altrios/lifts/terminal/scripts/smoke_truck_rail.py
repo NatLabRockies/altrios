@@ -1,21 +1,10 @@
-"""Deeper inspection of the truck_rail run to compare against smoke baseline.
-
-Migrated to the workflow_engine run_site() API (Phase A.12).
-"""
-from pathlib import Path
-
+"""Deeper inspection of the truck_rail run to compare against smoke baseline."""
 import polars as pl
 
-import altrios as alt
+from altrios.lifts import terminal
 from altrios.lifts.terminal.python_helpers import assemble_outputs
-from altrios.lifts.workflow_engine import run_site
 
-SITE_FILE = (
-    Path(alt.__file__).resolve().parent
-    / "lifts" / "terminal" / "sites" / "allouez_truck_rail.yaml"
-)
-
-result = run_site(str(SITE_FILE), seed=42)
+result = terminal.run("allouez_truck_rail", seed=42)
 cd, vl = assemble_outputs(result, mode_name="truck_rail")
 
 # IC containers that came in on a train and were picked up by a drayage truck

@@ -7,8 +7,8 @@ against a SimPy event loop and emits structured event / consumption
 logs.
 
 This page is an orientation. For full design rationale, decision
-history, and primitive reference see `WORKFLOW_ENGINE_PLAN.md` in the
-repo root.
+history, and primitive reference see `workflow-engine-plan.md` in the
+`python/altrios/lifts/workflow_engine/` package.
 
 ## Package layout
 
@@ -77,14 +77,27 @@ The current LIFTS sample sites (all under
 
 ## Running a site
 
+For bundled catalogs, the canonical entry point is the catalog's
+`run` helper, which resolves the site by name:
+
+```python
+from altrios.lifts import terminal
+
+result = terminal.run("allouez_truck_rail", seed=42)
+print(result.env.now)               # simulation end time (hours)
+print(len(result.entities))         # arrivals scheduled
+print(len(result.output.event_log)) # container-event rows recorded
+```
+
+Under the hood, `terminal.run` (and `mine.run`) is a thin wrapper
+around the engine's `run_site`, which also accepts a path or a
+string directly:
+
 ```python
 from altrios.lifts.workflow_engine import run_site
 
 result = run_site("python/altrios/lifts/terminal/sites/allouez_truck_rail.yaml",
                   seed=42)
-print(result.env.now)               # simulation end time (hours)
-print(len(result.entities))         # arrivals scheduled
-print(len(result.output.event_log)) # container-event rows recorded
 ```
 
 The returned `RunResult` exposes the active `SiteModel`, the
@@ -99,8 +112,7 @@ The engine output schema is intentionally loose: `record_event`,
 `record_resource_event`, and `record_consumption` primitives accept
 arbitrary row dicts. Wide-table assembly (pivoting event rows into
 the familiar `container_data` shape, joining derived columns) is
-the catalog's responsibility, performed in Python after `run_site`
-returns.
+the catalog's responsibility, performed in Python after the run.
 
 For the LIFTS catalog, that helper is
 `altrios.lifts.terminal.python_helpers.assemble_outputs`. It accepts either

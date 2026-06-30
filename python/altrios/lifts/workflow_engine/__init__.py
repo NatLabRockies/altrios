@@ -9,8 +9,8 @@ containers — it only knows about :class:`ResourceSpec`-described capacity
 pools and :class:`Entity`-described flow objects driven by step-graphs
 declared in YAML.
 
-See ``WORKFLOW_ENGINE_PLAN.md`` at the repo root for the design and
-implementation plan that governs this package.
+See ``workflow-engine-plan.md`` alongside this package for the design
+and implementation plan that governs it.
 """
 from __future__ import annotations
 
@@ -22,7 +22,13 @@ from altrios.lifts.workflow_engine.entities import (
     merge_entity_kinds,
 )
 from altrios.lifts.workflow_engine.layout import Layout, LayoutNode
-from altrios.lifts.workflow_engine.loader import LoaderError, load_catalog, load_site
+from altrios.lifts.workflow_engine.loader import (
+    LoaderError,
+    load_catalog,
+    load_site,
+    make_runner,
+    make_site_path,
+)
 from altrios.lifts.workflow_engine.output import OutputCollector
 from altrios.lifts.workflow_engine.resources import (
     CapacitySpec,
@@ -57,6 +63,8 @@ __all__ = [
     "build_state_from_specs",
     "load_catalog",
     "load_site",
+    "make_runner",
+    "make_site_path",
     "merge_entity_kinds",
     "merge_specs",
     "run_site",

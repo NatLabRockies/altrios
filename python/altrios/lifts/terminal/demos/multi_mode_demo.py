@@ -26,15 +26,12 @@ from __future__ import annotations
 
 import time
 from collections import Counter
-from pathlib import Path
 
+from altrios.lifts import terminal
 from altrios.lifts.terminal.python_helpers import assemble_outputs
-from altrios.lifts.workflow_engine import run_site
 
 
-SITE_FILE = (
-    Path(__file__).resolve().parent.parent / "sites" / "allouez_combined.yaml"
-)
+SITE_NAME = "allouez_combined"
 ACTIVE_MODES = ("truck_rail", "vessel_truck")
 
 
@@ -92,6 +89,10 @@ def main() -> None:
     active mode.
     """
     t0 = time.perf_counter()
+    result = terminal.run(SITE_NAME, seed=42)
+    elapsed = time.perf_counter() - t0
+    print(f"\nLIFTS multi-mode run ({'+'.join(ACTIVE_MODES)}): {elapsed:.2f} s")
+    _print_summary(result)
 
 
 if __name__ == "__main__":
