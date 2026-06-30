@@ -21,13 +21,18 @@ or directly with::
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import polars as pl
 
-from altrios.lifts import run_terminal_simulation, utilities
+from altrios.lifts.python_helpers import assemble_outputs
+from altrios.workflow_engine import run_site
 
 
 TERMINAL = "Allouez"
+SITE_FILE = (
+    Path(__file__).resolve().parent.parent / "sites" / "allouez_rail_vessel.yaml"
+)
 
 
 def _print_summary(container_data: pl.DataFrame, resource_log: pl.DataFrame) -> None:
@@ -75,23 +80,9 @@ def _print_summary(container_data: pl.DataFrame, resource_log: pl.DataFrame) -> 
 
 
 def main() -> None:
-    resources = utilities.resources_root()
-
-    consist_plan = (
-        pl.read_csv(resources / "train_consist_plan.csv")
-        .with_columns(pl.lit("Intermodal").alias("Train_Type"))
-    )
-    vessel_calls = pl.read_csv(resources / "vessel_call_list.csv")
-
     t0 = time.perf_counter()
-    container_data, resource_log, _ = run_terminal_simulation(
-        modes=["rail_vessel"],
-        terminal=TERMINAL,
-        inputs={"rail_vessel": {
-            "train_consist_plan": consist_plan,
-            "vessel_schedule": vessel_calls,
-        }},
-    )
+    result = run_site(str(SITE_FILE), seed=42)
+    container_data, resource_log = assemble_outputs(result, mode_name="rail_vessel")
     elapsed = time.perf_counter() - t0
     print(f"\nLIFTS rail_vessel run: {elapsed:.2f} s")
 

@@ -1,23 +1,14 @@
-"""LIFTS Phase 1 demo: ``truck_rail`` mode.
+"""LIFTS demo: ``truck_rail`` mode (workflow-engine path).
 
-A truck<->rail intermodal terminal where containers exchange between the
-rail tracks (via rail-track RTGs) and the gate (via drayage trucks), with
-all containers routing through the main container stack.
+A truck<->rail intermodal terminal where containers exchange between
+the rail tracks (via rail-track RTGs) and the gate (via drayage trucks),
+with all containers routing through the main container stack.
 
-This demo reads the bundled ``train_consist_plan.csv`` and runs the
-rebuilt ``truck_rail`` mode end-to-end. No explicit drayage schedule is
-passed in: ``truck_rail`` synthesizes one from the train arrivals so the
-stack always has enough OCs for the trains and enough ICs for the
-pickup trucks (~1 drayage truck per container).
-
-To exercise the *explicit* drayage path instead, pass an
-``extra_inputs={"drayage_schedule": <DataFrame>}`` of shape
-(``Terminal_ID``, ``Truck_ID``, ``Arrival_Time_Hr``, ``Action``,
-``Container_ID``); see ``utilities.build_drayage_schedule`` and the
-bundled ``drayage_schedule.csv`` for the format. With Phase 1's single
-flat ``container_stack``, the explicit schedule must supply enough
-drayage volume to cover the trains' OC demand or some trains will not
-finish loading before the sim ends.
+This demo runs the ``allouez_truck_rail.yaml`` site definition through
+:func:`altrios.workflow_engine.run_site` and then materializes the
+freight-flavoured ``container_data`` / ``resource_log`` DataFrames via
+:func:`altrios.lifts.python_helpers.assemble_outputs`. The legacy
+``run_terminal_simulation`` entry point was removed in Phase A.8/A.9.
 
 Run from the repo root with::
 
@@ -30,13 +21,18 @@ or directly with::
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import polars as pl
 
-from altrios.lifts import run_terminal_simulation, utilities
+from altrios.lifts.python_helpers import assemble_outputs
+from altrios.workflow_engine import run_site
 
 
 TERMINAL = "Allouez"
+SITE_FILE = (
+    Path(__file__).resolve().parent.parent / "sites" / "allouez_truck_rail.yaml"
+)
 
 
 def _print_summary(container_data: pl.DataFrame, resource_log: pl.DataFrame) -> None:
@@ -52,7 +48,7 @@ def _print_summary(container_data: pl.DataFrame, resource_log: pl.DataFrame) -> 
     print(f"    IC (inbound)  : {ic_total.height}")
     print(f"    OC (outbound) : {oc_total.height}")
     print(f"  train rows       : {train_rows.height}")
-    if train_rows.height > 0:
+    if train_rows.height > 0 and "train_depart" in train_rows.columns:
         print(f"    train_depart   : "
               f"{train_rows['train_depart'].min():.2f} -> "
               f"{train_rows['train_depart'].max():.2f} h")
@@ -74,19 +70,9 @@ def _print_summary(container_data: pl.DataFrame, resource_log: pl.DataFrame) -> 
 
 
 def main() -> None:
-    resources = utilities.resources_root()
-
-    consist_plan = (
-        pl.read_csv(resources / "train_consist_plan.csv")
-        .with_columns(pl.lit("Intermodal").alias("Train_Type"))
-    )
-
     t0 = time.perf_counter()
-    container_data, resource_log, _ = run_terminal_simulation(
-        modes=["truck_rail"],
-        terminal=TERMINAL,
-        inputs={"truck_rail": {"train_consist_plan": consist_plan}},
-    )
+    result = run_site(str(SITE_FILE), seed=42)
+    container_data, resource_log = assemble_outputs(result, mode_name="truck_rail")
     elapsed = time.perf_counter() - t0
     print(f"\nLIFTS truck_rail run: {elapsed:.2f} s")
 
@@ -95,3 +81,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

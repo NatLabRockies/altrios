@@ -1,17 +1,12 @@
-"""LIFTS Phase 1 demo: ``vessel_truck`` mode.
+"""LIFTS demo: ``vessel_truck`` mode (workflow-engine path).
 
 A vessel<->truck terminal where vessels and drayage trucks exchange
 containers through the main container stack. No rail tracks.
 
-Inputs (constructed inline so the demo is self-contained and the
-vessel/drayage schedule is mutually feasible):
-
-  * A small vessel call list with two calls at ``Allouez``: an early
-    "delivery" call (inbound only) that seeds the stack, and a later
-    "loading" call (outbound only) that depletes containers the drayage
-    dropoffs have accumulated.
-  * A drayage schedule with a burst of dropoffs (build OC stock) and a
-    burst of pickups (consume IC stock delivered by the first vessel).
+This demo runs the ``allouez_vessel_truck.yaml`` site definition through
+:func:`altrios.workflow_engine.run_site` and then materializes the
+freight-flavoured ``container_data`` / ``resource_log`` DataFrames via
+:func:`altrios.lifts.python_helpers.assemble_outputs`.
 
 Run from the repo root with::
 
@@ -24,64 +19,18 @@ or directly with::
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import polars as pl
 
-from altrios.lifts import run_terminal_simulation
+from altrios.lifts.python_helpers import assemble_outputs
+from altrios.workflow_engine import run_site
 
 
 TERMINAL = "Allouez"
-
-
-def _build_vessel_calls() -> pl.DataFrame:
-    """Two vessel calls at Allouez.
-
-    * Vessel 1 (t=20h, depart 50h): delivers 80 inbound, loads 0 outbound.
-      Drayage will pick those 80 ICs up later.
-    * Vessel 2 (t=120h, depart 150h): delivers 0 inbound, loads 60 outbound.
-      Drayage dropoffs through t=100h supply the OC stock.
-    """
-    return pl.DataFrame({
-        "Vessel_ID": [1, 2],
-        "Vessel_Name": ["Northland Spirit", "Boreal Crest"],
-        "Origin_ID": ["Duluth", TERMINAL],
-        "Destination_ID": [TERMINAL, "Duluth"],
-        "Arrival_Time_Hr": [20.0, 120.0],
-        "Departure_Time_Hr": [50.0, 150.0],
-        "Inbound_Containers": [80, 0],
-        "Outbound_Containers": [0, 60],
-    })
-
-
-def _build_drayage_schedule() -> pl.DataFrame:
-    """Two bursts of trucks:
-
-    * Dropoffs t=30..100h supply OC stock for Vessel 2's outbound load.
-    * Pickups t=60..120h consume ICs Vessel 1 delivered at t=20h.
-    """
-    rows: list[dict] = []
-    truck_id = 1
-    # Burst 1: 80 dropoffs over 70 hours (≈1.1 trucks/hr)
-    for i in range(80):
-        rows.append({
-            "Terminal_ID": TERMINAL,
-            "Truck_ID": truck_id,
-            "Arrival_Time_Hr": 30.0 + i * (70.0 / 80.0),
-            "Action": "dropoff",
-            "Container_ID": "",
-        })
-        truck_id += 1
-    # Burst 2: 80 pickups over 60 hours
-    for i in range(80):
-        rows.append({
-            "Terminal_ID": TERMINAL,
-            "Truck_ID": truck_id,
-            "Arrival_Time_Hr": 60.0 + i * (60.0 / 80.0),
-            "Action": "pickup",
-            "Container_ID": "",
-        })
-        truck_id += 1
-    return pl.DataFrame(rows)
+SITE_FILE = (
+    Path(__file__).resolve().parent.parent / "sites" / "allouez_vessel_truck.yaml"
+)
 
 
 def _print_summary(container_data: pl.DataFrame, resource_log: pl.DataFrame) -> None:
@@ -131,21 +80,9 @@ def _print_summary(container_data: pl.DataFrame, resource_log: pl.DataFrame) -> 
 
 
 def main() -> None:
-    vessel_calls = _build_vessel_calls()
-    drayage_schedule = _build_drayage_schedule()
-
-    print(f"Vessel calls   : {vessel_calls.height} at {TERMINAL}")
-    print(f"Drayage trucks : {drayage_schedule.height} at {TERMINAL}")
-
     t0 = time.perf_counter()
-    container_data, resource_log, _ = run_terminal_simulation(
-        modes=["vessel_truck"],
-        terminal=TERMINAL,
-        inputs={"vessel_truck": {
-            "vessel_schedule": vessel_calls,
-            "drayage_schedule": drayage_schedule,
-        }},
-    )
+    result = run_site(str(SITE_FILE), seed=42)
+    container_data, resource_log = assemble_outputs(result, mode_name="vessel_truck")
     elapsed = time.perf_counter() - t0
     print(f"\nLIFTS vessel_truck run: {elapsed:.2f} s")
 
