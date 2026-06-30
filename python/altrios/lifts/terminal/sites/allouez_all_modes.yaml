@@ -1,0 +1,48 @@
+# Allouez all-modes demo site.
+#
+# Activates ALL THREE freight modes (``truck_rail``, ``rail_vessel``,
+# ``vessel_truck``) simultaneously against shared resource pools.
+# Every entity kind in this site is contended across at least two
+# active modes, so every schedule entry MUST stamp ``mode:`` on its
+# arrivals -- the dispatcher rejects ambiguous routing otherwise.
+#
+# Modeling caveat (illustrative-only):
+# -----------------------------------
+# Without per-train and per-vessel routing data (i.e. "this train
+# unloads to drayage; that train unloads to vessel"), the canonical
+# Allouez sample data does NOT support a fidelity-claim split between
+# truck_rail and rail_vessel train traffic, or between rail_vessel
+# and vessel_truck vessel traffic. To exercise all three modes
+# concurrently this site duplicates the train and vessel streams:
+# every train arrives once for truck_rail AND once for rail_vessel,
+# and every vessel arrives once for rail_vessel AND once for
+# vessel_truck. Each duplicate is serviced independently against the
+# shared resource pools.
+#
+# The point of this site is to demonstrate that the engine handles
+# three concurrent modes correctly. It is NOT calibrated against any
+# physical Allouez throughput. For a calibrated multi-mode site,
+# supply distinct per-mode schedule DataFrames via Python overrides
+# instead of using the synthesized defaults below.
+meta:
+  schema_version: 1
+name: allouez_all_modes
+catalog: altrios.lifts.terminal
+modes: [truck_rail, rail_vessel, vessel_truck]
+
+config: !include ../resources/config.yaml
+
+schedules:
+  # Trains are contended between truck_rail and rail_vessel. Use the
+  # mode-stamped variants for both.
+  truck_rail_train_arrivals: null
+  rail_vessel_train_arrivals: null
+  # Vessels are contended between rail_vessel and vessel_truck.
+  rail_vessel_vessel_arrivals: null
+  vessel_truck_vessel_arrivals: null
+  # Drayage is contended between truck_rail and vessel_truck (the
+  # rail_vessel mode does not route drayage).
+  truck_rail_drayage_arrivals: null
+  vessel_truck_drayage_arrivals: null
+
+seed: 42

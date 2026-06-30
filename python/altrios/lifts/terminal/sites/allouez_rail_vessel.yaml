@@ -1,0 +1,19 @@
+# Allouez rail<->vessel demo site.
+#
+# Activates the rail_vessel mode only: vessels only, no train_consist_plan
+# supplied (vessels exchange containers with the yard; no trains).
+#
+# To add trains to this site, declare ``train_arrivals: null`` (canonical
+# CSV fallback) or ``train_arrivals: <path-to-csv>``.
+meta:
+  schema_version: 1
+name: allouez_rail_vessel
+catalog: altrios.lifts.terminal
+modes: [rail_vessel]
+
+config: !include ../resources/config.yaml
+
+schedules:
+  vessel_arrivals: null     # canonical vessel_call_list.csv
+
+seed: 42

@@ -1,0 +1,17 @@
+# Allouez vessel<->truck demo site.
+#
+# Activates the vessel_truck mode only. Vessels deliver/receive
+# containers; drayage trucks move them through the gate.
+meta:
+  schema_version: 1
+name: allouez_vessel_truck
+catalog: altrios.lifts.terminal
+modes: [vessel_truck]
+
+config: !include ../resources/config.yaml
+
+schedules:
+  vessel_arrivals: null
+  vessel_truck_drayage_arrivals: null    # canonical drayage_schedule.csv fallback
+
+seed: 42

@@ -1,6 +1,6 @@
 # Workflow Engine — Phase 3 Refactor Plan
 
-**Status:** Phase 3 complete (3A–3D + 3E + 3F + 3G + 3H done; freight YAML-translation strategy B+A both shipped per Decision D7; multi-mode dispatch enablement landed per §8.C / Decision D19; 3-mode hardening + multi-mode `assemble_outputs` + per-arrival `loaded_ocs` invariant + docs chapter landed per §8.D / Decision D20)
+**Status:** Phase 3 complete (3A–3D + 3E + 3F + 3G + 3H done; freight YAML-translation strategy B+A both shipped per Decision D7; multi-mode dispatch enablement landed per §8.C / Decision D19; 3-mode hardening + multi-mode `assemble_outputs` + per-arrival `loaded_ocs` invariant + docs chapter landed per §8.D / Decision D20; subsystem co-location under `altrios.lifts` umbrella landed per §8.E / Decision D21)
 **Last updated:** 2026-06-30
 **Owner:** LIFTS subsystem maintainers
 
@@ -21,7 +21,7 @@ update the corresponding section below.
 |---|---|---|
 | 3A.1 | Add `role` tag to `ResourceSpec`; annotate 14 specs | **Done** (2026-06-29) |
 | 3A.2 | Add `Entity` + `EntityKindSpec` dataclasses | **Done** (2026-06-29) |
-| 3A.3 | Create `altrios.workflow_engine` package; move generic pieces | **Done** (2026-06-29) — imports repointed, no backwards-compatible re-exports per project policy |
+| 3A.3 | Create `altrios.lifts.workflow_engine` package; move generic pieces | **Done** (2026-06-29) — imports repointed, no backwards-compatible re-exports per project policy |
 | 3A.4 | Rename `energy_use*` → `consumption*` | **Done** (2026-06-29) |
 | 3A.5 | Rename `vehicle_log_df` → `resource_log_df`; add `role` + `quantity` cols | **Done** (2026-06-29) |
 | 3A.6 | Re-run Phase 1+2 verification matrices | **Done** (2026-06-29) |
@@ -46,6 +46,7 @@ update the corresponding section below.
 | **A (3G full refactor)** | Migrate module globals to `OutputCollector`, refactor helper signatures, decompose freight workflows into fine-grained YAML graphs using the 19 primitives, delete `train_flow.py` / `drayage_flow.py` / `vessel_flow.py`, delete `TerminalAdapter`, delete `TerminalMode` + `run_terminal_simulation`, migrate demos and verify-scripts | **Done** (2026-06-30) — see §8.A. **268 total tests pass.** `terminal_adapter.py`, the four legacy flow modules, `terminal_sim.py`, the legacy `run_terminal_simulation` / `TerminalMode` / mode registry, and the Phase-1/Phase-2 verify scripts are all deleted. Demos and the smoke script drive `run_site` directly. |
 | **C (multi-mode enablement)** | Engine: per-arrival `mode` field disambiguates kinds shared across modes (drayage in `truck_rail`+`vessel_truck`, train in `truck_rail`+`rail_vessel`, vessel in `rail_vessel`+`vessel_truck`). Freight: all 4 schedule builders accept optional `mode` kwarg; `catalog.yaml` schedule_mappings stamp drayage/rail_vessel/vessel_truck entries; new `sites/allouez_combined.yaml` composes truck_rail + vessel_truck sharing resource pools; new `demos/multi_mode_demo.py` (replaces the file deleted in A.10); new `test_combined_truck_rail_vessel_truck_smoke`. | **Done** (2026-06-30) — see §8.C and Decision D19. **274 total tests pass** (268 prior + 5 engine dispatch + 1 combined smoke). Single-mode truck_rail smoke 2469.15 (+0.011 % vs baseline). Commits `47537f5` (engine) and `36c05f1` (freight). |
 | **D (3-mode hardening, multi-mode assemble, docs)** | Multi-mode `assemble_outputs(result, mode_name=str \| Sequence[str])` unions event-type surfaces across active modes; all-three-mode `sites/allouez_all_modes.yaml` (illustrative-only since trains/vessels duplicate across contended modes); per-arrival `meta.loaded_ocs` invariant replaces shared `state.loaded_ocs_by_train` dict to eliminate cross-arrival state leakage when train_ids collide; new `test_combined_all_modes_smoke` pinned at ±1.5 % (empirically verified 10-run probe); new `docs/src/workflow-engine.md` narrative chapter linked from `SUMMARY.md`. | **Done** (2026-06-30) — see §8.D and Decision D20. **275 total tests pass** (274 prior + 1 all-modes smoke). Single-mode truck_rail smoke 2468.99 (+0.004 % vs baseline). Commit `603af0f`. |
+| **E (subsystem co-location under `altrios.lifts`)** | Workflow-engine subsystem moved out of `altrios.workflow_engine` (top-level) into `altrios.lifts.workflow_engine`. Freight catalog content (originally at `altrios.lifts.*` root) moved into `altrios.lifts.terminal.*`. Mining example moved out of `workflow_engine/examples/` into `altrios.lifts.mine`. `altrios.lifts` becomes the umbrella package for the whole workflow-engine subsystem (engine + N catalogs). Overrides Decision D15 (which had locked the engine at `altrios.workflow_engine`); see Decision D21. | **Done** (2026-06-30) — see §8.E and Decision D21. **275 tests pass**, truck_rail smoke 2472.39 (+0.14 % vs baseline; within ±0.5 %). |
 
 ---
 
@@ -99,7 +100,10 @@ The engine consumes two YAML file types:
   spatial layout, and points at default arrival schedules.
 
 ```
-python/altrios/                            # engine + freight catalog
+python/altrios/lifts/                       # umbrella for the whole subsystem
+├── __init__.py                            # re-exports loggingLevel; docstring
+│                                          # naming the three sub-packages
+│
 ├── workflow_engine/                       # DOMAIN-NEUTRAL ENGINE
 │   ├── __init__.py
 │   ├── resources.py                       # ResourceSpec + merge/build helpers
@@ -116,29 +120,34 @@ python/altrios/                            # engine + freight catalog
 │   ├── registry.py                        # @register'd python: callables
 │   ├── output.py                          # OutputCollector (3 row-lists)
 │   ├── runner.py                          # run_site canonical entry point
-│   └── tests/
+│   └── tests/                             # engine-only unit tests
 │
-└── lifts/                                 # FREIGHT CATALOG
-    ├── catalog.yaml                       # single catalog file (3 modes:
-    │                                      # truck_rail / rail_vessel / vessel_truck)
-    ├── specs.py                           # ResourceSpec instances + mode bundles
-    ├── python_helpers.py                  # @register'd freight callables + assemble_outputs
-    ├── classes.py                         # freight dataclasses (Container, Truck, ...)
-    ├── consumption.py                     # CO2/fuel accounting helpers
-    ├── distances.py                       # Manhattan / hostler / triangular travel
-    ├── utilities.py                       # logging, schedules, event recording
-    ├── yard_flow.py                       # stack_in / stack_out / yard_tractor_haul
-    ├── resources/config.yaml              # freight config defaults
-    ├── sites/                             # site files exercised by demos
-    │   ├── allouez_truck_rail.yaml
-    │   ├── allouez_rail_vessel.yaml
-    │   └── allouez_vessel_truck.yaml
-    ├── demos/                             # per-mode demo scripts
-    │   ├── truck_rail_demo.py
-    │   ├── rail_vessel_demo.py
-    │   └── vessel_truck_demo.py
-    └── tests/                             # freight smoke + parity tests
+├── terminal/                              # FREIGHT INTERMODAL CATALOG (original LIFTS)
+│   ├── __init__.py
+│   ├── catalog.yaml                       # 3 modes: truck_rail / rail_vessel / vessel_truck
+│   ├── specs.py                           # ResourceSpec instances + mode bundles
+│   ├── python_helpers.py                  # @register'd freight callables + assemble_outputs
+│   ├── classes.py                         # freight dataclasses (Container, Truck, ...)
+│   ├── consumption.py                     # CO2/fuel accounting helpers
+│   ├── distances.py                       # Manhattan / hostler / triangular travel
+│   ├── utilities.py                       # logging, schedules, event recording
+│   ├── yard_flow.py                       # stack_in / stack_out / yard_tractor_haul
+│   ├── resources/config.yaml              # freight config defaults
+│   ├── sites/                             # 5 Allouez sites
+│   ├── demos/                             # per-mode + multi_mode demos
+│   ├── scripts/smoke_truck_rail.py        # baseline-pinning inspection script
+│   └── tests/                             # freight smoke + parity tests
+│
+└── mine/                                  # OPEN-PIT MINING EXAMPLE CATALOG
+    ├── __init__.py
+    ├── mining_haul.yaml                   # 1 mode: haul_cycle
+    ├── mining_helpers.py                  # @register'd schedule builder + state init
+    ├── sites/example_mine.yaml
+    └── tests/                             # mining-specific smoke tests
 ```
+
+The single user-facing entry-point demo (`python/altrios/demos/lifts_demo.py`)
+remains alongside the other ALTRIOS demos.
 
 User-provided catalogs and sites can live anywhere on disk.
 
@@ -157,7 +166,7 @@ Only **two file types** (catalog and site) exist in YAML. The third tier
 
 1. **Python overrides** on the entry call:
    ```python
-   from altrios.workflow_engine import run_site
+   from altrios.lifts.workflow_engine import run_site
    run_site(
        "sites/rotterdam.yaml",
        seed=42,
@@ -181,8 +190,10 @@ Only **two file types** (catalog and site) exist in YAML. The third tier
 
 ### 4.1 `ResourceSpec` (extends existing, adds `role`)
 
-Lives at `altrios/workflow_engine/resources.py` (moved from
-`altrios/lifts/resources_decl.py` in Phase 3A.3). Phase 3A.1
+Lives at `altrios/lifts/workflow_engine/resources.py` (moved from
+`altrios/lifts/resources_decl.py` in Phase 3A.3 to
+`altrios/workflow_engine/resources.py`; relocated again under
+`altrios.lifts` in §8.E). Phase 3A.1
 adds a required **`role`** string field:
 
 | Role | Used for | Logged how |
@@ -494,7 +505,7 @@ phase A.
 |---|---|
 | **B.1** | ✅ `lifts/terminal_adapter.py` — `TerminalAdapter` class. Wraps `(env, state, config, output)` from the runner and exposes the surface area `train_flow.py` / `drayage_flow.py` / `vessel_flow.py` actually read: `state` (the SimpleNamespace pool bag), `env`, `config` (constants like `CRANE_MOVE_DEV_TIME` resolved through `__getattr__` from the merged config dict), `log(level, msg)` (delegates to `utilities.log`), `layout`, `log_level`. Module-level `consumption_records` / `container_events` accumulators are **left in place** (helpers keep appending to them); the adapter's post-process step copies them into the runner's `OutputCollector` so `RunResult.output` is populated for downstream tests. |
 | **B.2** | ✅ `lifts/python_helpers.py` — registers (a) `freight.build_freight_state` as `state_init`: attaches `container_events: []` to state, builds the union of every freight ResourceSpec via `build_state_from_specs`, attaches each pool to state, constructs the adapter and assigns it to `state.terminal_adapter`, resets `consumption_records`, and seeds Python stdlib `random.seed(42)` to match the legacy demo. (b) Schedule builders: `freight.build_train_schedule` (Train_Type force-override to Intermodal), `freight.build_drayage_schedule_synth` (truck_rail mode default: synthesizes from trains), `freight.build_drayage_schedule_csv` (vessel_truck mode default: reads canonical CSV), `freight.build_vessel_schedule`. (c) Three arrival wrappers (`freight.process_train_arrival`, `freight.process_drayage_arrival`, `freight.process_vessel_arrival`) each take `(env, state, entity)`, reconstruct the entry-dict via `vars(entity)`, and `yield from` the legacy generator with `state.terminal_adapter`. (d) `assemble_outputs(result, mode_name=)` post-run helper: pivots `state.container_events` to wide form and assembles `resource_log` from module-level `consumption_records` (matches legacy `_build_generic_outputs_with_event_types`). |
-| **B.3** | ✅ `lifts/catalog.yaml` — declares 3 modes (`truck_rail`, `rail_vessel`, `vessel_truck`). Each mode has a 1-step `python:` graph per arrival kind. **Resource specs are NOT declared inline** because the freight `ResourceSpec` callables (capacity / partition_by / init_items lambdas) can't be expressed in YAML form; instead, `build_freight_state` instantiates the spec union at run start. (Phase A.6 will translate these to YAML form.) `config_defaults:` ships the 8 numeric freight constants from `classes.Terminal`. `python_module: altrios.lifts.python_helpers`. |
+| **B.3** | ✅ `lifts/catalog.yaml` — declares 3 modes (`truck_rail`, `rail_vessel`, `vessel_truck`). Each mode has a 1-step `python:` graph per arrival kind. **Resource specs are NOT declared inline** because the freight `ResourceSpec` callables (capacity / partition_by / init_items lambdas) can't be expressed in YAML form; instead, `build_freight_state` instantiates the spec union at run start. (Phase A.6 will translate these to YAML form.) `config_defaults:` ships the 8 numeric freight constants from `classes.Terminal`. `python_module: altrios.lifts.terminal.python_helpers`. |
 | **B.4** | ✅ `lifts/sites/allouez_truck_rail.yaml`, `allouez_rail_vessel.yaml`, `allouez_vessel_truck.yaml` — each `!include`s `../resources/config.yaml` for the bulk of freight config; activates one mode; references catalog schedules with `null` (CSV fallback); sets `seed: 42`. |
 | **B.5** | ✅ `lifts/tests/test_freight_parity.py` — three tests, all passing. Each: (a) runs the legacy `run_terminal_simulation`. (b) runs `run_site(<site>, seed=42)` + `assemble_outputs(result, mode_name=)`. (c) asserts container counts exactly match (IC=914 / OC=980 for truck_rail; 644 rows for rail_vessel; 719 for vessel_truck) and total energy + resource_log row count + max train_depart within ±0.5%. **268 total workflow_engine+lifts tests pass.** |
 | **B.6** | ✅ `python/altrios/lifts/README.md` — banner section directing new callers to `run_site`. Existing demos are NOT migrated under B (they're touched under A.10). |
@@ -641,6 +652,49 @@ workflow engine.
 
 ---
 
+### E — Subsystem co-location under `altrios.lifts` (post-Decision-D20)
+
+**Goal:** Collapse the workflow-engine subsystem (which has no
+consumers anywhere else in ALTRIOS) into a single umbrella package
+at `altrios.lifts`. Keep the domain-neutral engine domain-neutral,
+but stop pretending it's a top-level ALTRIOS concept on par with
+the rail-physics core.
+
+**Sub-steps:**
+
+| Sub-step | Description |
+|---|---|
+| **E.1** | ✅ Moved `python/altrios/workflow_engine/` → `python/altrios/lifts/workflow_engine/` (38 files via `git mv`). Rewrote `altrios.workflow_engine` → `altrios.lifts.workflow_engine` across 41 files (.py / .yaml / .md). |
+| **E.2** | ✅ Extracted mining example out of the engine: moved `lifts/workflow_engine/examples/{mining_haul.yaml, mining_helpers.py, sites/example_mine.yaml, __init__.py}` and `lifts/workflow_engine/tests/test_mining_example.py` into a new `python/altrios/lifts/mine/` sub-package (with its own `tests/__init__.py`). Rewrote `altrios.lifts.workflow_engine.examples` → `altrios.lifts.mine` across 3 files. Fixed `EXAMPLE_SITE` path constant in the mining test. |
+| **E.3** | ✅ Moved all freight content from `python/altrios/lifts/` root into `python/altrios/lifts/terminal/` (9 files + 5 subdirs: catalog.yaml, classes.py, consumption.py, distances.py, python_helpers.py, specs.py, utilities.py, yard_flow.py, README.md + demos/, resources/, scripts/, sites/, tests/). Preserved at `lifts/` root: `__init__.py`, `workflow_engine/`, `mine/`. Created `lifts/terminal/__init__.py` so the package has `__file__` for the YAML loader's catalog-resolution. |
+| **E.4** | ✅ Rewrote 26 files for the freight-side relocation: `altrios.lifts.{python_helpers,classes,consumption,distances,specs,utilities,yard_flow,sites}` → `altrios.lifts.terminal.<same>`; `from altrios.lifts import <module>` → `from altrios.lifts.terminal import <module>`; YAML `catalog: altrios.lifts` (line-bounded) → `catalog: altrios.lifts.terminal` across all 5 site files; hard-coded `"lifts" / "sites"` path strings in `smoke_truck_rail.py` and `lifts_demo.py` → `"lifts" / "terminal" / "sites"`; `.gitignore` entries updated for the new freight tree. Re-pointed docstring references in `lifts/workflow_engine/{__init__.py, output.py, tests/__init__.py}` from `:mod:`altrios.lifts`` to `:mod:`altrios.lifts.terminal`` where they refer to the freight catalog specifically. Updated the `lifts/__init__.py` umbrella docstring to name the three sub-packages and reflect the new role. |
+| **E.5** | ✅ Updated `docs/src/workflow-engine.md`: added a "Package layout" section naming the three sub-packages; refreshed all `python/altrios/lifts/...` paths to the new `lifts/terminal/...` form; updated the example import lines. |
+| **E.6** | ✅ Verification: full suite **275 passed** (5 freight parity + 4 mining + 266 engine); truck_rail smoke total energy 2472.39 (+0.14 % vs baseline 2468.898; well within ±0.5 %). |
+| **E.7** | ✅ Plan-doc: this section, refreshed §3.1 tree, refreshed §4.1 location note, Decision D21. |
+
+**Acceptance criteria for E — all met (2026-06-30):**
+- ✅ `altrios.lifts` is the umbrella package; `workflow_engine`,
+  `terminal`, `mine` are sibling sub-packages. No workflow-engine
+  code lives outside `altrios.lifts`.
+- ✅ The single user-facing demo file under `altrios.demos` is the
+  only LIFTS-related file outside `altrios.lifts` (it imports from
+  `altrios.lifts.terminal.python_helpers` and runs a site).
+- ✅ Full test suite passes; smoke baselines hold within tolerance.
+- ✅ Engine remains genuinely domain-neutral: the engine package
+  imports nothing from `altrios.lifts.terminal` or
+  `altrios.lifts.mine`; both catalogs import *from* the engine.
+
+**Out of scope (deferred):**
+- Splitting `altrios.lifts` into its own distribution. Decision D15's
+  original rationale ("stays inside the `altrios` package; not yet a
+  standalone distribution") still holds for the same reasons.
+- Wholesale rename of the umbrella package away from `lifts`. The
+  name has historical baggage but is established in commit history,
+  CHANGELOG, and external references; renaming would be a separate
+  decision with broader impact than this restructure.
+
+---
+
 ## 9. Decisions log
 
 Each entry is locked. Changing a locked decision requires updating this
@@ -662,7 +716,7 @@ table and the implementation.
 | 12 | **Travel as composite** = deferred | 2026-06-29 | Expressible today as `timeout` + `record_consumption` + optional road-segment `request`/`release`. Add a `travel` macro only if patterns demand it. |
 | 13 | **Two-tier file structure** = catalog + site (NOT three tiers in files) | 2026-06-29 | "Scenario at a site" axis handled by Python overrides or thin `extends:` files; no third YAML file type. Renamed from "scenario" to "site" terminology. |
 | 14 | **Site layout schema** = 2-D Manhattan, meters, optional unused `z` | 2026-06-29 | Smallest schema that supports mining/airport/etc. without over-engineering. No graph/edge form in v1. |
-| 15 | **Engine package location** = `python/altrios/workflow_engine/` | 2026-06-29 | Stays inside the `altrios` package; not yet a standalone distribution. |
+| 15 | **Engine package location** = `python/altrios/workflow_engine/` | 2026-06-29 | Stays inside the `altrios` package; not yet a standalone distribution. **Superseded by D21 (2026-06-30):** engine relocated to `python/altrios/lifts/workflow_engine/` to co-locate the whole workflow-engine subsystem (engine + N catalogs) under one umbrella, since none of it has consumers outside the LIFTS subsystem. |
 | 16 | **Catalog reference syntax** = Python import path (e.g., `altrios.lifts`) for shipped catalogs; filesystem paths for user catalogs | 2026-06-29 | Both styles supported in the YAML loader. No named registry. |
 | 17 | **Demo migration policy** = rewrite demos to use `run_site()` | 2026-06-29 | After 3G, the YAML scenario IS the contract. No transitional shims. |
 | 18 | **Schema versioning** = mandatory `meta.schema_version: 1` on every YAML | 2026-06-29 | Enables future migrations. v1 is the only version in Phase 3. |
@@ -670,6 +724,7 @@ table and the implementation.
 | D10b | **Override of Decision 10** — engine output schema is schema-loose, not column-mapped | post-A.13 | Phase 3B's `OutputCollector` and `record_event` / `record_resource_event` / `record_consumption` primitives accept arbitrary row dicts; the engine writes whatever the YAML step declares plus envelope columns. No `entity_id_column` catalog field exists. Per-catalog wide-table assembly (e.g. pivoting `event_log` into `container_data`) is done in the catalog's Python helpers (for freight: `lifts/python_helpers.py::assemble_outputs`). The `vehicle_log` → `resource_log` rename and the `role` / `quantity` columns from Decision 10 are still in force; only the `container_id` → `entity_id_column` rename was abandoned in favor of catalog-side assembly. |
 | D19 | **Multi-mode dispatch via optional per-arrival `mode` key** | 2026-06-30 (post §8.C) | `run_site` originally rejected any entity kind defined in more than one active mode (kind ambiguity). To allow concurrent multi-mode sites without forcing globally-unique kind names (which would force authors to mangle catalog kinds like `truck_rail_drayage` / `vessel_truck_drayage`), `run_site` now disambiguates per arrival: each arrival may carry `mode: <mode_name>` (stripped before storing as `Entity` attrs). Kinds defined in exactly one active mode still dispatch with no `mode` key (preserves backward compatibility — all existing single-mode sites work unchanged). Kinds defined in ≥ 2 active modes ("contended") require `mode`; missing or unknown `mode` is a `RunError`. Composition with `spawn` works only within a single mode (spawned sub-workflows inherit the spawning entity's mode); cross-mode `spawn` is explicitly out of scope. See §8.C. |
 | D20 | **Per-arrival mutable state lives on `meta` (the per-arrival `SimpleNamespace`), never on `state`** | 2026-06-30 (post §8.D) | Any mutable bookkeeping that a single arrival's workflow steps need to share — lists, counters, intermediate handles — belongs on the per-arrival `meta` returned by the catalog's `setup_*_arrival` helper, and must be threaded through subsequent steps via YAML bindings (e.g. `loaded_ocs: "{bindings.meta.loaded_ocs}"`). The `state` `SimpleNamespace` is for **catalog-wide** state that is genuinely shared across arrivals (resource pools, monotonic counters, registries). The discovered failure mode: when the 3-mode site duplicated train arrivals across truck_rail + rail_vessel, two arrivals sharing a `train_id` both wrote to `state.loaded_ocs_by_train[train_id]` and `record_train_depart_events` popped the whole bucket — making the `train_depart` event count sensitive to arrival interleaving. The fix (per-arrival `meta.loaded_ocs: list`) eliminates the shared key entirely. Rule: if you find yourself writing `state.<foo>_by_<id>` and `<id>` is per-arrival, move it to `meta`. See §8.D, sub-step D.4. |
+| D21 | **`altrios.lifts` is the umbrella for the whole workflow-engine subsystem** — engine + all catalogs co-located under it; overrides Decision D15. | 2026-06-30 (post §8.E) | The workflow engine has no consumers anywhere else in ALTRIOS: only the LIFTS subsystem and its catalogs depend on it. Keeping `altrios.workflow_engine` as a top-level package implied parity with the rail-physics core, which it does not have. The new layout has `altrios.lifts` as the umbrella with three sibling sub-packages: `altrios.lifts.workflow_engine` (domain-neutral engine, unchanged contract), `altrios.lifts.terminal` (the original LIFTS freight intermodal catalog — all content formerly at `altrios.lifts.*` root), and `altrios.lifts.mine` (the open-pit haul-cycle example formerly at `workflow_engine/examples/`). Future catalogs land as further sibling sub-packages. The engine remains genuinely domain-neutral (imports nothing from `terminal` or `mine`); the relocation is purely organisational. The single user-facing demo (`python/altrios/demos/lifts_demo.py`) stays alongside other ALTRIOS demos by repo convention. See §8.E. |
 
 ---
 
@@ -701,7 +756,7 @@ Explicitly deferred to Phase 4 or later:
 
 | Term | Definition |
 |---|---|
-| **Engine** | The domain-neutral `altrios.workflow_engine` package — primitives, interpreter, loader, output assembly. Knows nothing about cranes, trains, or ships. |
+| **Engine** | The domain-neutral `altrios.lifts.workflow_engine` package — primitives, interpreter, loader, output assembly. Knows nothing about cranes, trains, or ships. |
 | **Catalog** | A YAML + Python bundle defining one *site type* (freight terminal, mining operation, ...). Reusable. Ships with the engine or supplied by a user. |
 | **Site** | A YAML file naming one catalog, selecting active modes, declaring layout, and overriding default resource counts. One per physical place modeled. |
 | **Mode** | One process-flow family within a catalog (e.g., `truck_rail`, `rail_vessel`). A catalog typically defines several modes that can run concurrently. |

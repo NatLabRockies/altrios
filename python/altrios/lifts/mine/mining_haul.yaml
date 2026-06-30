@@ -1,0 +1,106 @@
+# Domain-neutral example: open-pit mining haul cycle.
+#
+# Demonstrates that the workflow_engine runs on totally non-freight
+# domains. One haul truck cycle:
+#   1. Drive empty to a shovel (loader)
+#   2. Wait for the shovel to be free
+#   3. Get loaded (takes a stochastic amount of time)
+#   4. Drive loaded to the crusher dump
+#   5. Wait for a crusher tipping bay to be free
+#   6. Dump (fixed time)
+#   7. Record tonnes hauled
+#
+# Resources:
+#   - shovels (capacity 2)              -- equipment role
+#   - crusher_bays (capacity 1)         -- infrastructure role
+#
+# Entities:
+#   - truck (one per arrival, attrs: payload_t)
+#
+# Driven by a python: schedule builder that synthesizes N arrivals
+# spaced ``dispatch_interval_hr`` apart at t=0.
+meta:
+  schema_version: 1
+name: mining_haul
+description: Single-shovel/single-crusher open-pit haul cycle example.
+python_module: altrios.lifts.mine.mining_helpers
+
+entity_kinds:
+  - name: truck
+    attrs:
+      payload_t: float
+      arrival_time: float
+
+modes:
+  - name: haul_cycle
+    arrival_routing:
+      truck: truck_cycle
+    graphs:
+      - name: truck_cycle
+        entry: drive_empty
+        steps:
+          - id: drive_empty
+            type: timeout
+            params:
+              duration: {dist: constant, value: 0.05}   # 3 min
+            next: acquire_shovel
+          - id: acquire_shovel
+            type: request
+            params:
+              pool: shovels
+              bind: shovel_req
+            next: load_truck
+          - id: load_truck
+            type: timeout
+            params:
+              # Stochastic load time: Uniform[3, 5] minutes -> hours
+              duration: {dist: uniform, low: 0.05, high: 0.0833}
+            next: release_shovel
+          - id: release_shovel
+            type: release
+            params:
+              pool: shovels
+              bind: shovel_req
+            next: drive_loaded
+          - id: drive_loaded
+            type: timeout
+            params:
+              duration: {dist: constant, value: 0.07}   # ~4.2 min
+            next: acquire_bay
+          - id: acquire_bay
+            type: request
+            params:
+              pool: crusher_bays
+              bind: bay_req
+            next: dump
+          - id: dump
+            type: timeout
+            params:
+              duration: {dist: constant, value: 0.02}   # 1.2 min
+            next: release_bay
+          - id: release_bay
+            type: release
+            params:
+              pool: crusher_bays
+              bind: bay_req
+            next: record
+          - id: record
+            type: record_event
+            params:
+              event_type: dump_complete
+              columns:
+                payload_t: "{entity.payload_t}"
+    resources:
+      - name: shovels
+        kind: Resource
+        role: equipment
+        capacity: 2
+      - name: crusher_bays
+        kind: Resource
+        role: infrastructure
+        capacity: 1
+
+schedule_mappings:
+  haul_cycle.truck_dispatch:
+    builder: mining.dispatch_trucks
+    payload_t: 220.0   # nominal truck payload

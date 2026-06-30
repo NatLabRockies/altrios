@@ -1,16 +1,23 @@
-"""LIFTS — intermodal rail terminal discrete-event simulator.
+"""LIFTS \u2014 the discrete-event workflow-engine subsystem of ALTRIOS.
 
-Public API. New code should import from this top-level package rather
-than reaching into individual modules, so future internal restructuring
-is cheap.
+This package is an umbrella for three co-located sub-packages:
 
-The canonical entry point is :func:`altrios.workflow_engine.run_site`
-against one of the site files in :mod:`altrios.lifts.sites`.
-Convenience helpers for assembling freight DataFrames from a
-:class:`RunResult` are in
-:func:`altrios.lifts.python_helpers.assemble_outputs`.
+* :mod:`altrios.lifts.workflow_engine` \u2014 the domain-neutral simulation
+  engine (primitives, interpreter, loader, output collector). Knows
+  nothing about freight, mining, or any specific domain.
+* :mod:`altrios.lifts.terminal` \u2014 the freight intermodal rail-terminal
+  catalog (the original LIFTS use case): trains, drayage trucks,
+  vessels, containers, RTGs, top-picks, yard tractors.
+* :mod:`altrios.lifts.mine` \u2014 a small open-pit mining haul-cycle
+  example catalog. Demonstrates the engine is genuinely domain-neutral.
+
+The canonical entry point is :func:`altrios.lifts.workflow_engine.run_site`
+against a site YAML in :mod:`altrios.lifts.terminal.sites` (freight)
+or :mod:`altrios.lifts.mine.sites` (mining). Convenience helpers for
+assembling freight DataFrames from a :class:`RunResult` are in
+:func:`altrios.lifts.terminal.python_helpers.assemble_outputs`.
 """
-from altrios.lifts.classes import loggingLevel
+from altrios.lifts.terminal.classes import loggingLevel
 
 __all__ = [
     "loggingLevel",

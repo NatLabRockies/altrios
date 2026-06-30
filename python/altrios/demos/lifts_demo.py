@@ -3,8 +3,8 @@ from altrios import sim_manager
 from altrios import defaults
 import altrios as alt
 from altrios.train_planner import planner_config
-from altrios.lifts.python_helpers import assemble_outputs
-from altrios.workflow_engine import run_site
+from altrios.lifts.terminal.python_helpers import assemble_outputs
+from altrios.lifts.workflow_engine import run_site
 import time
 import seaborn as sns
 from pathlib import Path
@@ -77,7 +77,7 @@ print(f"Elapsed time to run `sim_manager.main()`: {t1_main - t0_main:.3g} s")
 
 _LIFTS_SITE = (
     Path(alt.__file__).resolve().parent
-    / "lifts" / "sites" / "allouez_truck_rail.yaml"
+    / "lifts" / "terminal" / "sites" / "allouez_truck_rail.yaml"
 )
 _lifts_result = run_site(
     str(_LIFTS_SITE),

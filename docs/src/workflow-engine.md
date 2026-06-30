@@ -1,6 +1,6 @@
 # Workflow Engine
 
-The `altrios.workflow_engine` package is the domain-neutral simulation
+The `altrios.lifts.workflow_engine` package is the domain-neutral simulation
 core that drives the LIFTS intermodal terminal model and any other
 catalog that plugs into it. It interprets YAML-declared workflows
 against a SimPy event loop and emits structured event / consumption
@@ -10,19 +10,36 @@ This page is an orientation. For full design rationale, decision
 history, and primitive reference see `WORKFLOW_ENGINE_PLAN.md` in the
 repo root.
 
+## Package layout
+
+The whole workflow-engine subsystem lives under `altrios.lifts`:
+
+- `altrios.lifts.workflow_engine` — the domain-neutral engine
+  (primitives, interpreter, loader, output collector). Knows nothing
+  about freight, mining, or any specific domain.
+- `altrios.lifts.terminal` — the freight intermodal rail-terminal
+  catalog (the original LIFTS use case): trains, drayage trucks,
+  vessels, containers, RTGs, top-picks, yard tractors.
+- `altrios.lifts.mine` — a small open-pit mining haul-cycle example
+  catalog. Demonstrates the engine is genuinely domain-neutral.
+
+Additional domain catalogs (airports, hospitals, parcel hubs…) would
+land as further sibling sub-packages.
+
 ## Two-tier file model
 
 Every workflow-engine run consumes exactly two YAML file types:
 
-- **Catalog** (e.g. `python/altrios/lifts/catalog.yaml`) — defines
-  a reusable *site type*: the entity kinds it knows about, the
-  workflow step-graphs that process them, the modes that group those
-  graphs into operational families, and the schedule-builder
+- **Catalog** (e.g. `python/altrios/lifts/terminal/catalog.yaml`) —
+  defines a reusable *site type*: the entity kinds it knows about,
+  the workflow step-graphs that process them, the modes that group
+  those graphs into operational families, and the schedule-builder
   registrations. A catalog ships with a Python helpers module that
   registers the callables the YAML references.
 
-- **Site** (e.g. `python/altrios/lifts/sites/allouez_truck_rail.yaml`)
-  — names a catalog, picks which modes are active, supplies layout
+- **Site** (e.g.
+  `python/altrios/lifts/terminal/sites/allouez_truck_rail.yaml`) —
+  names a catalog, picks which modes are active, supplies layout
   and configuration, and points at the schedule data the run should
   use. One site file per physical place being modeled.
 
@@ -44,9 +61,11 @@ that route the same `kind` (e.g. drayage is processed differently by
 `truck_rail` and by `vessel_truck`), each arrival entry must carry
 an explicit `mode` key. The catalog's schedule builders stamp this
 key automatically for mode-specific schedule entries — see
-`schedule_mappings` in `python/altrios/lifts/catalog.yaml`.
+`schedule_mappings` in
+`python/altrios/lifts/terminal/catalog.yaml`.
 
-The current LIFTS sample sites:
+The current LIFTS sample sites (all under
+`python/altrios/lifts/terminal/sites/`):
 
 | Site file | Active modes | Notes |
 |---|---|---|
@@ -59,9 +78,9 @@ The current LIFTS sample sites:
 ## Running a site
 
 ```python
-from altrios.workflow_engine import run_site
+from altrios.lifts.workflow_engine import run_site
 
-result = run_site("python/altrios/lifts/sites/allouez_truck_rail.yaml",
+result = run_site("python/altrios/lifts/terminal/sites/allouez_truck_rail.yaml",
                   seed=42)
 print(result.env.now)               # simulation end time (hours)
 print(len(result.entities))         # arrivals scheduled
@@ -84,13 +103,13 @@ the catalog's responsibility, performed in Python after `run_site`
 returns.
 
 For the LIFTS catalog, that helper is
-`altrios.lifts.python_helpers.assemble_outputs`. It accepts either
+`altrios.lifts.terminal.python_helpers.assemble_outputs`. It accepts either
 a single `mode_name` for a single-mode site or a sequence of mode
 names for a combined multi-mode site; the expected event-type
 surface is then the union across all named modes.
 
 ```python
-from altrios.lifts.python_helpers import assemble_outputs
+from altrios.lifts.terminal.python_helpers import assemble_outputs
 
 # Single-mode:
 cd, rl = assemble_outputs(result, mode_name="truck_rail")
@@ -101,7 +120,7 @@ cd, rl = assemble_outputs(result, mode_name=("truck_rail", "vessel_truck"))
 
 ## Demos and smoke tests
 
-Working examples live under `python/altrios/lifts/demos/`:
+Working examples live under `python/altrios/lifts/terminal/demos/`:
 
 - `truck_rail_demo.py`, `rail_vessel_demo.py`, `vessel_truck_demo.py`
   — one per single-mode site.
@@ -109,8 +128,9 @@ Working examples live under `python/altrios/lifts/demos/`:
   illustrates resource pool sharing plus multi-mode `assemble_outputs`.
 
 Regression baselines for all five sites live in
-`python/altrios/lifts/tests/test_freight_parity.py` (`±0.5 %`
-tolerance on aggregate metrics, exact on entity counts).
+`python/altrios/lifts/terminal/tests/test_freight_parity.py`
+(`±0.5 %` tolerance on aggregate metrics for single/two-mode sites;
+`±1.5 %` for the all-three-mode site; exact on entity counts).
 
 ## Adding a new catalog
 
@@ -122,9 +142,10 @@ A new catalog needs:
 2. A Python module that registers the schedule builders, the
    `state_init` hook, and any per-arrival `python:` escape-hatch
    callables the workflow graphs invoke. Use the
-   `@altrios.workflow_engine.registry.register("name")` decorator.
+   `@altrios.lifts.workflow_engine.registry.register("name")` decorator.
 
-`python/altrios/lifts/catalog.yaml` and `python/altrios/lifts/python_helpers.py`
-together form the canonical reference catalog. A second small
-example used in the engine tests lives at
-`python/altrios/workflow_engine/examples/mining_haul.yaml`.
+`python/altrios/lifts/terminal/catalog.yaml` and
+`python/altrios/lifts/terminal/python_helpers.py` together form the
+canonical reference catalog. A second small example used in the
+engine tests lives at
+`python/altrios/lifts/mine/mining_haul.yaml`.
