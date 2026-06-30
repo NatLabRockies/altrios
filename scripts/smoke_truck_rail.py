@@ -10,9 +10,9 @@ consist_plan = (
 )
 
 cd, vl, term = run_terminal_simulation(
-    mode="truck_rail",
-    train_consist_plan=consist_plan,
+    modes=["truck_rail"],
     terminal="Allouez",
+    inputs={"truck_rail": {"train_consist_plan": consist_plan}},
 )
 
 # IC containers that came in on a train and were picked up by a drayage truck

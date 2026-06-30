@@ -85,9 +85,9 @@ def _run_truck_rail():
         .with_columns(pl.lit("Intermodal").alias("Train_Type"))
     )
     cd, vl, _ = run_terminal_simulation(
-        mode="truck_rail",
-        train_consist_plan=consist_plan,
+        modes=["truck_rail"],
         terminal=TERMINAL,
+        inputs={"truck_rail": {"train_consist_plan": consist_plan}},
     )
     return cd, vl, get_mode("truck_rail"), consist_plan
 
@@ -99,10 +99,12 @@ def _run_rail_vessel():
     )
     vessel_calls = pl.read_csv(utilities.resources_root() / "vessel_call_list.csv")
     cd, vl, _ = run_terminal_simulation(
-        mode="rail_vessel",
-        train_consist_plan=consist_plan,
+        modes=["rail_vessel"],
         terminal=TERMINAL,
-        extra_inputs={"vessel_schedule": vessel_calls},
+        inputs={"rail_vessel": {
+            "train_consist_plan": consist_plan,
+            "vessel_schedule": vessel_calls,
+        }},
     )
     return cd, vl, get_mode("rail_vessel"), None
 
@@ -139,10 +141,12 @@ def _run_vessel_truck():
     drayage = pl.DataFrame(rows)
 
     cd, vl, _ = run_terminal_simulation(
-        mode="vessel_truck",
-        train_consist_plan=None,
+        modes=["vessel_truck"],
         terminal=TERMINAL,
-        extra_inputs={"vessel_schedule": vessel_calls, "drayage_schedule": drayage},
+        inputs={"vessel_truck": {
+            "vessel_schedule": vessel_calls,
+            "drayage_schedule": drayage,
+        }},
     )
     return cd, vl, get_mode("vessel_truck"), None
 

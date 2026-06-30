@@ -8,10 +8,12 @@ in which endpoint(s) (rail track, vessel berth, gate) the containers
 enter and exit through.
 
 A :class:`TerminalMode` bundles the mode-specific pieces:
-    * ``build_schedule(input_plan, terminal_name, extras) -> list[dict]``
+    * ``build_schedule(terminal_name, inputs) -> list[dict]``
         Mode-specific schedule construction. Each returned dict is one
         arrival entry tagged with ``_kind`` so the dispatcher can route
-        it through the right per-arrival generator.
+        it through the right per-arrival generator. ``inputs`` is the
+        per-mode input dict supplied to ``run_terminal_simulation`` (e.g.
+        ``{"train_consist_plan": df, "drayage_schedule": df}``).
     * ``process_arrival(env, terminal, schedule_entry) -> generator``
         SimPy process kicked off once per scheduled arrival. Dispatches
         internally on ``schedule_entry["_kind"]``.
@@ -19,8 +21,12 @@ A :class:`TerminalMode` bundles the mode-specific pieces:
       ``container_id_pattern`` / ``post_process`` (optional)
         Declarative metadata. See :class:`TerminalMode` for details.
 
-Modes register themselves into ``_MODES`` and are dispatched by name via
-:func:`run_terminal_simulation`.
+Modes register themselves into ``_MODES``. The dispatcher
+:func:`run_terminal_simulation` accepts a list of mode names and a
+per-mode ``inputs`` mapping; multiple modes run concurrently against a
+single ``Terminal`` with their resource_specs union-merged so any pool
+referenced by more than one mode is a *single* SimPy primitive shared
+across them.
 """
 from __future__ import annotations
 
@@ -36,7 +42,7 @@ from altrios.lifts import distances, specs, utilities
 from altrios.lifts.classes import Terminal, loggingLevel
 from altrios.lifts.drayage_flow import process_drayage_arrival
 from altrios.lifts.energy_use import energy_use_records, CO2_KG_PER_UNIT
-from altrios.lifts.resources_decl import EventSpec, ResourceSpec
+from altrios.lifts.resources_decl import EventSpec, ResourceSpec, merge_specs
 from altrios.lifts.train_flow import process_train_arrival
 from altrios.lifts.vessel_flow import process_vessel_arrival
 
@@ -71,9 +77,9 @@ class TerminalMode:
     build_schedule
         Mode-specific schedule builder; returns a list of arrival-dict
         entries to feed into ``process_arrival``. Signature is
-        ``(input_plan, terminal_name, extras: dict | None) -> List[dict]``;
-        ``extras`` carries auxiliary inputs (vessel call list, drayage
-        schedule, ...) not required by every mode.
+        ``(terminal_name: str, inputs: dict) -> List[dict]``;
+        ``inputs`` is the per-mode input dict (e.g.
+        ``{"train_consist_plan": df, "drayage_schedule": df}``).
     description
         Human-readable description for diagnostics.
     resource_specs
@@ -141,45 +147,62 @@ def list_modes() -> List[str]:
 # ---------------------------------------------------------------------------
 
 def run_terminal_simulation(
-        mode: str,
-        train_consist_plan: Optional[pl.DataFrame],
+        modes: List[str] | str,
         terminal: str,
+        inputs: Dict[str, Dict[str, Any]],
         log_level: loggingLevel = loggingLevel.BASIC,
-        extra_inputs: Optional[Dict[str, Any]] = None,
 ) -> tuple[pl.DataFrame, pl.DataFrame, Terminal]:
-    """Run a terminal simulation using the named mode.
+    """Run a multi-mode terminal simulation against one ``Terminal``.
+
+    Multiple modes execute concurrently in a single SimPy environment.
+    Their ``resource_specs`` are union-merged via
+    :func:`resources_decl.merge_specs` so any pool referenced by more
+    than one mode becomes a *single* SimPy primitive shared across them
+    (cross-mode contention). Disagreements between modes' specs for the
+    same ``name`` raise ``ValueError`` from ``merge_specs``.
 
     Parameters
     ----------
-    mode
-        Name of a registered `TerminalMode` (see `list_modes()`).
-    train_consist_plan
-        Primary mode-specific input plan. For ``truck_rail`` and
-        ``rail_vessel`` this is the train consist plan DataFrame; for
-        ``vessel_truck`` it may be ``None`` (the mode reads its inputs
-        from ``extra_inputs`` or default resource paths).
+    modes
+        One mode name (str) or a list of registered mode names. See
+        :func:`list_modes`. When passing a single string, it is wrapped
+        into a one-element list internally.
     terminal
-        Terminal name (selects entries from the input plan).
-    extra_inputs
-        Optional dict of auxiliary inputs. Recognized keys depend on the
-        mode: ``"vessel_schedule"`` (DataFrame or path), ``"drayage_schedule"``
-        (DataFrame or path). Unknown keys are ignored.
+        Terminal name (selects rows from each mode's input plans).
+    inputs
+        Per-mode input dict: ``{mode_name: {input_key: value, ...}}``.
+        Recognized ``input_key`` values are mode-specific
+        (``train_consist_plan``, ``vessel_schedule``,
+        ``drayage_schedule``); see each mode's ``build_schedule`` for
+        the keys it consumes. Modes not in this dict get ``{}``.
+    log_level
+        Logging verbosity passed to ``Terminal``.
 
     Returns
     -------
     container_data
         One row per container with arrival/handling/departure timestamps.
+        Columns are the union of every active mode's declared
+        ``event_types`` (missing columns are backfilled with nulls).
     vehicle_log
-        One row per resource event (crane/hostler/truck), including an
-        `energy_consumption(gal_or_kWh)` column for that event.
+        One row per resource event (crane/hostler/truck) across all
+        modes, including an ``energy_consumption(gal_or_kWh)`` and
+        ``emissions(kgCO2)`` column.
     terminal_obj
-        The fully-populated `Terminal` (config + layout + resource counts +
-        post-run state) used for the simulation. Callers can read its
-        attributes to recover the parameters that were actually used.
+        The fully-populated ``Terminal`` used for the simulation. The
+        same instance is shared by all active modes; pool primitives on
+        ``terminal_obj.state`` (e.g. ``state.berths``,
+        ``state.main_stack_rtgs``) are SimPy objects shared across all
+        modes that reference them.
     """
-    mode_obj = get_mode(mode)
+    if isinstance(modes, str):
+        modes = [modes]
+    if not modes:
+        raise ValueError("run_terminal_simulation: 'modes' must be non-empty.")
 
-    # Reset the module-level energy-use buffer so repeat invocations are clean
+    mode_objs = [get_mode(name) for name in modes]
+
+    # Reset the module-level energy-use buffer so repeat invocations are clean.
     energy_use_records.clear()
 
     terminal_config = utilities.load_config(utilities.resources_root() / "config.yaml")
@@ -187,15 +210,23 @@ def run_terminal_simulation(
 
     random.seed(42)
 
-    schedule = mode_obj.build_schedule(
-        train_consist_plan, terminal, extra_inputs or {},
-    )
+    # ----- Build per-mode schedules and tag each entry with its source mode.
+    schedules_by_mode: Dict[str, List[dict]] = {}
+    for mode_obj in mode_objs:
+        mode_inputs = inputs.get(mode_obj.name, {}) or {}
+        entries = mode_obj.build_schedule(terminal, mode_inputs)
+        for e in entries:
+            e["_mode"] = mode_obj.name
+        schedules_by_mode[mode_obj.name] = entries
+
+    # ----- Merge resource specs across active modes. Cross-mode references
+    # to the same spec name produce a single shared SimPy primitive.
+    merged_specs = list(merge_specs({
+        m.name: m.resource_specs for m in mode_objs if m.resource_specs
+    }).values())
+    resource_specs = merged_specs if merged_specs else None
+
     env = simpy.Environment()
-
-    # The mode may declare its own resource_specs. Empty tuple -> use the
-    # default union of all three Phase 1 modes' specs.
-    resource_specs = list(mode_obj.resource_specs) if mode_obj.resource_specs else None
-
     terminal_obj = Terminal(
         env,
         config=terminal_config,
@@ -204,28 +235,46 @@ def run_terminal_simulation(
         resource_specs=resource_specs,
     )
 
+    # ----- Diagnostic banner.
+    total_entries = sum(len(s) for s in schedules_by_mode.values())
     terminal_obj.log(loggingLevel.BASIC, f"[INFO] layout: {terminal_layout}")
-    terminal_obj.log(loggingLevel.DEBUG, f"\n{mode_obj.name} schedule:")
-    for entry in schedule:
-        terminal_obj.log(loggingLevel.DEBUG, str(entry))
-        env.process(mode_obj.process_arrival(env, terminal_obj, entry))
-
     terminal_obj.log(loggingLevel.BASIC, "*" * 50)
     terminal_obj.log(loggingLevel.BASIC,
-        f"Mode: {mode_obj.name}; Schedule entries: {len(schedule)}")
+        f"Modes: {[m.name for m in mode_objs]}; "
+        f"Schedule entries: {total_entries} "
+        f"({', '.join(f'{n}={len(s)}' for n, s in schedules_by_mode.items())})"
+    )
     terminal_obj.log(loggingLevel.BASIC, "*" * 50)
 
-    # When an input plan is supplied, simulate the entire plan regardless
-    # of the config's simulation length. Otherwise honor the configured horizon.
-    if train_consist_plan is not None or schedule:
+    # ----- Spawn one SimPy process per arrival, routed by its tagged mode.
+    process_arrival_by_mode = {m.name: m.process_arrival for m in mode_objs}
+    for mode_name, entries in schedules_by_mode.items():
+        terminal_obj.log(loggingLevel.DEBUG, f"\n{mode_name} schedule:")
+        proc = process_arrival_by_mode[mode_name]
+        for entry in entries:
+            terminal_obj.log(loggingLevel.DEBUG, str(entry))
+            env.process(proc(env, terminal_obj, entry))
+
+    # Run to completion when at least one schedule entry was generated;
+    # otherwise honor the configured simulation horizon.
+    if total_entries > 0:
         env.run()
     else:
         env.run(until=terminal_config["simulation"]["length"])
 
-    container_data, vehicle_log = _build_generic_outputs(terminal_obj, mode_obj)
-
-    if mode_obj.post_process is not None:
-        container_data, vehicle_log = mode_obj.post_process(container_data, vehicle_log)
+    # ----- Union event_types across modes; chain post_process callables in
+    # the user-supplied mode order.
+    merged_event_types: Tuple[str, ...] = tuple(dict.fromkeys(
+        t for m in mode_objs for t in m.event_types
+    ))
+    container_data, vehicle_log = _build_generic_outputs_with_event_types(
+        terminal_obj, merged_event_types,
+    )
+    for mode_obj in mode_objs:
+        if mode_obj.post_process is not None:
+            container_data, vehicle_log = mode_obj.post_process(
+                container_data, vehicle_log,
+            )
 
     return container_data, vehicle_log, terminal_obj
 
@@ -234,20 +283,22 @@ def run_terminal_simulation(
 # Generic output assembly (mode-agnostic)
 # ---------------------------------------------------------------------------
 
-def _build_generic_outputs(
-    terminal_obj: Terminal, mode_obj: TerminalMode
+def _build_generic_outputs_with_event_types(
+    terminal_obj: Terminal, declared_event_types: Tuple[str, ...],
 ) -> Tuple[pl.DataFrame, pl.DataFrame]:
     """Pivot container events to wide form and assemble the vehicle log.
 
-    The dispatcher uses ``mode_obj.event_types`` to backfill any declared
-    event columns that never fired during this run. Mode-specific derived
-    columns (e.g. ``container_processing_time`` for ``truck_rail``) are
-    added by the mode's ``post_process`` callable, not here.
+    ``declared_event_types`` is the union of every active mode's declared
+    event types; any column listed there that never fired during this
+    run is backfilled with nulls so downstream consumers see a stable
+    schema regardless of run size and active mode mix. Mode-specific
+    derived columns (e.g. ``container_processing_time`` for
+    ``truck_rail``) are added by each mode's ``post_process`` callable.
     """
     # container_events is a flat list of (container_id, event_type, timestamp)
     # tuples; pivot it once to wide form here rather than building a
     # dict-of-dicts during the run.
-    declared_event_types = list(mode_obj.event_types)
+    event_types_list = list(declared_event_types)
     events_long = pl.DataFrame(
         terminal_obj.state.container_events,
         schema={
@@ -261,7 +312,7 @@ def _build_generic_outputs(
         container_data = pl.DataFrame(
             schema={
                 "container_id": pl.Utf8,
-                **{t: pl.Float64 for t in declared_event_types},
+                **{t: pl.Float64 for t in event_types_list},
             }
         )
     else:
@@ -273,7 +324,7 @@ def _build_generic_outputs(
         )
     # Backfill any declared event columns that never fired so downstream
     # consumers see a stable schema regardless of run size.
-    missing = [t for t in declared_event_types if t not in container_data.columns]
+    missing = [t for t in event_types_list if t not in container_data.columns]
     if missing:
         container_data = container_data.with_columns(
             [pl.lit(None, dtype=pl.Float64).alias(t) for t in missing]
@@ -423,16 +474,26 @@ def _synthesize_drayage_from_trains(
 # ---------------------------------------------------------------------------
 
 def _build_truck_rail_schedule(
-    train_consist_plan: pl.DataFrame, terminal_name: str,
-    extras: Dict[str, Any],
+    terminal_name: str, inputs: Dict[str, Any],
 ) -> List[dict]:
+    """Trains + drayage trucks. Inputs:
+      * ``train_consist_plan``: pl.DataFrame (required).
+      * ``drayage_schedule``: optional pl.DataFrame or path. If omitted,
+        one drayage dropoff per outbound and one drayage pickup per
+        inbound container is synthesized from the train schedule.
+    """
+    train_consist_plan = inputs.get("train_consist_plan")
+    if train_consist_plan is None:
+        raise ValueError(
+            "truck_rail.build_schedule: inputs['train_consist_plan'] is required."
+        )
     train_entries = utilities.build_train_timetable(
         train_consist_plan, terminal_name, as_dicts=True,
     )
     for entry in train_entries:
         entry["_kind"] = "train"
 
-    drayage_input = extras.get("drayage_schedule")
+    drayage_input = inputs.get("drayage_schedule")
     if drayage_input is None:
         drayage_entries = _synthesize_drayage_from_trains(train_entries)
     else:
@@ -543,11 +604,14 @@ register_mode(TerminalMode(
 # ---------------------------------------------------------------------------
 
 def _build_rail_vessel_schedule(
-    train_consist_plan: Optional[pl.DataFrame], terminal_name: str,
-    extras: Dict[str, Any],
+    terminal_name: str, inputs: Dict[str, Any],
 ) -> List[dict]:
-    """Trains + vessel calls. Vessel calls default to the bundled sample
-    ``vessel_call_list.csv`` if ``extras["vessel_schedule"]`` is absent."""
+    """Trains + vessel calls. Inputs:
+      * ``train_consist_plan``: optional pl.DataFrame (omit for vessel-only).
+      * ``vessel_schedule``: optional pl.DataFrame or path; defaults to
+        the bundled sample ``vessel_call_list.csv``.
+    """
+    train_consist_plan = inputs.get("train_consist_plan")
     train_entries: List[dict] = []
     if train_consist_plan is not None:
         train_entries = utilities.build_train_timetable(
@@ -557,7 +621,7 @@ def _build_rail_vessel_schedule(
             entry["_kind"] = "train"
 
     vessel_df = _resolve_table(
-        extras.get("vessel_schedule"),
+        inputs.get("vessel_schedule"),
         utilities.resources_root() / "vessel_call_list.csv",
     )
     vessel_entries = utilities.build_vessel_schedule(
@@ -600,14 +664,16 @@ register_mode(TerminalMode(
 # ---------------------------------------------------------------------------
 
 def _build_vessel_truck_schedule(
-    train_consist_plan: Optional[pl.DataFrame], terminal_name: str,
-    extras: Dict[str, Any],
+    terminal_name: str, inputs: Dict[str, Any],
 ) -> List[dict]:
-    """Vessel calls + drayage trucks. ``train_consist_plan`` is unused
-    (pass ``None``); vessel and drayage schedules come from ``extras`` or
-    the bundled sample CSVs."""
+    """Vessel calls + drayage trucks. Inputs:
+      * ``vessel_schedule``: optional pl.DataFrame or path; defaults to
+        the bundled sample ``vessel_call_list.csv``.
+      * ``drayage_schedule``: optional pl.DataFrame or path; defaults to
+        the bundled sample ``drayage_schedule.csv``.
+    """
     vessel_df = _resolve_table(
-        extras.get("vessel_schedule"),
+        inputs.get("vessel_schedule"),
         utilities.resources_root() / "vessel_call_list.csv",
     )
     vessel_entries = utilities.build_vessel_schedule(
@@ -617,7 +683,7 @@ def _build_vessel_truck_schedule(
         e["_kind"] = "vessel"
 
     drayage_df = _resolve_table(
-        extras.get("drayage_schedule"),
+        inputs.get("drayage_schedule"),
         utilities.resources_root() / "drayage_schedule.csv",
     )
     drayage_entries = utilities.build_drayage_schedule(
@@ -661,8 +727,8 @@ if __name__ == "__main__":
         .with_columns(pl.lit("Intermodal").alias("Train_Type"))
     )
     container_data, vehicle_log_df, terminal_obj = run_terminal_simulation(
-        mode="truck_rail",
-        train_consist_plan=consist_plan,
+        modes=["truck_rail"],
         terminal="Allouez",
+        inputs={"truck_rail": {"train_consist_plan": consist_plan}},
     )
 

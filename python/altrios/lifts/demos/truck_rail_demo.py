@@ -83,9 +83,9 @@ def main() -> None:
 
     t0 = time.perf_counter()
     container_data, vehicle_log, _ = run_terminal_simulation(
-        mode="truck_rail",
-        train_consist_plan=consist_plan,
+        modes=["truck_rail"],
         terminal=TERMINAL,
+        inputs={"truck_rail": {"train_consist_plan": consist_plan}},
     )
     elapsed = time.perf_counter() - t0
     print(f"\nLIFTS truck_rail run: {elapsed:.2f} s")

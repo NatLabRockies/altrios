@@ -139,13 +139,12 @@ def main() -> None:
 
     t0 = time.perf_counter()
     container_data, vehicle_log, _ = run_terminal_simulation(
-        mode="vessel_truck",
-        train_consist_plan=None,
+        modes=["vessel_truck"],
         terminal=TERMINAL,
-        extra_inputs={
+        inputs={"vessel_truck": {
             "vessel_schedule": vessel_calls,
             "drayage_schedule": drayage_schedule,
-        },
+        }},
     )
     elapsed = time.perf_counter() - t0
     print(f"\nLIFTS vessel_truck run: {elapsed:.2f} s")
