@@ -99,7 +99,6 @@ def calculate_distances(config_path="input/config.yaml", config=None, actual_rai
     else:
         raise ValueError("Invalid YARD_TYPE, choose 'parallel' or 'perpendicular'.")
 
-    # return total_distance
     return {
         "M": M, "N": N, "n_t": n_t, "n_p": n_p, "n_r": n_r, "P": P,
         "yard_length": A_yard,
