@@ -168,17 +168,49 @@ modes:
             params:
               pool: tracks
               bind: track_id
+      # Phase A.5: lift wait + dropoff/pickup branch into YAML.
+      # The dropoff and pickup bodies remain python: escape hatches
+      # (they compose yard_flow stack ops + the legacy gate helpers).
       - name: handle_drayage_arrival
-        entry: call_legacy
+        entry: setup
         steps:
-          - id: call_legacy
+          - id: setup
             type: python
             params:
-              call: freight.process_drayage_arrival
+              call: freight.setup_drayage_arrival
               args:
                 env: "{env}"
-                state: "{state}"
                 entity: "{entity}"
+                terminal: "{state.terminal_adapter}"
+              bind: meta
+            next: wait_for_arrival
+          - id: wait_for_arrival
+            type: timeout
+            params:
+              duration: "{max(0.0, bindings.meta.arrival_time - env.now)}"
+            next: dispatch_action
+          - id: dispatch_action
+            type: branch
+            params:
+              condition: "{bindings.meta.action == 'dropoff'}"
+              "true": do_dropoff
+              "false": do_pickup
+          - id: do_dropoff
+            type: python
+            params:
+              call: freight.drayage_dropoff
+              args:
+                env: "{env}"
+                terminal: "{state.terminal_adapter}"
+                meta: "{bindings.meta}"
+          - id: do_pickup
+            type: python
+            params:
+              call: freight.drayage_pickup
+              args:
+                env: "{env}"
+                terminal: "{state.terminal_adapter}"
+                meta: "{bindings.meta}"
 
   # ---- rail_vessel ----
   - name: rail_vessel
@@ -227,16 +259,45 @@ modes:
                 state: "{state}"
                 entity: "{entity}"
       - name: handle_drayage_arrival
-        entry: call_legacy
+        entry: setup
         steps:
-          - id: call_legacy
+          - id: setup
             type: python
             params:
-              call: freight.process_drayage_arrival
+              call: freight.setup_drayage_arrival
               args:
                 env: "{env}"
-                state: "{state}"
                 entity: "{entity}"
+                terminal: "{state.terminal_adapter}"
+              bind: meta
+            next: wait_for_arrival
+          - id: wait_for_arrival
+            type: timeout
+            params:
+              duration: "{max(0.0, bindings.meta.arrival_time - env.now)}"
+            next: dispatch_action
+          - id: dispatch_action
+            type: branch
+            params:
+              condition: "{bindings.meta.action == 'dropoff'}"
+              "true": do_dropoff
+              "false": do_pickup
+          - id: do_dropoff
+            type: python
+            params:
+              call: freight.drayage_dropoff
+              args:
+                env: "{env}"
+                terminal: "{state.terminal_adapter}"
+                meta: "{bindings.meta}"
+          - id: do_pickup
+            type: python
+            params:
+              call: freight.drayage_pickup
+              args:
+                env: "{env}"
+                terminal: "{state.terminal_adapter}"
+                meta: "{bindings.meta}"
 
 schedule_mappings:
   # Engine state_init hook. Runs after build_state_from_specs (which

@@ -568,6 +568,69 @@ def record_train_depart_events(*, env, terminal, train_id) -> None:
     state.loaded_ocs_by_train.pop(tid, None)
 
 
+# ---- drayage-arrival decomposition (Phase A.5) ---------------------
+#
+# Same approach as the train graph: lift wait/branch into YAML so the
+# dropoff-vs-pickup decision is visible, but keep each branch body as
+# a python: escape hatch. ``setup_drayage_arrival`` also constructs
+# the truck_obj here (same RNG draw position as the legacy
+# ``process_drayage_arrival``) so ``random`` parity is preserved.
+
+
+@register("freight.setup_drayage_arrival")
+def setup_drayage_arrival(*, env, entity, terminal) -> SimpleNamespace:
+    """Normalize a ``drayage``-kind entity into a SimpleNamespace and
+    construct the drayage truck object eagerly (matching the legacy
+    ``random.random()`` draw position inside
+    :func:`drayage_flow.process_drayage_arrival`)."""
+    attrs = dict(entity.attrs) if hasattr(entity, "attrs") else dict(vars(entity))
+    truck_id = int(attrs["truck_id"])
+    action = str(attrs["action"])
+    arrival_time = float(attrs.get("arrival_time") or 0.0)
+    container_id = attrs.get("container_id")
+    truck_obj = drayage_flow._truck_factory(truck_id, terminal)
+    return SimpleNamespace(
+        truck_id=truck_id,
+        truck_obj=truck_obj,
+        action=action,
+        arrival_time=arrival_time,
+        container_id=container_id,
+    )
+
+
+@register("freight.drayage_dropoff")
+def drayage_dropoff(*, env, terminal, meta):
+    """Dropoff branch of the drayage flow. Mirrors
+    :func:`drayage_flow.process_drayage_arrival` lines under the
+    ``dropoff`` action (truck brings export container into terminal,
+    stack-in onto main stack, exits empty)."""
+    oc = container(type="Outbound", id=meta.truck_id, train_id=0)
+    if meta.container_id:
+        utilities.record_container_event(
+            terminal, oc, f"external_id:{meta.container_id}", env.now,
+        )
+    utilities.record_container_event(terminal, oc, "drayage_arrival", env.now)
+    yield env.process(drayage_flow._gate_in(env, terminal, meta.truck_obj))
+    yield env.process(drayage_flow._drayage_zone_travel(env, terminal, "to_stack"))
+    yield env.process(stack_in(env, terminal, oc, source_chassis=None))
+    yield env.process(drayage_flow._gate_out(env, terminal, meta.truck_obj, container_obj=None))
+
+
+@register("freight.drayage_pickup")
+def drayage_pickup(*, env, terminal, meta):
+    """Pickup branch of the drayage flow. Mirrors
+    :func:`drayage_flow.process_drayage_arrival` lines under the
+    ``pickup`` action (empty truck claims a container off the stack
+    and exits loaded)."""
+    utilities.record_container_event(
+        terminal, f"DrayageTruck-{meta.truck_id}", "drayage_arrival", env.now,
+    )
+    yield env.process(drayage_flow._gate_in(env, terminal, meta.truck_obj))
+    yield env.process(drayage_flow._drayage_zone_travel(env, terminal, "to_stack"))
+    ic = yield env.process(stack_out(env, terminal, container_obj=None))
+    yield env.process(drayage_flow._gate_out(env, terminal, meta.truck_obj, container_obj=ic))
+
+
 # ---- output assembly -----------------------------------------------
 
 
