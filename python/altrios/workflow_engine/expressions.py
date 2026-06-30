@@ -8,11 +8,10 @@ config.max_speed, layout.distance(entity.from_node, entity.to_node) /
 ``bindings``, ``state``, ``config``, ``layout``, ``env``) and a fixed
 allowlist of pure math/comparison helpers.
 
-Implementation is **asteval** (sandboxed AST interpreter, locked in
-Phase 3 decision #1). asteval already restricts the AST to a safe
-subset of Python; we further tighten it by stripping the default
-symbol table down to a math-only allowlist and exposing only the six
-context namespaces.
+Implementation is **asteval** (sandboxed AST interpreter). asteval
+already restricts the AST to a safe subset of Python; we further
+tighten it by stripping the default symbol table down to a math-only
+allowlist and exposing only the six context namespaces.
 
 **No general function calls.** Catalog authors get exactly the
 allowlist below; anything else uses the :class:`Step` primitive
@@ -35,10 +34,10 @@ if TYPE_CHECKING:  # pragma: no cover
     from altrios.workflow_engine.entities import Entity
 
 
-# Math/utility helpers exposed inside expressions. Locked by Phase 3
-# decision: arithmetic / comparison / Boolean operators come from Python
-# itself (handled by asteval's AST visitor); these add the few function
-# calls catalog authors are allowed to make.
+# Math/utility helpers exposed inside expressions. Arithmetic /
+# comparison / Boolean operators come from Python itself (handled by
+# asteval's AST visitor); these add the few function calls catalog
+# authors are allowed to make.
 _ALLOWED_FUNCTIONS: dict[str, Any] = {
     "abs": abs,
     "min": min,

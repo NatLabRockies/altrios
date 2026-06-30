@@ -10,7 +10,7 @@
     print(result.event_log)
     print(result.resource_log)
 
-Internally it composes the pieces shipped in earlier Phase 3 phases:
+Internally it composes:
 
 1. :func:`load_site` parses YAML, validates against pydantic
    schemas, imports the catalog's ``python_module``, and returns a

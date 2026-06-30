@@ -10,15 +10,6 @@ Entities are **distinct from**
 Resources are seized capacity (cranes, tracks, berths). Entities flow.
 The two interact: a workflow ``request``s a resource, uses it on an
 entity, and ``release``s it.
-
-This module lives in :mod:`altrios.workflow_engine` and ships with
-Phase 3A.2 as declarative scaffolding. The data classes are used by
-Phase 3B's step interpreter (to type-check ``{entity.foo}`` expressions
-against declared kinds) and by Phase 3C's YAML loader (to parse
-``entity_kinds:`` blocks). Existing Python-coded ``process_*_arrival``
-generators in :mod:`altrios.lifts` do not yet use these classes — they
-continue to operate on the legacy ``container`` / ``train`` / ``vessel``
-classes in ``altrios.lifts.classes`` until Phase 3E retires them.
 """
 from __future__ import annotations
 
@@ -27,11 +18,11 @@ from typing import Any, Mapping, Optional
 
 
 # Conventional Python type names that may appear in an entity kind's
-# ``attrs:`` declaration. The YAML loader (Phase 3C) maps these strings
-# to actual Python types for runtime coercion; the interpreter (Phase 3B)
-# uses the same set to validate ``{entity.foo}`` expression references at
-# load time. Catalogs may declare custom kind-attr types — the engine
-# does not enforce this set.
+# ``attrs:`` declaration. The YAML loader maps these strings to actual
+# Python types for runtime coercion; the interpreter uses the same set
+# to validate ``{entity.foo}`` expression references at load time.
+# Catalogs may declare custom kind-attr types — the engine does not
+# enforce this set.
 KNOWN_ATTR_TYPES: frozenset[str] = frozenset({
     "str",
     "int",
@@ -62,8 +53,7 @@ class Entity:
     attrs
         Free-form attribute bag. Keys typically correspond to the names
         declared in the matching :class:`EntityKindSpec`; the engine does
-        not currently enforce this at runtime but Phase 3B/3C add
-        load-time validation.
+        not currently enforce this at runtime.
     parent_id
         Optional reference to a parent entity. Used by ``spawn`` steps
         that create child entities (e.g. an arriving train spawns one
@@ -92,9 +82,8 @@ class EntityKindSpec:
     """Declarative type for one entity kind in a catalog.
 
     Each catalog declares the entity kinds its workflows manipulate.
-    Currently used only by Phase 3B/3C tooling for static validation;
-    Phase 3A.2 ships it as declarative scaffolding so freight-side code
-    can begin attaching kind names without engine churn later.
+    Used by tooling for static validation and by Python-side code that
+    needs to attach kind names without engine churn.
 
     Parameters
     ----------

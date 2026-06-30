@@ -1,11 +1,11 @@
 """Catalog-supplied Python callable registry.
 
-The step interpreter's ``python:`` primitive (Phase 3B) and the
-distributions library's ``python:`` custom-distribution hook (Phase 3D)
-look up callables through this module. A catalog declares its Python
-helpers module via its YAML ``python_module:`` field; the YAML loader
-imports that module, which uses :func:`register` at import-time to
-publish individual callables.
+The step interpreter's ``python:`` primitive and the distributions
+library's ``python:`` custom-distribution hook look up callables
+through this module. A catalog declares its Python helpers module via
+its YAML ``python_module:`` field; the YAML loader imports that module,
+which uses :func:`register` at import-time to publish individual
+callables.
 
 Usage from a catalog's ``python_helpers.py``::
 

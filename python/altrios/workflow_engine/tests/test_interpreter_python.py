@@ -1,4 +1,4 @@
-"""Tests for the Phase 3B.6 ``python`` escape-hatch primitive."""
+"""Tests for the ``python`` escape-hatch primitive."""
 from __future__ import annotations
 
 import pytest

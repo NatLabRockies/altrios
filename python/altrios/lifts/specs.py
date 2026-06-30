@@ -29,7 +29,7 @@ from altrios.workflow_engine import ResourceSpec
 
 
 # ---------------------------------------------------------------------------
-# Capacity helpers (Phase 1H may rewrite these to remove the fallbacks)
+# Capacity helpers
 # ---------------------------------------------------------------------------
 
 def _vessel_cfg(config: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -61,8 +61,7 @@ def _cranes_per_track(config: Mapping[str, Any], track_id: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Track / gate specs (currently live on TerminalState as direct attributes;
-# migrated to spec form in Phase 1G)
+# Track / gate specs
 # ---------------------------------------------------------------------------
 
 TRACKS = ResourceSpec(
@@ -130,7 +129,7 @@ STS_CRANES_BY_BERTH = ResourceSpec(
 )
 
 # ---------------------------------------------------------------------------
-# Main stack specs (referenced by all three Phase 1 modes)
+# Main stack specs (referenced by all three modes)
 # ---------------------------------------------------------------------------
 
 MAIN_STACK_RTGS = ResourceSpec(

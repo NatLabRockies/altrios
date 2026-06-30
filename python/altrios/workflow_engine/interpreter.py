@@ -20,11 +20,6 @@ stay as plain functions while letting time-consuming primitives
 (``timeout``, ``request``) be generator functions that yield SimPy
 events. The interpreter's outer loop ``yield from``s any generator
 handler results so the whole graph is itself a SimPy process.
-
-Phase 3B.3 implements the simple primitives: ``bind``, ``set_attr``,
-``branch``, ``assert``, ``log``, ``timeout``. Resource primitives,
-control-flow primitives, and the ``python`` escape hatch are added in
-3B.4–3B.6.
 """
 from __future__ import annotations
 

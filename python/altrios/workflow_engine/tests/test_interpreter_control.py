@@ -1,4 +1,4 @@
-"""Tests for Phase 3B.5 control-flow primitives:
+"""Tests for control-flow primitives:
 ``parallel``, ``loop``, ``spawn``, ``make_event``, ``wait_event``,
 ``trigger_event``."""
 from __future__ import annotations

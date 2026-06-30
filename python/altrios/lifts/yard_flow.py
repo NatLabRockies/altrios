@@ -1,7 +1,7 @@
 """Yard-flow primitives shared by ``truck_rail``, ``rail_vessel``, and
 ``vessel_truck``.
 
-The seven-step container journey in these three Phase 1 modes always routes
+The seven-step container journey in these three modes always routes
 through the main container stack::
 
     source-endpoint
@@ -67,8 +67,7 @@ def _choose_stack_crane(env, state, strategy: str = "availability"):
         Take from the pool whose store currently has more idle items; on a
         tie (including both-empty), prefer ``main_stack_rtgs``. This avoids
         the SimPy event-cancellation dance of racing two parallel ``get()``
-        calls; Phase 2 may revisit this with a true race when both pools
-        are starved.
+        calls.
     ``"rtg_only"``
         Always wait on ``main_stack_rtgs``.
     ``"top_pick_only"``
@@ -150,9 +149,7 @@ def stack_out(env, state, config, container_obj=None, dest_chassis=None):
     ``dest_chassis`` is recorded as a label; the caller manages the chassis
     lifecycle (see :func:`stack_in` for the rationale).
     """
-    # Phase 1: stack is a flat Store; pick the head item. Callers that need
-    # a specific container should pre-stage it or use a FilterStore in a
-    # future phase.
+    # The stack is a flat Store; pick the head item.
     if container_obj is None:
         container_obj = yield state.container_stack.get()
     else:
@@ -202,15 +199,13 @@ def yard_tractor_haul(
     ``f"yard_tractor_{from_zone}_to_{to_zone}"``.
 
     If ``travel_time`` is ``None``, the duration is sampled from
-    :func:`distances.simulate_hostler_track_travel` as a Phase 1
-    placeholder; future phases can model zone-pair geometry.
+    :func:`distances.simulate_hostler_track_travel`.
     """
     tractor = yield tractor_pool.get()
     try:
         if travel_time is None:
-            # Pool-local "in-flight" count so the speed-density model has a
-            # plausible congestion signal without leaking the legacy
-            # ``in_flight_hostler_count`` definition.
+            # Pool-local "in-flight" count gives the speed-density model a
+            # plausible congestion signal.
             in_flight = tractor_pool.capacity - len(tractor_pool.items)
             travel_time, _, _, _ = distances.simulate_hostler_track_travel(
                 tractor, in_flight, params=state.distances,

@@ -1,4 +1,4 @@
-"""Tests for the pydantic schemas (Phase 3C.3) — Step, StepGraph,
+"""Tests for the pydantic schemas — Step, StepGraph,
 ResourceSpec models and their conversion to engine dataclasses."""
 from __future__ import annotations
 

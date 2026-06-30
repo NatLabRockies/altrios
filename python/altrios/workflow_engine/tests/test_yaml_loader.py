@@ -1,4 +1,4 @@
-"""Tests for the YAML loader (Phase 3C.1) — ``!include`` resolution
+"""Tests for the YAML loader — ``!include`` resolution
 and cycle detection."""
 from __future__ import annotations
 

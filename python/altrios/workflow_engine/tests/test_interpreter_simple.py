@@ -1,4 +1,4 @@
-"""Tests for the Phase 3B.3 simple primitives: ``bind``, ``set_attr``,
+"""Tests for the simple primitives: ``bind``, ``set_attr``,
 ``branch``, ``assert``, ``log``, ``timeout``, plus the StepGraph
 validators and the interpreter's outer loop."""
 from __future__ import annotations

@@ -6,15 +6,14 @@ catalog YAML bundle: the set of :class:`ResourceSpec`,
 together define one *site type* (freight terminal, mining operation,
 airport, ...).
 
-These are constructed by the YAML loader (Phase 3C.6 / ``loader.py``)
+These are constructed by the YAML loader (``loader.py``)
 after schema validation. The interpreter consumes a Catalog plus a
 :class:`Site` to build the per-run execution state.
 
 ``Catalog`` and ``WorkflowMode`` are immutable. ``Site`` is **not**
 defined here — it lives next to its own pydantic model in
-:mod:`schemas` for now, since Phase 3C does not yet need a runtime
-representation distinct from the parsed model. A future
-``runtime.py`` may add one when the run orchestration layer lands.
+:mod:`schemas`. A future ``runtime.py`` may add a distinct runtime
+type when the run orchestration layer needs one.
 """
 from __future__ import annotations
 
@@ -91,7 +90,7 @@ class Catalog:
     name
         Catalog identifier, e.g. ``"freight_intermodal"``.
     schema_version
-        Always 1 in Phase 3; future migrations will add other versions.
+        Always 1; future migrations may add other versions.
     modes
         Tuple of :class:`WorkflowMode` instances declared by the
         catalog. A site selects a subset of these to activate.
@@ -139,7 +138,7 @@ class Catalog:
         if self.schema_version != 1:
             raise ValueError(
                 f"Catalog {self.name!r}: schema_version must be 1 (only v1 "
-                f"is supported in Phase 3), got {self.schema_version!r}."
+                f"is supported), got {self.schema_version!r}."
             )
         seen_modes: set[str] = set()
         for mode in self.modes:

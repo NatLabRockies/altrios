@@ -100,9 +100,8 @@ class ResourceSpec:
 class EventSpec:
     """Declarative description of per-arrival SimPy events a mode emits.
 
-    Phase 1 implementations still create events lazily inside arrival
-    generators; ``EventSpec`` exists so modes can advertise their event
-    surface for diagnostics and future Phase 3B+ introspection.
+    Modes can advertise their event surface for diagnostics and runtime
+    introspection.
     """
 
     name: str

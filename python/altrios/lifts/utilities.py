@@ -301,9 +301,9 @@ def build_train_timetable(train_consist_plan, terminal_name, as_dicts, track_cou
 
 
 # ---------------------------------------------------------------------------
-# Phase 1E: vessel and drayage schedule builders.
+# Vessel and drayage schedule builders.
 #
-# These produce per-arrival event tables consumed by the new ``rail_vessel``,
+# These produce per-arrival event tables consumed by the ``rail_vessel``,
 # ``vessel_truck``, and ``truck_rail`` (drayage-side) flows. They mirror
 # ``build_train_timetable`` in returning either a Polars DataFrame or a list
 # of dicts (one per arrival).
@@ -502,10 +502,10 @@ def compute_consumption(energy_use_config, status: str, move: str, vehicle: str,
     Per-equipment rates: when ``vehicle`` is a specific equipment name
     (e.g. ``"main_stack_rtg"``, ``"sts_crane"``, ``"yard_tractor"``) the
     lookup tries ``<vehicle>_<status>`` first, then falls back to the
-    legacy generic key (``crane_<status>`` for loads, ``hostler_<status>``
-    for trips). Callers that still pass generic vehicle names
+    generic key (``crane_<status>`` for loads, ``hostler_<status>``
+    for trips). Callers that pass generic vehicle names
     (``vehicle="crane"``, ``vehicle="hostler"``, ``vehicle="truck"``) hit
-    the legacy key directly.
+    the generic key directly.
     """
     cfg = energy_use_config
 
@@ -539,7 +539,7 @@ def compute_consumption(energy_use_config, status: str, move: str, vehicle: str,
     # --- trip consumption (unit: hr × travel_time) ---
     elif move == "trip":
         primary = f"{vehicle}_{status}"
-        # legacy fallback: hostler_* for tractor-like vehicles, truck_* for trucks
+        # generic fallback: hostler_* for tractor-like vehicles, truck_* for trucks
         fallback = (
             f"truck_{status}" if vehicle == "truck" else f"hostler_{status}"
         )

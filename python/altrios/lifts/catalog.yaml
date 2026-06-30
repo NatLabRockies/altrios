@@ -167,9 +167,9 @@ modes:
             params:
               pool: tracks
               bind: track_id
-      # Phase A.5: lift wait + dropoff/pickup branch into YAML.
+      # Lift wait + dropoff/pickup branch into YAML.
       # The dropoff and pickup bodies remain python: escape hatches
-      # (they compose yard_flow stack ops + the legacy gate helpers).
+      # (they compose yard_flow stack ops + the gate helpers).
       - name: handle_drayage_arrival
         entry: setup
         steps:

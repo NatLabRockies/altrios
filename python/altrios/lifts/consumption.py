@@ -46,9 +46,8 @@ def _record_trip_consumption(output, energy_use_config, vehicle_obj, vehicle_kin
 
     ``output`` (``OutputCollector`` or ``None``) receives the row via
     :meth:`OutputCollector.record_consumption` when non-None; the
-    module-level :data:`consumption_records` buffer is also populated
-    for the legacy parity tests. ``energy_use_config`` is the
-    ``config["energy_use"]`` sub-dict.
+    module-level :data:`consumption_records` buffer is also populated.
+    ``energy_use_config`` is the ``config["energy_use"]`` sub-dict.
     """
     fuel_type = _fuel_type_for(vehicle_obj)
     consumption_value = utilities.compute_consumption(
@@ -127,7 +126,7 @@ def _record_yard_tractor_trip_consumption(
 ):
     """Per-trip consumption record for a yard tractor haul. Looks up the
     per-equipment ``yard_tractor_loaded`` / ``yard_tractor_empty`` rates
-    (with the legacy ``hostler_*`` keys as fallback)."""
+    (with the generic ``hostler_*`` keys as fallback)."""
     fuel_type = _fuel_type_for(tractor_obj)
     consumption_value = utilities.compute_consumption(
         energy_use_config, status=status, move="trip", vehicle="yard_tractor",

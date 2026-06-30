@@ -1,17 +1,11 @@
 """Freight smoke tests for the workflow-engine-driven LIFTS path.
 
-Phase A.7 was the last parity check against the now-deleted legacy
-``run_terminal_simulation`` path. This file used to compare legacy
-against new; after the legacy machinery was removed (Phase A.8/A.9)
-the file was repurposed into a regression smoke test that pins the
-``run_site`` output for each Allouez freight demo within ±0.5% of the
-baseline captured immediately after parity was last validated.
+A regression smoke test that pins the ``run_site`` output for each
+Allouez freight demo within ±0.5% of a recorded baseline.
 
 Baselines below were produced by running ``run_site`` against the three
-``allouez_*.yaml`` site files at seed=42 with the YAML graphs decomposed
-through Phase A.6. Drift inside the tolerance is expected from RNG
-restructuring; drift outside the tolerance signals a real divergence
-worth investigating.
+``allouez_*.yaml`` site files at seed=42. Drift outside the tolerance
+signals a real divergence worth investigating.
 """
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Tests for Phase 3B.4 resource primitives: ``request``, ``release``,
+"""Tests for resource primitives: ``request``, ``release``,
 ``transfer``, ``record_event``, ``record_resource_event``,
 ``record_consumption``."""
 from __future__ import annotations

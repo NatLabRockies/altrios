@@ -1,6 +1,6 @@
 """High-level entry points for loading catalogs and sites from YAML.
 
-This module composes the lower-level pieces shipped earlier in Phase 3C:
+This module composes the lower-level pieces:
 
 1. :mod:`altrios.workflow_engine.yaml_loader` — safe YAML parse with
    ``!include`` support.
@@ -120,10 +120,8 @@ def load_site(path: PathLike) -> tuple[SiteModel, Catalog]:
     """Load and validate a site YAML file, including its catalog.
 
     Returns a tuple ``(site_model, catalog)``. The site model is the
-    pydantic representation (not an engine dataclass) because Phase 3
-    does not yet need a runtime ``Site`` type distinct from the
-    parsed model — the run-orchestration layer (Phase 3E) will
-    consume both halves directly.
+    pydantic representation (not an engine dataclass); the
+    run-orchestration layer consumes both halves directly.
 
     ``extends:`` is supported at one level only in v1: the named
     parent file is loaded first, then the current file's fields

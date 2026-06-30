@@ -32,7 +32,7 @@ from .resources import KNOWN_ROLES, ResourceSpec
 from .steps import Step, StepGraph
 
 
-# Schema version v1 is the only supported version in Phase 3.
+# Schema version v1 is the only supported version.
 SCHEMA_VERSION_V1 = 1
 
 
@@ -349,7 +349,7 @@ class MetaModel(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = Field(description="Must equal 1 in Phase 3.")
+    schema_version: int = Field(description="Must equal 1.")
 
     @field_validator("schema_version")
     @classmethod
@@ -357,7 +357,7 @@ class MetaModel(BaseModel):
         if v != SCHEMA_VERSION_V1:
             raise ValueError(
                 f"meta.schema_version must be {SCHEMA_VERSION_V1} "
-                f"(only v1 is supported in Phase 3); got {v!r}."
+                f"(only v1 is supported); got {v!r}."
             )
         return v
 

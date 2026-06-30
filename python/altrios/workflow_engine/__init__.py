@@ -8,12 +8,6 @@ containers — it only knows about :class:`ResourceSpec`-described capacity
 pools and :class:`Entity`-described flow objects driven by step-graphs
 declared in YAML.
 
-Phase 3A.3 lifts the previously freight-coupled
-``altrios.lifts.resources_decl`` and a newly-added entity module into
-this package. Subsequent Phase 3 sub-phases add the step interpreter,
-expression evaluator, YAML loader, distribution library, and python:-
-callable registry.
-
 See ``WORKFLOW_ENGINE_PLAN.md`` at the repo root for the design and
 implementation plan that governs this package.
 """

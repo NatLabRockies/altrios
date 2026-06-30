@@ -210,10 +210,9 @@ def build_train_schedule(
     ``schedule`` is the site's schedule value: a DataFrame, a path,
     or ``None``. When ``None``, falls back to the canonical
     ``train_consist_plan.csv`` AND force-overrides every row's
-    ``Train_Type`` to ``"Intermodal"`` — matching the legacy demo's
-    ``with_columns(pl.lit("Intermodal").alias("Train_Type"))`` trick
-    so freight-parity baselines line up. **Callers that pass a real
-    DataFrame are NOT subject to this override.**
+    ``Train_Type`` to ``"Intermodal"`` so freight-parity baselines
+    line up. **Callers that pass a real DataFrame are NOT subject to
+    this override.**
     """
     if schedule is None:
         df = pl.read_csv(_resources_root() / "train_consist_plan.csv")
@@ -349,8 +348,8 @@ def _synthesize_drayage_from_trains(
 # Called from the decomposed YAML graphs through this module:
 #
 #   * ``_truck_factory`` — eager truck construction inside
-#     ``setup_drayage_arrival`` (preserves the legacy RNG draw
-#     position so smoke baselines stay stable).
+#     ``setup_drayage_arrival`` (pins the RNG draw position so smoke
+#     baselines stay stable).
 #   * ``_gate_in`` / ``_gate_out`` / ``_drayage_zone_travel`` —
 #     composed by ``drayage_dropoff`` / ``drayage_pickup``.
 #   * ``_sts_unload_worker`` / ``_sts_load_worker`` — spawned per STS
@@ -642,13 +641,13 @@ def record_train_depart_events(*, env, state, train_id) -> None:
     state.loaded_ocs_by_train.pop(tid, None)
 
 
-# ---- drayage-arrival decomposition (Phase A.5) ---------------------
+# ---- drayage-arrival decomposition ---------------------------------
 #
 # Same approach as the train graph: lift wait/branch into YAML so the
 # dropoff-vs-pickup decision is visible, but keep each branch body as
 # a python: escape hatch. ``setup_drayage_arrival`` also constructs
-# the truck_obj here (same RNG draw position as the legacy
-# ``process_drayage_arrival``) so ``random`` parity is preserved.
+# the truck_obj here so the ``random`` draw position stays pinned for
+# smoke-baseline stability.
 
 
 @register("freight.setup_drayage_arrival")

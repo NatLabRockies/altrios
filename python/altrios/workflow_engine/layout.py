@@ -7,11 +7,10 @@ authors can write things like::
     timeout:
       duration: "{layout.distance('berth_1', 'stack_A') / config.truck_speed_mps}"
 
-without hand-coding distance tables. Phase 3 fixes the metric as
-Manhattan distance in meters (locked decision §6). Future versions may
-add Euclidean or routed distance — but to stay domain-agnostic the
-engine itself only knows about coordinates, not the modeled
-infrastructure that connects them.
+without hand-coding distance tables. The metric is Manhattan distance
+in meters. Future versions may add Euclidean or routed distance — but
+to stay domain-agnostic the engine itself only knows about coordinates,
+not the modeled infrastructure that connects them.
 
 :class:`Layout` is built from a validated
 :class:`~altrios.workflow_engine.schemas.LayoutModel` by

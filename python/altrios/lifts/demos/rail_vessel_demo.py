@@ -1,4 +1,4 @@
-"""LIFTS Phase 1 demo: ``rail_vessel`` mode.
+"""LIFTS demo: ``rail_vessel`` mode.
 
 A rail<->vessel terminal where trains and vessels both exchange
 containers through the main container stack. No drayage gate.

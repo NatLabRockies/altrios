@@ -22,14 +22,14 @@ gates:
   in_gate_numbers: 3        # truck entrance gate
   out_gate_numbers: 3       # truck exit gate
 
-# Vessel side (Phase 1H). Referenced by the ``rail_vessel`` and
+# Vessel side. Referenced by the ``rail_vessel`` and
 # ``vessel_truck`` modes via ResourceSpec entries in ``lifts/specs.py``.
 vessel:
   berth_number: 2                 # number of berths at the water-side terminal
   sts_cranes_per_berth: 2         # ship-to-shore cranes per berth
 
-# Container-stack / yard equipment (Phase 1H). Referenced by all three
-# Phase 1 modes via ResourceSpec entries in ``lifts/specs.py``.
+# Container-stack / yard equipment. Referenced by all three modes via
+# ResourceSpec entries in ``lifts/specs.py``.
 yard_stack:
   main_stack_rtg_count: 6         # rubber-tyred gantry cranes serving the stack
   top_pick_count: 2               # top-pick alternates to the main-stack RTG
@@ -57,14 +57,14 @@ layout:
 # Diesel/Hybrid values are in gallons; Electric values are in kWh.
 #
 # ``load_consumption`` is per-lift; ``trip_consumption`` is per-hour of
-# travel. Each block keys on ``<equipment>_<status>``. The legacy
+# travel. Each block keys on ``<equipment>_<status>``. The generic
 # ``crane_*`` / ``hostler_*`` / ``truck_*`` entries remain as fallbacks
-# for any code path that still passes generic vehicle keys; the Phase 1
-# flow modules pass equipment-specific keys (``main_stack_rtg_loaded``,
+# for any code path that passes generic vehicle keys; the flow modules
+# pass equipment-specific keys (``main_stack_rtg_loaded``,
 # ``sts_loaded``, ``yard_tractor_loaded``, etc.).
 energy_use:
   load_consumption:
-    # --- legacy generic crane (kept for fallback) ---
+    # --- generic crane (kept for fallback) ---
     crane_loaded:
       Diesel: 0.26    # kWh per load
       Hybrid: 0.48
@@ -72,7 +72,7 @@ energy_use:
       Diesel: 0.02
       Hybrid: 0.024
 
-    # --- Phase 1H: per-equipment lift rates ---
+    # --- per-equipment lift rates ---
     rail_track_rtg_loaded:        # RTG that exchanges with a parked train
       Diesel: 0.26
       Hybrid: 0.48
@@ -106,7 +106,7 @@ energy_use:
       Electric: 0.40
 
   trip_consumption:
-    # --- legacy generic hostler / truck (kept for fallback) ---
+    # --- generic hostler / truck (kept for fallback) ---
     hostler_empty:
       Diesel: 1.11    # gallons/hr or kWh/hr
       Electric: 2.78
@@ -120,7 +120,7 @@ energy_use:
       Diesel: 1.94
       Electric: 3.66
 
-    # --- Phase 1H: per-pool yard tractor rates ---
+    # --- per-pool yard tractor rates ---
     yard_tractor_empty:
       Diesel: 1.11
       Electric: 2.78
