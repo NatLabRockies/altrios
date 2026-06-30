@@ -109,22 +109,26 @@ _COMBINED_BASELINE = {
 # See the site file's header comment for the illustrative-only caveat
 # (no per-arrival routing data → duplication, not partitioning).
 #
-# Note: this site exhibits ~±1.5 % run-to-run noise in event/consumption
-# row counts and end-of-sim time because duplicated trains and vessels
+# Note: this site exhibits run-to-run noise in event/consumption row
+# counts and end-of-sim time because duplicated trains and vessels
 # contend for shared SimPy resource pools (tracks, sts_workers,
 # cranes); SimPy's tie-breaking is sensitive to dict / set iteration
 # order, which Python randomises per process. Per-test tolerance is
 # widened below to ``_ALL_MODES_REL_TOL`` to absorb this noise while
-# still catching a meaningful regression (≥5 %).
+# still catching a meaningful regression.
+#
+# Baselines centred on empirical midpoints from a 10-run in-process
+# probe (seed=42); ±1.5 % tolerance covers each observed range with
+# ~50 % budget headroom (worst case: consumption_total at ~74 %).
 _ALL_MODES_REL_TOL = 0.015  # ±1.5 %
 _ALL_MODES_BASELINE = {
     "trains": 40,           # 20 truck_rail + 20 rail_vessel
     "vessels": 8,           # 4 rail_vessel + 4 vessel_truck
     "drayage": 1944,        # unchanged
-    "event_rows": 28510,    # observed range ≈ [28458, 28569]
-    "consumption_rows": 18990,  # observed range ≈ [18934, 19044]
-    "consumption_total": 4895.0,    # observed range ≈ [4888.5, 4904.5]
-    "env_now": 335.5,           # observed range ≈ [334.9, 336.3]
+    "event_rows": 28490,        # observed range [28406, 28575] (±0.30%)
+    "consumption_rows": 18967,  # observed range [18882, 19051] (±0.45%)
+    "consumption_total": 4875.0,    # observed range [4840.8, 4908.2] (±0.69%)
+    "env_now": 336.0,           # observed range [334.7, 337.4] (±0.40%)
 }
 
 
