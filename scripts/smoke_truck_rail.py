@@ -1,19 +1,22 @@
-"""Deeper inspection of the truck_rail run to compare against legacy baseline.
+"""Deeper inspection of the truck_rail run to compare against smoke baseline.
+
+Migrated to the workflow_engine run_site() API (Phase A.12).
 """
+from pathlib import Path
+
 import polars as pl
-from altrios.lifts import run_terminal_simulation
-from altrios.lifts import utilities
 
-consist_plan = (
-    pl.read_csv(utilities.package_root() / "resources" / "train_consist_plan.csv")
-    .with_columns(pl.lit("Intermodal").alias("Train_Type"))
+import altrios as alt
+from altrios.lifts.python_helpers import assemble_outputs
+from altrios.workflow_engine import run_site
+
+SITE_FILE = (
+    Path(alt.__file__).resolve().parent
+    / "lifts" / "sites" / "allouez_truck_rail.yaml"
 )
 
-cd, vl, term = run_terminal_simulation(
-    modes=["truck_rail"],
-    terminal="Allouez",
-    inputs={"truck_rail": {"train_consist_plan": consist_plan}},
-)
+result = run_site(str(SITE_FILE), seed=42)
+cd, vl = assemble_outputs(result, mode_name="truck_rail")
 
 # IC containers that came in on a train and were picked up by a drayage truck
 ic_full = cd.filter(
