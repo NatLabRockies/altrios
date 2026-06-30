@@ -101,7 +101,20 @@ class EventSpec:
     """Declarative description of per-arrival SimPy events a mode emits.
 
     Modes can advertise their event surface for diagnostics and runtime
-    introspection.
+    introspection. ``EventSpec`` itself does not instantiate anything;
+    it is metadata consumed by catalog tooling.
+
+    Parameters
+    ----------
+    name : str
+        Event identifier, namespace-prefixed by convention (e.g.
+        ``"freight.train_loaded"``).
+    per_arrival : bool, optional
+        ``True`` (default) when one event is emitted per arriving
+        entity; ``False`` for site-wide events with at-most-one
+        instance per run.
+    description : str, optional
+        Human-readable purpose statement surfaced in diagnostics.
     """
 
     name: str
@@ -158,12 +171,33 @@ def _make_one(
 def merge_specs(
     specs_by_mode: Mapping[str, Iterable[ResourceSpec]],
 ) -> dict[str, ResourceSpec]:
-    """Union ``ResourceSpec`` lists across active modes; assert agreement.
+    """Union :class:`ResourceSpec` lists across active modes.
 
-    Two specs agree iff they have the same ``kind``, the same ``role``,
-    identical ``partition_by``/``init_items`` callables (compared by
-    object identity), and equal ``capacity``. Raise ``ValueError`` on
-    disagreement so the caller knows which two modes conflict.
+    When two modes contribute a spec with the same ``name``, they must
+    agree on ``kind``, ``role``, ``capacity``, and identity (``is``)
+    of any ``partition_by`` / ``init_items`` callables. Equality of
+    arbitrary callables is undecidable, so identity is used as a
+    pragmatic stand-in: the typical pattern is for a catalog to define
+    each helper once at module scope and reference it from every
+    mode that needs it.
+
+    Parameters
+    ----------
+    specs_by_mode : Mapping[str, Iterable[ResourceSpec]]
+        Mapping from mode name (used only in error messages) to that
+        mode's resource-spec iterable.
+
+    Returns
+    -------
+    dict of str to ResourceSpec
+        Unioned mapping keyed by spec name.
+
+    Raises
+    ------
+    ValueError
+        When two modes contribute a spec with the same name but
+        disagreeing fields. The message names both contributing modes
+        so the conflict is locatable.
     """
     merged: dict[str, ResourceSpec] = {}
     contributors: dict[str, list[str]] = {}
@@ -196,12 +230,43 @@ def build_state_from_specs(
     config: Mapping[str, Any],
     schedules: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Instantiate primitives for the given specs.
+    """Instantiate SimPy primitives for the given specs.
 
-    Returns a name -> primitive (or ``dict[key, primitive]`` for partitioned
-    specs) map. ``TerminalState.__init__`` sets each entry as an explicit
-    attribute on the state object so call sites read e.g. ``state.tracks``
-    rather than ``state._pools['tracks']``.
+    Each spec produces either a single primitive or, when
+    ``partition_by`` is set, a ``dict`` keyed by partition. For each
+    partition the ``schedules`` mapping is augmented with a
+    ``"_partition_key"`` entry visible to ``capacity`` / ``init_items``
+    callables so they can vary their result per partition.
+
+    Parameters
+    ----------
+    env : simpy.Environment
+        SimPy environment to attach the primitives to.
+    specs : Iterable[ResourceSpec]
+        Resource specs to instantiate (typically the output of
+        :func:`merge_specs`).
+    config : Mapping
+        Run-wide config dict, forwarded to ``capacity`` /
+        ``init_items`` callables.
+    schedules : Mapping
+        Schedule tables, forwarded to ``capacity`` / ``init_items``
+        callables.
+
+    Returns
+    -------
+    dict of str to Any
+        Mapping from spec name to either one SimPy primitive or a
+        ``dict[key, primitive]`` for partitioned specs.
+        ``TerminalState.__init__`` exposes each entry as an attribute
+        so call sites read e.g. ``state.tracks`` rather than
+        ``state._pools['tracks']``.
+
+    Raises
+    ------
+    ValueError
+        Propagated from spec validation — e.g. ``init_items`` on a
+        non-Store kind, or ``partition_by`` returning an empty key
+        sequence.
     """
     out: dict[str, Any] = {}
     for spec in specs:

@@ -89,6 +89,13 @@ class StepModel(BaseModel):
         return v
 
     def to_engine(self) -> Step:
+        """Convert this model into the engine's frozen :class:`Step`.
+
+        Returns
+        -------
+        Step
+            Dataclass form consumed by the interpreter.
+        """
         return Step(id=self.id, type=self.type, params=self.params, next=self.next)
 
 
@@ -127,6 +134,16 @@ class StepGraphModel(BaseModel):
         return v
 
     def to_engine(self) -> StepGraph:
+        """Convert this model into the engine's frozen :class:`StepGraph`.
+
+        Returns
+        -------
+        StepGraph
+            Dataclass form. The engine dataclass enforces
+            entry-exists and next-resolves invariants on construction;
+            shape validation has already happened at the pydantic
+            layer.
+        """
         # The engine dataclass enforces entry-exists and next-resolves;
         # the pydantic layer only checks intra-step shape. Catch
         # mismatches between the two layers with a clear wrapper.
@@ -190,14 +207,29 @@ class ResourceSpecModel(BaseModel):
         partition_by_resolver=None,
         init_items_resolver=None,
     ) -> ResourceSpec:
-        """Build the engine dataclass.
+        """Build the engine :class:`ResourceSpec` dataclass.
 
-        ``partition_by_resolver`` and ``init_items_resolver`` are
-        callables ``(dotted_name: str) -> Callable | None`` supplied
-        by the catalog loader; if either of the Python-hook fields is
-        set on the model, the corresponding resolver MUST also be
-        provided. Used to defer python-helper lookup until the
-        catalog's python_module has been imported and registered.
+        Parameters
+        ----------
+        partition_by_resolver : Callable[[str], Callable], optional
+            Lookup function ``(dotted_name) -> callable`` supplied by
+            the catalog loader for resolving
+            :attr:`partition_by_python` to a real Python callable.
+            Required only when :attr:`partition_by_python` is set.
+        init_items_resolver : Callable[[str], Callable], optional
+            Lookup function for :attr:`init_items_python`. Same
+            contract as ``partition_by_resolver``.
+
+        Returns
+        -------
+        ResourceSpec
+            Frozen engine dataclass.
+
+        Raises
+        ------
+        ValueError
+            If a ``_python`` field is set but the corresponding
+            resolver was not provided.
         """
         partition_by = None
         init_items = None
@@ -251,6 +283,13 @@ class EntityKindSpecModel(BaseModel):
     description: str = ""
 
     def to_engine(self) -> EntityKindSpec:
+        """Convert this model into the engine's :class:`EntityKindSpec`.
+
+        Returns
+        -------
+        EntityKindSpec
+            Frozen engine dataclass.
+        """
         return EntityKindSpec(
             name=self.name, attrs=self.attrs, description=self.description
         )
@@ -324,6 +363,20 @@ class WorkflowModeModel(BaseModel):
         partition_by_resolver=None,
         init_items_resolver=None,
     ) -> WorkflowMode:
+        """Convert this model into the engine's :class:`WorkflowMode`.
+
+        Parameters
+        ----------
+        partition_by_resolver, init_items_resolver : Callable, optional
+            Forwarded unchanged to each :meth:`ResourceSpecModel.to_engine`
+            call. See that method for the required signature.
+
+        Returns
+        -------
+        WorkflowMode
+            Frozen engine dataclass with graphs and resource specs
+            materialised.
+        """
         graphs = {g.name: g.to_engine() for g in self.graphs}
         resource_specs = tuple(
             r.to_engine(
@@ -420,6 +473,21 @@ class CatalogModel(BaseModel):
         partition_by_resolver=None,
         init_items_resolver=None,
     ) -> Catalog:
+        """Convert this model into the engine's :class:`Catalog`.
+
+        Parameters
+        ----------
+        partition_by_resolver, init_items_resolver : Callable, optional
+            Forwarded unchanged to each :meth:`WorkflowModeModel.to_engine`
+            call. See :meth:`ResourceSpecModel.to_engine` for the
+            required signature.
+
+        Returns
+        -------
+        Catalog
+            Frozen engine dataclass with all modes, entity kinds, and
+            shipped defaults / consumption-rate tables resolved.
+        """
         kinds = {k.name: k.to_engine() for k in self.entity_kinds}
         modes = tuple(
             m.to_engine(

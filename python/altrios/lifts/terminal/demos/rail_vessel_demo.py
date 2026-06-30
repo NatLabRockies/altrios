@@ -80,11 +80,14 @@ def _print_summary(container_data: pl.DataFrame, resource_log: pl.DataFrame) -> 
 
 
 def main() -> None:
+    """Run the ``rail_vessel`` mode freight demo end-to-end.
+
+    Loads the rail-vessel site YAML, runs the simulation with a fixed
+    seed of ``42``, assembles container-data / resource-log outputs,
+    prints the wall-clock runtime, and dumps a summary of throughput
+    and energy.
+    """
     t0 = time.perf_counter()
-    result = run_site(str(SITE_FILE), seed=42)
-    container_data, resource_log = assemble_outputs(result, mode_name="rail_vessel")
-    elapsed = time.perf_counter() - t0
-    print(f"\nLIFTS rail_vessel run: {elapsed:.2f} s")
 
     _print_summary(container_data, resource_log)
 

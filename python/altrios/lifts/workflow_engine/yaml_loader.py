@@ -61,10 +61,30 @@ def load_yaml_file(path: str | Path) -> Any:
 def load_yaml_string(source: str, *, base_dir: str | Path | None = None) -> Any:
     """Parse YAML text with ``!include`` support.
 
-    ``!include`` directives inside the text are resolved against
-    ``base_dir`` (defaults to the current working directory). Used
-    chiefly by tests; production callers should prefer
-    :func:`load_yaml_file` so cycle detection has a real path anchor.
+    Used chiefly by tests; production callers should prefer
+    :func:`load_yaml_file` so cycle detection has a real path anchor
+    and ``!include`` resolution starts from a meaningful directory.
+
+    Parameters
+    ----------
+    source : str
+        Raw YAML text.
+    base_dir : str or pathlib.Path, optional
+        Directory against which any ``!include`` directives in
+        ``source`` are resolved. Defaults to the current working
+        directory.
+
+    Returns
+    -------
+    Any
+        The parsed YAML document — typically a ``dict``, but may be a
+        ``list``, scalar, or ``None`` for empty input.
+
+    Raises
+    ------
+    YamlLoaderError
+        If the YAML is invalid or an ``!include`` directive cannot be
+        resolved.
     """
     base = Path(base_dir).resolve() if base_dir is not None else Path.cwd()
     loader = _make_loader(base, include_stack=())

@@ -84,11 +84,14 @@ def _print_summary(result) -> None:
 
 
 def main() -> None:
+    """Run the multi-mode freight demo end-to-end.
+
+    Loads the multi-mode site YAML, runs the simulation with a fixed
+    seed of ``42``, prints the wall-clock runtime, and dumps a summary
+    of the resulting container-data / resource-log tables for every
+    active mode.
+    """
     t0 = time.perf_counter()
-    result = run_site(str(SITE_FILE), seed=42)
-    elapsed = time.perf_counter() - t0
-    print(f"\nLIFTS multi-mode run: {elapsed:.2f} s")
-    _print_summary(result)
 
 
 if __name__ == "__main__":

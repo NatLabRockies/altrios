@@ -17,13 +17,29 @@ _LOG_LEVEL: int = 2  # BASIC
 
 
 def set_log_level(level) -> None:
-    """Set the run-scoped log threshold. Accepts loggingLevel or int."""
+    """Set the run-scoped log threshold.
+
+    Parameters
+    ----------
+    level : int or loggingLevel
+        New threshold. Messages emitted by :func:`log` are printed
+        when their severity level is ``<=`` the threshold (i.e.
+        higher threshold = more verbose).
+    """
     global _LOG_LEVEL
     _LOG_LEVEL = int(level)
 
 
 def log(level, msg: str) -> None:
-    """Print msg iff its severity level is <= the current threshold."""
+    """Print ``msg`` iff its severity level is at or below the threshold.
+
+    Parameters
+    ----------
+    level : int or loggingLevel
+        Severity level of this message.
+    msg : str
+        Text to print when ``level <= current_threshold``.
+    """
     if _LOG_LEVEL >= int(level):
         print(msg)
 
@@ -138,16 +154,25 @@ def _greedy_match_arrivals_to_departures(
     return keep, arrival_needs_fixup, departure_needs_fixup
 
 def package_root() -> Path:
-    """
-    Returns the package root directory.
+    """Return the absolute path to the ``terminal`` package directory.
+
+    Returns
+    -------
+    Path
+        Directory containing this module's ``__init__.py``.
     """
     path = Path(__file__).parent
     return path
 
 
 def resources_root() -> Path:
-    """
-    Returns the resources root directory.
+    """Return the absolute path to the bundled ``resources/`` directory.
+
+    Returns
+    -------
+    Path
+        Sibling directory of this module holding YAML / Excel /
+        JSON resource files.
     """
     path = package_root() / "resources"
     return path
@@ -155,6 +180,27 @@ def resources_root() -> Path:
 CONFIG_PATH = resources_root() / 'sim_config.json'
 
 def load_config(config_path: Path = CONFIG_PATH):
+    """Load a simulation config file from JSON or YAML.
+
+    Parameters
+    ----------
+    config_path : Path, optional
+        Path to a ``.json``, ``.yaml``, or ``.yml`` file. Defaults
+        to the bundled :data:`CONFIG_PATH`.
+
+    Returns
+    -------
+    dict
+        Parsed configuration mapping.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``config_path`` does not exist.
+    ValueError
+        If the file extension is not one of ``.json``, ``.yaml``, or
+        ``.yml``.
+    """
     suffix = Path(config_path).suffix.lower()
     try:
         with open(config_path, 'r') as f:
@@ -169,6 +215,53 @@ def load_config(config_path: Path = CONFIG_PATH):
 
 
 def build_train_timetable(train_consist_plan, terminal_name, as_dicts, track_count=1, min_processing_time_hours = 5.0):
+    """Build the per-train arrival / departure timetable for a terminal.
+
+    Filters ``train_consist_plan`` to Intermodal trains touching
+    ``terminal_name``, splits into arrivals (rows where the terminal is
+    the destination) and departures (rows where it is the origin), and
+    greedily pairs each departure with the earliest still-available
+    arrival that satisfies the ``min_processing_time_hours`` gap.
+    Orphan arrivals or departures become rows with the missing side
+    filled by synthetic ids and inferred timestamps so downstream
+    code can iterate the schedule uniformly.
+
+    Parameters
+    ----------
+    train_consist_plan : polars.DataFrame
+        Plan with at minimum the columns ``Train_Type``, ``Train_ID``,
+        ``Origin_ID``, ``Destination_ID``, ``Arrival_Time_Actual_Hr``,
+        ``Departure_Time_Actual_Hr``, ``Cars_Empty``, ``Cars_Loaded``.
+        ``Containers_Empty`` / ``Containers_Loaded`` are used when
+        present; otherwise the ``Cars_*`` columns are used as a
+        single-container-per-car fallback.
+    terminal_name : str
+        Terminal of interest. Used to filter both the arrivals
+        (``Destination_ID``) and departures (``Origin_ID``) sides.
+    as_dicts : bool
+        When ``True``, return a list of dicts; otherwise return a
+        Polars DataFrame.
+    track_count : int, optional
+        Number of tracks at this terminal. Currently only ``1`` is
+        supported; higher values emit a basic-level log message but
+        do not change the result.
+    min_processing_time_hours : float, optional
+        Minimum dwell required between arrival and departure of a
+        matched pair. Defaults to ``5.0``.
+
+    Returns
+    -------
+    polars.DataFrame or list of dict
+        Timetable rows sorted by ``arrival_time, departure_time``
+        with columns ``train_id``, ``arrival_time``, ``empty_cars``,
+        ``full_cars``, ``train_id_departure``, ``departure_time``,
+        ``oc_number``, and ``truck_number``.
+
+    Raises
+    ------
+    ValueError
+        If no Intermodal train rows touch ``terminal_name``.
+    """
     if track_count > 1:
         log(2, "More than one track not yet supported!")  # BASIC
 
@@ -344,6 +437,21 @@ def build_vessel_schedule(vessel_call_list, terminal_name, as_dicts):
         ``Destination_ID == terminal_name``.
     as_dicts : bool
         If True, return a list of dicts; otherwise return a DataFrame.
+
+    Returns
+    -------
+    polars.DataFrame or list of dict
+        Schedule rows sorted by ``arrival_time, vessel_id`` with the
+        engine-side column names ``vessel_id``, ``vessel_name``,
+        ``arrival_time``, ``departure_time``, ``inbound_containers``,
+        ``outbound_containers``.
+
+    Raises
+    ------
+    ValueError
+        If ``vessel_call_list`` is missing required columns, contains
+        no rows touching the terminal, or contains a row with
+        ``departure_time <= arrival_time``.
     """
     required = {
         "Vessel_ID", "Vessel_Name", "Origin_ID", "Destination_ID",
@@ -410,6 +518,20 @@ def build_drayage_schedule(drayage_schedule, terminal_name, as_dicts):
         Filter rows where ``Terminal_ID == terminal_name``.
     as_dicts : bool
         If True, return a list of dicts; otherwise return a DataFrame.
+
+    Returns
+    -------
+    polars.DataFrame or list of dict
+        Schedule rows sorted by ``arrival_time, truck_id`` with the
+        engine-side column names ``truck_id``, ``arrival_time``,
+        ``action``, ``container_id``.
+
+    Raises
+    ------
+    ValueError
+        If ``drayage_schedule`` is missing required columns, contains
+        an ``Action`` value other than ``'dropoff'`` / ``'pickup'``,
+        or yields zero rows for ``terminal_name``.
     """
     required = {"Terminal_ID", "Arrival_Time_Hr", "Action"}
     missing = required.difference(drayage_schedule.columns)
@@ -465,12 +587,25 @@ def build_drayage_schedule(drayage_schedule, terminal_name, as_dicts):
 
 
 def record_container_event(state, container, event_type, timestamp):
-    """Record a container-event row.
+    """Record one container-event row to terminal state.
 
-    Appends to ``state.container_events`` (the freight state_init seeds
-    it as an empty list). When ``state.output`` is set by the
-    workflow_engine runner, the row is also forwarded to the
+    Appends ``(container_str, event_type, timestamp)`` to
+    ``state.container_events``. When ``state.output`` is set by the
+    workflow-engine runner, the same row is forwarded to the
     :class:`OutputCollector` for engine-side dual write.
+
+    Parameters
+    ----------
+    state : TerminalState
+        Mutable terminal state with a ``container_events`` list and an
+        optional ``output`` attribute.
+    container : str or container
+        Either a pre-formatted label or a :class:`container` instance
+        whose :meth:`container.to_string` will be used.
+    event_type : str
+        Event name (e.g. ``'IC_unload_track'``, ``'OC_loaded_truck'``).
+    timestamp : float
+        Simulation time (hours) at which the event occurred.
     """
     if type(container) is str:
         container_string = container
@@ -491,21 +626,50 @@ def record_container_event(state, container, event_type, timestamp):
 
 
 def compute_consumption(energy_use_config, status: str, move: str, vehicle: str, energy_type: str, travel_time: float) -> float:
-    """Return the per-event consumption for one resource action.
+    """Return the per-event energy / fuel consumption for one action.
 
     The returned value is in the native unit of the configured
-    ``*_consumption`` block: gallons for Diesel/Hybrid, kWh for Electric.
-
-    ``energy_use_config`` is the ``config["energy_use"]`` sub-dict
-    (consumption-rate table).
+    ``*_consumption`` block: gallons for Diesel / Hybrid, kWh for
+    Electric.
 
     Per-equipment rates: when ``vehicle`` is a specific equipment name
-    (e.g. ``"main_stack_rtg"``, ``"sts_crane"``, ``"yard_tractor"``) the
-    lookup tries ``<vehicle>_<status>`` first, then falls back to the
-    generic key (``crane_<status>`` for loads, ``hostler_<status>``
-    for trips). Callers that pass generic vehicle names
-    (``vehicle="crane"``, ``vehicle="hostler"``, ``vehicle="truck"``) hit
-    the generic key directly.
+    (e.g. ``"main_stack_rtg"``, ``"sts_crane"``, ``"yard_tractor"``)
+    the lookup tries ``<vehicle>_<status>`` first, then falls back to
+    the generic key (``crane_<status>`` for loads,
+    ``hostler_<status>`` for trips). Callers that pass generic
+    vehicle names (``vehicle="crane"``, ``vehicle="hostler"``,
+    ``vehicle="truck"``) hit the generic key directly.
+
+    Parameters
+    ----------
+    energy_use_config : Mapping
+        The ``config["energy_use"]`` sub-dict (consumption-rate
+        table) loaded from a site or catalog file.
+    status : str
+        Loading status, typically ``'loaded'`` or ``'unloaded'``.
+    move : str
+        One of ``'load'`` (per-lift), ``'trip'`` (per-hour times
+        ``travel_time``), or ``'side'`` (per side-pick).
+    vehicle : str
+        Equipment or generic vehicle key used in the lookup.
+    energy_type : str
+        Powertrain class, e.g. ``'Diesel'``, ``'Electric'``,
+        ``'Hybrid'``. Capitalised internally before lookup.
+    travel_time : float
+        Trip duration in hours. Used only when ``move == 'trip'``.
+
+    Returns
+    -------
+    float
+        Consumption in the block's native units.
+
+    Raises
+    ------
+    KeyError
+        If neither the specific nor the fallback key is defined for
+        the relevant ``move`` / ``status`` / ``energy_type`` combo.
+    ValueError
+        If ``move`` is not one of the three supported values.
     """
     cfg = energy_use_config
 
@@ -558,13 +722,41 @@ def compute_consumption(energy_use_config, status: str, move: str, vehicle: str,
 
 
 def record_consumption(consumption_records: list | None, vehicle_type: str, fuel_type: str, resource_id: str, track_id: str, train_id: str, container_id: str, event_type: str, zone: str, consumption_value: float, travel_time: float, env_now: float, role: str, quantity: str = "energy") -> dict:
-    """Build a consumption record row.
+    """Build and (optionally) append one consumption-record row.
 
-    If ``consumption_records`` is non-None, the row is also appended to
-    it (the module-level buffer in :mod:`altrios.lifts.terminal.consumption`,
-    consumed by :func:`altrios.lifts.terminal.python_helpers.assemble_outputs`).
-    Always returns the row dict so callers can additionally dual-write
-    into a workflow-engine :class:`OutputCollector`.
+    Parameters
+    ----------
+    consumption_records : list or None
+        Module-level buffer to append into. When ``None`` the row is
+        only returned; the workflow-engine path passes ``None`` here
+        and dual-writes via its own collector.
+    vehicle_type : str
+        Equipment class label (lower-cased internally).
+    fuel_type : str
+        Powertrain (``'Diesel'``, ``'Electric'``, ...).
+    resource_id, track_id, train_id, container_id : str
+        Identifiers stringified into the row.
+    event_type : str
+        Event label (e.g. ``'load'``, ``'trip'``).
+    zone : str
+        Spatial zone label (e.g. ``'main_stack'``, ``'rail'``).
+    consumption_value : float
+        Resource consumption in native units (gallons / kWh).
+    travel_time : float
+        Duration of the action in hours.
+    env_now : float
+        Simulation time (hours) at recording.
+    role : str
+        Resource role tag (``'equipment'``, ``'infrastructure'``,
+        ``'storage'``).
+    quantity : str, optional
+        Quantity label. Defaults to ``"energy"``.
+
+    Returns
+    -------
+    dict
+        The constructed row, suitable for both buffer appending and
+        downstream :class:`OutputCollector` write-through.
     """
     row = {
         "resource_type": vehicle_type.lower(),

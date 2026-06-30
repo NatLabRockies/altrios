@@ -113,17 +113,24 @@ class ExecutionContext:
     graphs: Mapping[str, Any] = field(default_factory=dict)
 
     def to_expression_context(self) -> ExpressionContext:
-        """Snapshot the current state as an :class:`ExpressionContext`
-        for evaluating a single expression. Cheap; called for every
-        expression-typed param resolution.
+        """Snapshot the current state as an :class:`ExpressionContext`.
 
-        If ``self.entity`` is a dataclass-style object with an
-        ``.attrs`` dict (e.g. :class:`Entity`), the attrs are
-        **flattened** into a read-only SimpleNamespace view so catalog
-        authors can write ``entity.weight_t`` rather than
+        Called once per expression-typed param resolution. Cheap.
+
+        If :attr:`entity` is a dataclass-style object with an
+        ``attrs`` dict (e.g. :class:`Entity`), the attrs are
+        **flattened** into a read-only :class:`SimpleNamespace` view
+        so catalog authors can write ``entity.weight_t`` rather than
         ``entity.attrs['weight_t']``. The original object is left
         untouched; mutations from ``set_attr`` go through
         :attr:`entity` directly.
+
+        Returns
+        -------
+        ExpressionContext
+            Read-only view of ``entity`` / ``bindings`` / ``state`` /
+            ``config`` / ``layout`` / ``env`` suitable for one
+            expression evaluation.
         """
         entity_view = self.entity
         if entity_view is not None:
@@ -1122,11 +1129,18 @@ def _yield_python_call(
 
 
 def build_default_primitives() -> dict[str, StepHandler]:
-    """Return a fresh dict of the built-in primitive handlers.
+    """Build a fresh dict of the engine's built-in primitive handlers.
 
-    Caller may extend this dict before stashing it in
+    The caller may extend the dict before stashing it on
     :class:`ExecutionContext` to add catalog-specific primitives or
-    test doubles.
+    test doubles. A fresh dict is returned each call so callers
+    cannot inadvertently mutate a shared module-level table.
+
+    Returns
+    -------
+    dict of str to StepHandler
+        Mapping from primitive ``type`` string (e.g. ``"bind"``,
+        ``"request"``, ``"timeout"``) to its handler function.
     """
     return {
         "bind": _h_bind,
@@ -1157,10 +1171,36 @@ def build_default_primitives() -> dict[str, StepHandler]:
 def execute(graph: StepGraph, ctx: ExecutionContext) -> Generator:
     """Walk ``graph`` to completion as a SimPy generator process.
 
-    Yields SimPy events from time-consuming primitives. Returns
-    ``None`` when the workflow finishes naturally (a step with
-    ``next=None`` runs and its handler returns ``None`` or a
-    null-jump).
+    Time-consuming primitives (``timeout``, ``request``, ...) yield
+    SimPy events through this generator; the interpreter ``yield
+    from``s each handler's generator so the whole graph is itself a
+    SimPy process. The generator returns ``None`` (delivered via
+    ``StopIteration``) when the graph finishes naturally.
+
+    Parameters
+    ----------
+    graph : StepGraph
+        Graph to execute. Becomes :attr:`ExecutionContext.current_graph`
+        for the duration of the call; the prior value (if any) is
+        restored on exit so nested ``spawn`` calls don't clobber the
+        outer caller's graph reference.
+    ctx : ExecutionContext
+        Per-process execution context. Mutated in place — ``bindings``,
+        ``output``, and ``current_graph`` may all change.
+
+    Yields
+    ------
+    SimPy events
+        Each event produced by a time-consuming step handler.
+
+    Raises
+    ------
+    InterpreterError
+        Propagated from primitive handlers — unknown primitive,
+        undefined jump target, runaway step count, malformed handler
+        return.
+    AssertionFailure
+        Propagated when an ``assert`` step's condition is falsy.
     """
     # Stash the graph on the context so control-flow primitives
     # (``parallel``, ``loop``) can look up step definitions by id.

@@ -60,13 +60,36 @@ class CallableRegistry:
         name: str,
         fn: Optional[Callable[..., Any]] = None,
     ) -> Callable[..., Any]:
-        """Register ``fn`` under ``name``. Usable as a decorator factory
-        (``@registry.register("foo")``) or a direct call
-        (``registry.register("foo", fn)``).
+        """Register ``fn`` under ``name``.
 
-        Raises :class:`RegistryError` if ``name`` is already taken; this
-        prevents two catalogs (or two reloads of the same module) from
-        silently shadowing each other.
+        Usable either as a decorator factory
+        (``@registry.register("foo")``) or as a direct call
+        (``registry.register("foo", fn)``). Duplicate registrations
+        are refused so that two catalogs (or two reloads of the same
+        module) cannot silently shadow each other.
+
+        Parameters
+        ----------
+        name : str
+            The non-empty registry name. Dotted prefixes
+            (``"freight.choose_track"``) are convention only; the
+            registry treats names as flat strings.
+        fn : Callable, optional
+            The callable to register. Omit to use as a decorator
+            factory; pass directly to register an existing function.
+
+        Returns
+        -------
+        Callable
+            When ``fn`` is provided, returns ``fn`` unchanged (for
+            chaining). When ``fn`` is ``None``, returns a decorator
+            that registers and returns its argument.
+
+        Raises
+        ------
+        RegistryError
+            If ``name`` is empty, the target is not callable, or
+            ``name`` is already registered.
         """
         if not isinstance(name, str) or not name:
             raise RegistryError(
@@ -92,15 +115,45 @@ class CallableRegistry:
         return _do_register(fn)
 
     def unregister(self, name: str) -> None:
-        """Remove ``name`` from the registry. Test-utility only."""
+        """Remove ``name`` from the registry.
+
+        Intended for use in tests that build up isolated registries;
+        catalog production code should not call this.
+
+        Parameters
+        ----------
+        name : str
+            The registered name to remove.
+
+        Raises
+        ------
+        RegistryError
+            If ``name`` is not currently registered.
+        """
         if name not in self._callables:
             raise RegistryError(f"Cannot unregister unknown name {name!r}.")
         del self._callables[name]
 
     def get(self, name: str) -> Callable[..., Any]:
-        """Look up a registered callable. Raises :class:`RegistryError`
-        when the name is unknown (includes the list of registered names
-        in the error to aid debugging typos)."""
+        """Look up a registered callable.
+
+        Parameters
+        ----------
+        name : str
+            The registered name to look up.
+
+        Returns
+        -------
+        Callable
+            The callable registered under ``name``.
+
+        Raises
+        ------
+        RegistryError
+            If ``name`` is not registered. The message lists the sorted
+            set of currently registered names so typos surface
+            immediately.
+        """
         try:
             return self._callables[name]
         except KeyError:
@@ -117,15 +170,41 @@ class CallableRegistry:
         return len(self._callables)
 
     def names(self) -> list[str]:
-        """Return the sorted list of currently registered names."""
+        """Return the sorted list of currently registered names.
+
+        Returns
+        -------
+        list of str
+            Registered names in alphabetical order.
+        """
         return sorted(self._callables)
 
     def call(self, name: str, /, **kwargs: Any) -> Any:
         """Invoke the named callable with keyword arguments.
 
-        Validates argument names against the callable's signature so a
-        typo in a YAML ``args:`` dict surfaces as a clear
-        :class:`RegistryError` rather than a misleading TypeError.
+        Validates ``kwargs`` against the target callable's signature so
+        a YAML ``args:`` typo surfaces as a clear
+        :class:`RegistryError` rather than a misleading ``TypeError``
+        deep inside the callable.
+
+        Parameters
+        ----------
+        name : str
+            The registered callable name to invoke. Positional-only
+            so it cannot collide with a callable kwarg named ``name``.
+        **kwargs
+            Keyword arguments forwarded to the registered callable.
+
+        Returns
+        -------
+        Any
+            Whatever the registered callable returns.
+
+        Raises
+        ------
+        RegistryError
+            If ``name`` is not registered, or if ``kwargs`` do not
+            match the callable's signature.
         """
         fn = self.get(name)
         try:
@@ -151,7 +230,14 @@ _DEFAULT_REGISTRY = CallableRegistry(name="default")
 
 
 def get_registry() -> CallableRegistry:
-    """Return the module-level default registry."""
+    """Return the module-level default :class:`CallableRegistry` singleton.
+
+    Returns
+    -------
+    CallableRegistry
+        The shared registry that the YAML loader and step interpreter
+        consult unless a per-run override is supplied.
+    """
     return _DEFAULT_REGISTRY
 
 
@@ -161,6 +247,25 @@ def register(
 ) -> Callable[..., Any]:
     """Shorthand for ``get_registry().register(name, fn)``.
 
-    Usable as a decorator (``@register("name")``) or a direct call.
+    Usable as a decorator (``@register("name")``) or as a direct call.
+
+    Parameters
+    ----------
+    name : str
+        The non-empty registry name to register under.
+    fn : Callable, optional
+        The callable to register. Omit to use as a decorator factory.
+
+    Returns
+    -------
+    Callable
+        When ``fn`` is provided, returns ``fn`` unchanged. When ``fn``
+        is ``None``, returns a decorator that registers and returns
+        its argument.
+
+    Raises
+    ------
+    RegistryError
+        Propagated from :meth:`CallableRegistry.register`.
     """
     return _DEFAULT_REGISTRY.register(name, fn)

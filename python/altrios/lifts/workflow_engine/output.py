@@ -38,10 +38,39 @@ class OutputCollector:
     consumption_log: list[dict[str, Any]] = field(default_factory=list)
 
     def record_event(self, row: dict[str, Any]) -> None:
+        """Append a row to :attr:`event_log`.
+
+        The row is shallow-copied so subsequent caller-side mutation of
+        ``row`` does not bleed into the recorded entry.
+
+        Parameters
+        ----------
+        row : dict
+            Per-event payload. Catalog code is responsible for
+            schema-loose envelope columns (``record_timestamp``,
+            ``zone``, etc.); the engine never inspects keys.
+        """
         self.event_log.append(dict(row))
 
     def record_resource_event(self, row: dict[str, Any]) -> None:
+        """Append a row to :attr:`resource_log`.
+
+        Parameters
+        ----------
+        row : dict
+            Per-resource-transition payload (resource name, status,
+            timestamp, optional identifiers). Shallow-copied on append.
+        """
         self.resource_log.append(dict(row))
 
     def record_consumption(self, row: dict[str, Any]) -> None:
+        """Append a row to :attr:`consumption_log`.
+
+        Parameters
+        ----------
+        row : dict
+            Per-consumption-event payload. Catalogs compute
+            ``rate × duration`` themselves before recording; the engine
+            does not multiply or otherwise post-process the row.
+        """
         self.consumption_log.append(dict(row))

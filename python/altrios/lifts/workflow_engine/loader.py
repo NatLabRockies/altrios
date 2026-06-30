@@ -57,8 +57,15 @@ def load_catalog(path: PathLike) -> Catalog:
 
     Parameters
     ----------
-    path
+    path : str or os.PathLike
         Filesystem path to a catalog YAML file.
+
+    Returns
+    -------
+    Catalog
+        Frozen catalog dataclass with all expression strings parsed,
+        Python helpers resolved, and the catalog's ``python_module``
+        imported (if any).
 
     Raises
     ------
@@ -66,11 +73,12 @@ def load_catalog(path: PathLike) -> Catalog:
         If the file cannot be parsed (syntax error, cyclic include,
         unsafe tag).
     pydantic.ValidationError
-        If the parsed structure doesn't match :class:`CatalogModel`.
+        If the parsed structure does not match :class:`CatalogModel`.
     LoaderError
-        If ``python_module`` cannot be imported, or if a
-        ``partition_by_python`` / ``init_items_python`` name is not
-        registered after the module loads.
+        If the top-level YAML is not a mapping, if ``python_module``
+        cannot be imported, or if a ``partition_by_python`` /
+        ``init_items_python`` name is not registered after the
+        module loads.
     """
     raw = load_yaml_file(path)
     if not isinstance(raw, dict):
@@ -117,17 +125,40 @@ def load_catalog(path: PathLike) -> Catalog:
 
 
 def load_site(path: PathLike) -> tuple[SiteModel, Catalog]:
-    """Load and validate a site YAML file, including its catalog.
-
-    Returns a tuple ``(site_model, catalog)``. The site model is the
-    pydantic representation (not an engine dataclass); the
-    run-orchestration layer consumes both halves directly.
+    """Load and validate a site YAML file together with its catalog.
 
     ``extends:`` is supported at one level only in v1: the named
     parent file is loaded first, then the current file's fields
     deep-merge on top. The parent's own ``extends:`` field is
-    silently ignored if present (deliberately — chained inheritance
-    is a future feature).
+    silently ignored if present (chained inheritance is deferred).
+    The parent's relative ``catalog:`` is re-anchored to the parent
+    file's directory before merging, so a base site keeps working
+    when an extends-child lives in a different directory.
+
+    Parameters
+    ----------
+    path : str or os.PathLike
+        Filesystem path to a site YAML file.
+
+    Returns
+    -------
+    tuple of (SiteModel, Catalog)
+        ``site_model`` is the pydantic representation (not an engine
+        dataclass); ``catalog`` is the fully resolved engine
+        :class:`Catalog`. The run-orchestration layer consumes both
+        halves directly.
+
+    Raises
+    ------
+    YamlLoaderError
+        If any file in the include / extends chain cannot be parsed.
+    pydantic.ValidationError
+        If the merged site structure does not match
+        :class:`SiteModel`.
+    LoaderError
+        If the top-level YAML is not a mapping, if ``extends`` is
+        malformed, if the catalog reference cannot be resolved, or
+        if the site activates a mode not declared by the catalog.
     """
     base_dir = os.path.dirname(os.fspath(Path(path).resolve()))
     raw = _load_with_extends(path)

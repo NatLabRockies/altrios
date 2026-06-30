@@ -102,9 +102,18 @@ class ExpressionContext:
         """Return the symtable additions for this context.
 
         ``bindings`` is exposed both as the ``bindings`` namespace
-        (``bindings.foo``) and via a :class:`NamespaceProxy` so that
-        catalog authors can choose either style. Other entries follow
-        the namespace-attribute convention.
+        (``bindings.foo``) and through a :class:`NamespaceProxy` so
+        catalog authors can choose attribute-style or bracket-style
+        access. Other entries follow the namespace-attribute
+        convention. Attributes left at ``None`` are omitted from the
+        returned dict so they never accidentally shadow allowlist
+        builtins (e.g. ``None`` itself).
+
+        Returns
+        -------
+        dict of str to Any
+            Symbols ready to merge into an asteval interpreter's
+            ``symtable``.
         """
         table: dict[str, Any] = {}
         if self.entity is not None:
@@ -210,6 +219,22 @@ class Expression:
     __slots__ = ("source",)
 
     def __init__(self, source: str) -> None:
+        """Validate ``source`` and freeze the expression.
+
+        Parameters
+        ----------
+        source : str
+            Raw Python expression text with no surrounding ``{ }``
+            braces (the YAML loader strips template braces before
+            constructing an :class:`Expression`).
+
+        Raises
+        ------
+        ExpressionError
+            If ``source`` is not a string, is empty / whitespace-only,
+            contains a forbidden dunder (``__``) reference, or fails
+            asteval's parse step.
+        """
         if not isinstance(source, str):
             raise ExpressionError(
                 f"Expression source must be a str, got {type(source).__name__}."
@@ -245,8 +270,25 @@ class Expression:
     def evaluate(self, ctx: ExpressionContext) -> Any:
         """Evaluate the expression against ``ctx`` and return the result.
 
-        Raises :class:`ExpressionError` on any runtime failure (name
-        not found, attribute error, type error, etc.).
+        Parameters
+        ----------
+        ctx : ExpressionContext
+            Context whose populated namespaces (``entity``, ``state``,
+            ``config``, ``layout``, ``env``, ``bindings``, ``extra``)
+            are merged into the asteval symtable for this evaluation.
+
+        Returns
+        -------
+        Any
+            Whatever the expression evaluates to — typically a
+            ``float`` / ``int`` / ``bool``, but any value the
+            allowlist returns is accepted.
+
+        Raises
+        ------
+        ExpressionError
+            On any runtime failure (name not found, attribute error,
+            type error, division by zero, ...).
         """
         ae = _make_sandbox()
         ae.symtable.update(ctx.as_symtable())
@@ -286,5 +328,25 @@ def evaluate(source: str, ctx: ExpressionContext) -> Any:
 
     Prefer constructing an :class:`Expression` once at workflow build
     time when the same source string will be evaluated many times.
+    Asteval parsing dominates per-call cost.
+
+    Parameters
+    ----------
+    source : str
+        Raw Python expression text (no surrounding braces).
+    ctx : ExpressionContext
+        Context whose populated namespaces are exposed to the
+        expression.
+
+    Returns
+    -------
+    Any
+        Whatever the expression evaluates to.
+
+    Raises
+    ------
+    ExpressionError
+        On parse failure (:meth:`Expression.__init__`) or evaluation
+        failure (:meth:`Expression.evaluate`).
     """
     return Expression(source).evaluate(ctx)

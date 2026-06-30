@@ -125,11 +125,33 @@ class EntityKindSpec:
 def merge_entity_kinds(
     kinds_by_source: Mapping[str, "Mapping[str, EntityKindSpec]"],
 ) -> dict[str, EntityKindSpec]:
-    """Union ``EntityKindSpec`` mappings across multiple sources (typically
-    multiple modes within one catalog, or multiple catalogs in a future
-    multi-catalog scenario). Two specs with the same ``name`` must agree
-    on ``attrs`` and ``description``; otherwise a ``ValueError`` is
-    raised so the caller knows which two sources conflict.
+    """Union :class:`EntityKindSpec` mappings across multiple sources.
+
+    Typical sources are the per-mode kind dictionaries inside a single
+    catalog, or the per-catalog kind dictionaries in a (future)
+    multi-catalog scenario. When two sources define a kind with the
+    same ``name`` they must agree on ``attrs`` and ``description``
+    exactly; otherwise the function refuses to silently pick a winner
+    and raises so the caller knows which two sources conflict.
+
+    Parameters
+    ----------
+    kinds_by_source : Mapping[str, Mapping[str, EntityKindSpec]]
+        Outer mapping keyed by source name (used only in error
+        messages); inner mappings are themselves keyed by
+        :class:`EntityKindSpec` name.
+
+    Returns
+    -------
+    dict of str to EntityKindSpec
+        Unioned mapping keyed by kind name.
+
+    Raises
+    ------
+    ValueError
+        When two sources contribute a kind with the same ``name`` but
+        disagreeing ``attrs`` or ``description``. The message includes
+        both contributor source names so the conflict is locatable.
     """
     merged: dict[str, EntityKindSpec] = {}
     contributors: dict[str, list[str]] = {}

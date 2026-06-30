@@ -169,8 +169,24 @@ class Catalog:
         )
 
     def mode(self, name: str) -> WorkflowMode:
-        """Look up a mode by name; raise ``KeyError`` with the list of
-        available modes if missing."""
+        """Look up a :class:`WorkflowMode` by name.
+
+        Parameters
+        ----------
+        name : str
+            The mode name to look up.
+
+        Returns
+        -------
+        WorkflowMode
+            The matching mode.
+
+        Raises
+        ------
+        KeyError
+            If no mode is named ``name``. The message includes the
+            sorted list of mode names available in this catalog.
+        """
         for m in self.modes:
             if m.name == name:
                 return m

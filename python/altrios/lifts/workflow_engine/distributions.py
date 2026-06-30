@@ -71,6 +71,19 @@ class Constant(Distribution):
         object.__setattr__(self, "value", float(self.value))
 
     def sample(self, rng: np.random.Generator) -> float:
+        """Return :attr:`value` ignoring ``rng``.
+
+        Parameters
+        ----------
+        rng : np.random.Generator
+            Unused; accepted for interface conformance with the
+            :class:`Distribution` ABC.
+
+        Returns
+        -------
+        float
+            The constant value supplied at construction time.
+        """
         return self.value
 
 
@@ -97,6 +110,19 @@ class Uniform(Distribution):
         object.__setattr__(self, "high", float(self.high))
 
     def sample(self, rng: np.random.Generator) -> float:
+        """Draw one sample from ``Uniform(low, high)``.
+
+        Parameters
+        ----------
+        rng : np.random.Generator
+            Random-number generator owned by the engine.
+
+        Returns
+        -------
+        float
+            A draw from a continuous uniform distribution on
+            ``[low, high]``.
+        """
         return float(rng.uniform(self.low, self.high))
 
 
@@ -121,6 +147,20 @@ class Poisson(Distribution):
         object.__setattr__(self, "rate", float(self.rate))
 
     def sample(self, rng: np.random.Generator) -> float:
+        """Draw one sample from ``Poisson(rate)`` and return it as a float.
+
+        Parameters
+        ----------
+        rng : np.random.Generator
+            Random-number generator owned by the engine.
+
+        Returns
+        -------
+        float
+            A non-negative integer Poisson draw, cast to ``float`` to
+            satisfy the :class:`Distribution` ``-> float`` contract.
+            Callers that need an ``int`` should coerce explicitly.
+        """
         return float(rng.poisson(self.rate))
 
 
@@ -138,20 +178,47 @@ _DIST_TYPES: dict[str, type[Distribution]] = {
 
 
 def known_distribution_names() -> tuple[str, ...]:
-    """Sorted tuple of supported ``dist:`` tag names."""
+    """Return the sorted tuple of supported ``dist:`` tag names.
+
+    Returns
+    -------
+    tuple of str
+        Names recognised by :func:`parse_distribution`, in alphabetical
+        order. Used in error messages so callers see the full set when
+        an unknown ``dist:`` value is encountered.
+    """
     return tuple(sorted(_DIST_TYPES))
 
 
 def parse_distribution(spec: Any) -> Distribution:
-    """Convert a YAML scalar or distribution dict into a
-    :class:`Distribution`.
+    """Convert a YAML scalar or distribution dict into a :class:`Distribution`.
 
-    * Numeric scalar (``int`` / ``float``) → :class:`Constant`.
-    * Mapping with ``dist:`` key → the corresponding class, with the
-      remaining keys passed as constructor kwargs.
+    A bare numeric scalar is interpreted as a :class:`Constant`. A
+    mapping with a ``dist:`` key is dispatched to the matching
+    :class:`Distribution` subclass, with the remaining keys passed as
+    keyword arguments to its constructor.
 
-    Booleans and strings are rejected — both forms are common typos
-    that we want to fail loud on rather than silently coerce.
+    Booleans and strings are rejected explicitly because both are
+    common YAML-typo failure modes that we want to surface loudly
+    rather than silently coerce.
+
+    Parameters
+    ----------
+    spec : Any
+        The value to interpret. Typically an ``int`` / ``float`` /
+        ``dict`` produced by the YAML loader.
+
+    Returns
+    -------
+    Distribution
+        A concrete :class:`Distribution` subclass instance.
+
+    Raises
+    ------
+    DistributionError
+        If ``spec`` is a bool, has the wrong container type, is missing
+        the required ``dist:`` key, names an unknown distribution, or
+        if the subclass constructor rejects the supplied kwargs.
     """
     if isinstance(spec, bool):
         raise DistributionError(

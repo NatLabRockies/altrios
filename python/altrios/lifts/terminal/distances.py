@@ -9,9 +9,44 @@ from altrios.lifts.terminal.utilities import resources_root
 
 
 def calculate_distances(config_path="input/config.yaml", config=None, actual_railcars=None):
-    """Compute yard geometric distances.
-       If actual_railcars is provided, compute track-level mu correction.
-       Otherwise initialize with n=0 (idle state)."""
+    """Compute yard geometric distances for a given site config.
+
+    Distances are derived from a fixed or adaptive yard layout
+    (rows/cols/track-lanes/parking-lanes/block-length) plus a
+    ``yard:`` section that fixes per-railcar geometry. If
+    ``actual_railcars`` is provided, the railcar-utilisation factor
+    ``mu`` is computed from the current track occupancy; otherwise it
+    is initialised to ``1.0`` (idle / fully reserved track).
+
+    Parameters
+    ----------
+    config_path : str, optional
+        Path to a YAML file containing ``yard`` / ``layout`` /
+        ``simulation`` sections. Used only when ``config`` is ``None``.
+    config : Mapping, optional
+        Pre-parsed configuration mapping. Takes precedence over
+        ``config_path`` when provided.
+    actual_railcars : int, optional
+        Current railcar count on the longest track. When ``None``,
+        the function returns the idle-state distance dictionary.
+
+    Returns
+    -------
+    dict
+        Mapping with keys ``M``, ``N``, ``n_t``, ``n_p``, ``n_r``,
+        ``P``, ``yard_length``, ``total_lane_length``,
+        ``railcar_length``, ``n_max``, ``n``, ``mu``, and min / avg
+        (or mean) / max distances for hostler (``d_h_*``),
+        repositioning (``d_r_*``), truck (``d_t_*``), and inter-track
+        (``d_tr_*``) travel.
+
+    Raises
+    ------
+    ValueError
+        If no row matches the requested batch size in adaptive mode,
+        or if ``yard.yard_type`` is neither ``'parallel'`` nor
+        ``'perpendicular'``.
+    """
 
     if (config is None) and (config_path is not None):
         with open(config_path, "r") as f:
@@ -112,12 +147,53 @@ def calculate_distances(config_path="input/config.yaml", config=None, actual_rai
     }
 
 def ugly_sigma(x):
+    """Discrete weighted sum used by the yard-distance closed form.
+
+    Computes ``sum(2*i*(x-i) for i in 1..x-1) / x**2``. The name
+    reflects the formula's origin as an ad-hoc geometric helper in
+    the parallel / perpendicular yard models.
+
+    Parameters
+    ----------
+    x : int
+        Upper bound of the summation range.
+
+    Returns
+    -------
+    float
+        Normalised summation value.
+    """
     total_sum = 0
     for i in range(1, x):
         total_sum += 2 * i * (x - i)
     return total_sum / (x ** 2)
 
 def speed_density(avg_density, vehicle_type, N):
+    """Sample speed from an empirical density-based exponential decay.
+
+    Free-flow speeds (8 mph for hostlers, 10 mph for trucks) are
+    decayed by ``exp(-(a*N + b) * avg_density)`` to capture congestion
+    response, where the constants ``a``, ``b`` are vehicle-specific.
+
+    Parameters
+    ----------
+    avg_density : float
+        Vehicle density in vehicles per metre of total lane length.
+    vehicle_type : str
+        Either ``'hostler'`` or ``'truck'``.
+    N : int
+        Number of yard columns (used as a density-decay multiplier).
+
+    Returns
+    -------
+    float
+        Speed in the same units as the free-flow coefficient (mph).
+
+    Raises
+    ------
+    ValueError
+        If ``vehicle_type`` is not ``'hostler'`` or ``'truck'``.
+    """
     if vehicle_type == 'hostler':
         speed = 8 * math.e ** ((-1.5 * N - 0.5) * avg_density)
     elif vehicle_type == 'truck':
@@ -128,10 +204,45 @@ def speed_density(avg_density, vehicle_type, N):
 
 
 def simulate_hostler_track_travel(hostler_id, current_veh_num, config=None, config_path="input/config.yaml", params=None):
-    """
-    Multitrack call this function for distance calculations:
-    1. inter-track distance
-    2. hostler travel distance
+    """Sample one hostler's inter-track travel time and distance.
+
+    Combines a triangular distance distribution
+    (``d_tr_min`` / ``d_tr_mean`` / ``d_tr_max`` from
+    :func:`calculate_distances`) with a density-based speed
+    (:func:`speed_density`) to produce a single travel-time draw.
+
+    Parameters
+    ----------
+    hostler_id : int
+        Identifier of the hostler being moved. Currently unused in
+        the calculation; preserved for logging / future per-hostler
+        behaviour.
+    current_veh_num : int
+        Active vehicle count contributing to congestion-induced
+        slowdown.
+    config : Mapping, optional
+        Pre-parsed configuration mapping forwarded to
+        :func:`calculate_distances`.
+    config_path : str, optional
+        Path to a YAML config; used only when both ``config`` and
+        ``params`` are ``None``.
+    params : Mapping, optional
+        Pre-computed result of :func:`calculate_distances`. Provided
+        as a hot-loop optimisation to avoid re-parsing the layout.
+
+    Returns
+    -------
+    tuple of (float, float, float, float)
+        ``(hostler_travel_time, d_tr_dist, hostler_speed,
+        veh_density)`` with travel time in hours, distance in metres,
+        speed in mph, and density in vehicles per metre.
+
+    Raises
+    ------
+    ValueError
+        If the configured ``d_tr_*`` bounds are inconsistent
+        (``d_tr_max <= d_tr_min`` or ``d_tr_mean`` outside the
+        range).
     """
     if params is None:
         params = calculate_distances(config=config, config_path=config_path)

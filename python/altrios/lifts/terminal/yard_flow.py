@@ -104,12 +104,33 @@ def _stack_crane_strategy(config) -> str:
 def stack_in(env, state, config, container_obj, source_chassis=None):
     """Lift ``container_obj`` off ``source_chassis`` onto the main stack.
 
-    ``source_chassis`` may be ``None`` for endpoints that don't carry the
-    container on a chassis through the stack lift (the field is recorded
-    only as a label on the resulting container_event row). The chassis
-    itself is *not* released here -- the caller decides whether to send it
-    back to its pool (terminal chassis) or to keep it with the endpoint
-    vehicle (drayage road chassis).
+    SimPy generator; invoke as ``yield env.process(stack_in(...))``. The
+    chassis itself is **not** released here — the caller decides whether
+    to send it back to its pool (terminal chassis) or to keep it with
+    the endpoint vehicle (drayage road chassis).
+
+    Parameters
+    ----------
+    env : simpy.Environment
+        The SimPy environment.
+    state : TerminalState
+        Run state with ``main_stack_rtgs``, ``top_picks``, and
+        ``container_stack`` Stores attached.
+    config : Mapping
+        Site-level config dict; reads
+        ``containers_per_crane_move_mean``, ``crane_move_dev_time``,
+        ``energy_use``, and ``yard_stack.routing_strategy``.
+    container_obj : container
+        Container being placed onto the stack.
+    source_chassis : chassis, optional
+        Chassis the container is being lifted from. ``None`` for
+        endpoints that don't carry the container on a chassis through
+        the stack lift; the value is currently used only as a label.
+
+    Yields
+    ------
+    SimPy events
+        Crane acquisition, lift timeout, stack put, and crane release.
     """
     pool_name, crane_obj = yield env.process(
         _choose_stack_crane(env, state, _stack_crane_strategy(config))
@@ -140,14 +161,40 @@ def stack_in(env, state, config, container_obj, source_chassis=None):
 def stack_out(env, state, config, container_obj=None, dest_chassis=None):
     """Pull one container off the main stack.
 
-    Either takes ``container_obj`` as the *specific* container to remove
-    (a future enhancement; today the stack is unkeyed and the SimPy
-    ``Store`` returns whichever container is at the head), or, when
-    ``container_obj is None``, just returns the first container off the
+    SimPy generator; invoke as ``yield env.process(stack_out(...))``.
+    Either takes ``container_obj`` as the **specific** container to
+    remove (a future enhancement; today the stack is unkeyed and the
+    SimPy Store returns whichever container is at the head), or, when
+    ``container_obj is None``, returns the first container off the
     stack via ``StopIteration.value``.
 
-    ``dest_chassis`` is recorded as a label; the caller manages the chassis
-    lifecycle (see :func:`stack_in` for the rationale).
+    Parameters
+    ----------
+    env : simpy.Environment
+        The SimPy environment.
+    state : TerminalState
+        Run state with ``main_stack_rtgs``, ``top_picks``, and
+        ``container_stack`` Stores attached.
+    config : Mapping
+        Site-level config dict; reads the same keys as :func:`stack_in`.
+    container_obj : container, optional
+        Specific container to return; if provided, one Store slot is
+        still consumed for capacity bookkeeping.
+    dest_chassis : chassis, optional
+        Chassis the container is being lowered onto. Currently used
+        only as a label; the caller manages the chassis lifecycle
+        (see :func:`stack_in` for the rationale).
+
+    Yields
+    ------
+    SimPy events
+        Stack get, crane acquisition, lift timeout, and crane release.
+
+    Returns
+    -------
+    container
+        The container removed from the stack (delivered via
+        ``StopIteration.value``).
     """
     # The stack is a flat Store; pick the head item.
     if container_obj is None:
@@ -188,18 +235,42 @@ def yard_tractor_haul(
     env, state, config, tractor_pool, container_obj, from_zone: str, to_zone: str,
     travel_time: float | None = None,
 ):
-    """Yard tractor pulled from ``tractor_pool`` hauls one container from
-    ``from_zone`` to ``to_zone``.
+    """Haul one container with a yard tractor between two zones.
 
-    ``tractor_pool`` is the SimPy ``Store`` -- either
-    ``state.main_yard_tractors`` (water<->stack) or
-    ``state.rail_yard_tractors`` (rail<->stack). The chassis carrying the
-    container is implicit; this helper only models the tractor's trip time
-    and energy. Container-event label is
+    SimPy generator; invoke as
+    ``yield env.process(yard_tractor_haul(...))``. The chassis carrying
+    the container is implicit; this helper only models the tractor's
+    trip time and energy. The container-event label is
     ``f"yard_tractor_{from_zone}_to_{to_zone}"``.
 
-    If ``travel_time`` is ``None``, the duration is sampled from
-    :func:`distances.simulate_hostler_track_travel`.
+    Parameters
+    ----------
+    env : simpy.Environment
+        The SimPy environment.
+    state : TerminalState
+        Run state with the tractor pool, ``distances`` cache, and
+        ``output`` collector attached.
+    config : Mapping
+        Site-level config dict; reads ``energy_use``.
+    tractor_pool : simpy.Store
+        Pool to acquire one tractor from — typically
+        ``state.main_yard_tractors`` (water↔stack) or
+        ``state.rail_yard_tractors`` (rail↔stack).
+    container_obj : container
+        Container being hauled. Used for event labelling and energy
+        attribution.
+    from_zone, to_zone : str
+        Origin / destination zone labels for the event tag.
+    travel_time : float, optional
+        Override duration in hours. When ``None`` (default), the
+        duration is sampled from
+        :func:`distances.simulate_hostler_track_travel` using the
+        tractor pool's in-flight count as the congestion signal.
+
+    Yields
+    ------
+    SimPy events
+        Tractor acquisition, travel timeout, and tractor release.
     """
     tractor = yield tractor_pool.get()
     try:

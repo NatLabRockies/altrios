@@ -38,12 +38,25 @@ class ExpressionConversionError(Exception):
 
 
 def is_expression_string(value: object) -> bool:
-    """Return True iff ``value`` is a string whose stripped form is
-    wrapped in matched outer braces.
+    """Return ``True`` iff ``value`` is a string wrapped in outer braces.
 
     Whitespace around the braces is tolerated (YAML often inserts
-    leading or trailing space depending on the block style); the
-    interior is not inspected further here.
+    leading or trailing spaces depending on block style); the interior
+    is not inspected here — syntax validation happens when the
+    :class:`~altrios.lifts.workflow_engine.expressions.Expression` is
+    constructed.
+
+    Parameters
+    ----------
+    value : object
+        The candidate value (any type accepted; non-strings return
+        ``False`` immediately).
+
+    Returns
+    -------
+    bool
+        ``True`` iff ``value`` is a non-empty ``str`` whose stripped
+        form starts with ``{`` and ends with ``}``.
     """
     if not isinstance(value, str):
         return False
@@ -56,9 +69,21 @@ def is_expression_string(value: object) -> bool:
 
 
 def extract_expression_source(value: str) -> str:
-    """Strip the outer braces (and any surrounding whitespace) and
-    return the inner source. Caller must ensure :func:`is_expression_string`
-    is True first.
+    """Strip the outer braces and surrounding whitespace.
+
+    Caller must ensure :func:`is_expression_string` returns ``True``
+    for ``value`` first; this function does no validation.
+
+    Parameters
+    ----------
+    value : str
+        A brace-wrapped expression string such as ``"{entity.weight}"``.
+
+    Returns
+    -------
+    str
+        The inner source with the outer braces and any inner whitespace
+        stripped — e.g. ``"entity.weight"``.
     """
     stripped = value.strip()
     # Drop one layer of braces and any inner whitespace.

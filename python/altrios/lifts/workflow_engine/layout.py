@@ -82,8 +82,25 @@ class Layout:
     def from_dict(
         cls, coords: Mapping[str, tuple[float, float] | tuple[float, float, float]]
     ) -> "Layout":
-        """Build a Layout from a ``{name: (x, y)}`` or
-        ``{name: (x, y, z)}`` mapping. Convenience for tests."""
+        """Build a :class:`Layout` from a coordinate mapping.
+
+        Parameters
+        ----------
+        coords : Mapping[str, tuple of float]
+            Mapping of node name to either ``(x, y)`` or
+            ``(x, y, z)``. Coordinates are interpreted as meters.
+
+        Returns
+        -------
+        Layout
+            New layout containing one :class:`LayoutNode` per entry in
+            ``coords``.
+
+        Raises
+        ------
+        ValueError
+            If any tuple has a length other than 2 or 3.
+        """
         nodes: dict[str, LayoutNode] = {}
         for name, xy in coords.items():
             if len(xy) == 2:
@@ -104,10 +121,22 @@ class Layout:
 
     @classmethod
     def from_model(cls, model) -> "Layout":
-        """Build a Layout from a
-        :class:`~altrios.lifts.workflow_engine.schemas.LayoutModel` (or any
-        object with a ``nodes`` mapping of
-        ``x``/``y``/``z``-attributed objects)."""
+        """Build a :class:`Layout` from a validated layout schema model.
+
+        Parameters
+        ----------
+        model
+            Any object with a ``nodes`` mapping whose values expose
+            ``x``, ``y``, and ``z`` attributes — typically a
+            :class:`~altrios.lifts.workflow_engine.schemas.LayoutModel`.
+
+        Returns
+        -------
+        Layout
+            New layout with one :class:`LayoutNode` per ``model.nodes``
+            entry. ``z`` is preserved when present and set to ``None``
+            otherwise.
+        """
         nodes: dict[str, LayoutNode] = {}
         for name, n in model.nodes.items():
             nodes[name] = LayoutNode(
@@ -119,8 +148,25 @@ class Layout:
         return cls(nodes=nodes)
 
     def node(self, name: str) -> LayoutNode:
-        """Return the named node; raise ``KeyError`` listing
-        available nodes if missing."""
+        """Look up a layout node by name.
+
+        Parameters
+        ----------
+        name : str
+            The :class:`LayoutNode` name to look up.
+
+        Returns
+        -------
+        LayoutNode
+            The named node.
+
+        Raises
+        ------
+        KeyError
+            If ``name`` is not in :attr:`nodes`. The error message
+            includes the sorted list of available names so typos are
+            immediately diagnosable.
+        """
         if name not in self.nodes:
             raise KeyError(
                 f"No layout node named {name!r}. "
@@ -129,9 +175,30 @@ class Layout:
         return self.nodes[name]
 
     def distance(self, a: str, b: str) -> float:
-        """Manhattan distance in meters between two named nodes
-        (locked decision §6). Only ``x`` and ``y`` are used; ``z`` is
-        ignored in v1."""
+        """Return the Manhattan distance in meters between two nodes.
+
+        Manhattan (L1) distance is hard-coded per locked decision
+        §6; ``z`` is ignored in v1 even when populated. Catalogs that
+        need Euclidean or routed distance should expose a helper of
+        their own via ``python:`` callables.
+
+        Parameters
+        ----------
+        a : str
+            Name of the first node.
+        b : str
+            Name of the second node.
+
+        Returns
+        -------
+        float
+            ``|a.x - b.x| + |a.y - b.y|`` in meters.
+
+        Raises
+        ------
+        KeyError
+            If either ``a`` or ``b`` is not a known node name.
+        """
         na = self.node(a)
         nb = self.node(b)
         return abs(na.x - nb.x) + abs(na.y - nb.y)
