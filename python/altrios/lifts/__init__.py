@@ -10,14 +10,8 @@ Convenience helpers for assembling freight DataFrames from a
 :class:`RunResult` are in
 :func:`altrios.lifts.python_helpers.assemble_outputs`.
 """
-from altrios.lifts.classes import (
-    Terminal,
-    TerminalState,
-    loggingLevel,
-)
+from altrios.lifts.classes import loggingLevel
 
 __all__ = [
-    "Terminal",
-    "TerminalState",
     "loggingLevel",
 ]
