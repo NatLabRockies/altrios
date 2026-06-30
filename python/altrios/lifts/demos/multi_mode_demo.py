@@ -10,8 +10,9 @@ routes ``train`` arrivals to ``truck_rail``, ``vessel`` arrivals to
 
 This is a smoke-style illustrative run: it confirms the combined
 site loads and runs without errors and prints a per-mode arrival
-breakdown plus the shared aggregate consumption. It does NOT use
-:func:`assemble_outputs` (which is single-mode in v1).
+breakdown plus the shared aggregate consumption. It also exercises
+:func:`assemble_outputs` in multi-mode shape (passing the active
+mode names as a sequence so the event-type surface is unioned).
 
 Run from the repo root with::
 
@@ -27,12 +28,14 @@ import time
 from collections import Counter
 from pathlib import Path
 
+from altrios.lifts.python_helpers import assemble_outputs
 from altrios.workflow_engine import run_site
 
 
 SITE_FILE = (
     Path(__file__).resolve().parent.parent / "sites" / "allouez_combined.yaml"
 )
+ACTIVE_MODES = ("truck_rail", "vessel_truck")
 
 
 def _print_summary(result) -> None:
@@ -69,6 +72,15 @@ def _print_summary(result) -> None:
         print("  consumption by resource_type:")
         for resource_type, n in sorted(by_resource.items()):
             print(f"    {resource_type:<22}: {n} rows")
+
+    # Demonstrate multi-mode assemble_outputs: the event-type surface
+    # is unioned across both active modes and truck_rail-specific
+    # derived columns (container_processing_time, train_arrival_actual_oc)
+    # are added because truck_rail is in the active set.
+    cd, rl = assemble_outputs(result, mode_name=ACTIVE_MODES)
+    print()
+    print(f"  container_data shape : {cd.shape}")
+    print(f"  resource_log shape   : {rl.shape}")
 
 
 def main() -> None:

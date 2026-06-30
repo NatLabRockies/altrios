@@ -102,6 +102,31 @@ _COMBINED_BASELINE = {
     "env_now": 336.264,
 }
 
+# ``allouez_all_modes.yaml`` activates all three freight modes; trains
+# and vessels are duplicated across the contended modes
+# (truck_rail + rail_vessel for trains; rail_vessel + vessel_truck for
+# vessels). Drayage is contended between truck_rail and vessel_truck.
+# See the site file's header comment for the illustrative-only caveat
+# (no per-arrival routing data → duplication, not partitioning).
+#
+# Note: this site exhibits ~±1.5 % run-to-run noise in event/consumption
+# row counts and end-of-sim time because duplicated trains and vessels
+# contend for shared SimPy resource pools (tracks, sts_workers,
+# cranes); SimPy's tie-breaking is sensitive to dict / set iteration
+# order, which Python randomises per process. Per-test tolerance is
+# widened below to ``_ALL_MODES_REL_TOL`` to absorb this noise while
+# still catching a meaningful regression (≥5 %).
+_ALL_MODES_REL_TOL = 0.015  # ±1.5 %
+_ALL_MODES_BASELINE = {
+    "trains": 40,           # 20 truck_rail + 20 rail_vessel
+    "vessels": 8,           # 4 rail_vessel + 4 vessel_truck
+    "drayage": 1944,        # unchanged
+    "event_rows": 28510,    # observed range ≈ [28458, 28569]
+    "consumption_rows": 18990,  # observed range ≈ [18934, 19044]
+    "consumption_total": 4895.0,    # observed range ≈ [4888.5, 4904.5]
+    "env_now": 335.5,           # observed range ≈ [334.9, 336.3]
+}
+
 
 def test_combined_truck_rail_vessel_truck_smoke():
     """allouez_combined activates two modes against shared pools; pin
@@ -153,4 +178,94 @@ def test_combined_truck_rail_vessel_truck_smoke():
     assert _approx(float(result.env.now), _COMBINED_BASELINE["env_now"]), (
         f"env.now drifted: got {result.env.now:.3f}, "
         f"baseline {_COMBINED_BASELINE['env_now']:.3f}"
+    )
+
+
+def test_combined_all_modes_smoke():
+    """allouez_all_modes activates all three freight modes; pin
+    arrival counts (trains/vessels duplicated across contended
+    modes), event/consumption row counts, total consumption, and
+    sim-end time. Also exercise multi-mode assemble_outputs by passing
+    the active mode list."""
+    result = run_site(
+        str(_SITES_DIR / "allouez_all_modes.yaml"), seed=42,
+    )
+
+    by_kind: dict[str, int] = {}
+    for ent in result.entities:
+        by_kind[ent.kind] = by_kind.get(ent.kind, 0) + 1
+
+    assert by_kind.get("train", 0) == _ALL_MODES_BASELINE["trains"], (
+        f"train count drifted: got {by_kind.get('train', 0)}, "
+        f"baseline {_ALL_MODES_BASELINE['trains']}"
+    )
+    assert by_kind.get("vessel", 0) == _ALL_MODES_BASELINE["vessels"], (
+        f"vessel count drifted: got {by_kind.get('vessel', 0)}, "
+        f"baseline {_ALL_MODES_BASELINE['vessels']}"
+    )
+    assert by_kind.get("drayage", 0) == _ALL_MODES_BASELINE["drayage"], (
+        f"drayage count drifted: got {by_kind.get('drayage', 0)}, "
+        f"baseline {_ALL_MODES_BASELINE['drayage']}"
+    )
+
+    assert _approx(
+        len(result.output.event_log),
+        _ALL_MODES_BASELINE["event_rows"],
+        rel_tol=_ALL_MODES_REL_TOL,
+    ), (
+        f"event_log row count drifted: got {len(result.output.event_log)}, "
+        f"baseline {_ALL_MODES_BASELINE['event_rows']} "
+        f"±{_ALL_MODES_REL_TOL * 100:.1f}%"
+    )
+    assert _approx(
+        len(result.output.consumption_log),
+        _ALL_MODES_BASELINE["consumption_rows"],
+        rel_tol=_ALL_MODES_REL_TOL,
+    ), (
+        f"consumption_log row count drifted: "
+        f"got {len(result.output.consumption_log)}, "
+        f"baseline {_ALL_MODES_BASELINE['consumption_rows']} "
+        f"±{_ALL_MODES_REL_TOL * 100:.1f}%"
+    )
+    consumption_total = sum(
+        float(r.get("consumption_value") or 0.0)
+        for r in result.output.consumption_log
+    )
+    assert _approx(
+        consumption_total,
+        _ALL_MODES_BASELINE["consumption_total"],
+        rel_tol=_ALL_MODES_REL_TOL,
+    ), (
+        f"total consumption drifted: got {consumption_total:.2f}, "
+        f"baseline {_ALL_MODES_BASELINE['consumption_total']:.2f} "
+        f"±{_ALL_MODES_REL_TOL * 100:.1f}%"
+    )
+    assert _approx(
+        float(result.env.now),
+        _ALL_MODES_BASELINE["env_now"],
+        rel_tol=_ALL_MODES_REL_TOL,
+    ), (
+        f"env.now drifted: got {result.env.now:.3f}, "
+        f"baseline {_ALL_MODES_BASELINE['env_now']:.3f} "
+        f"±{_ALL_MODES_REL_TOL * 100:.1f}%"
+    )
+
+    # Exercise multi-mode assemble_outputs: union the event-type
+    # surfaces across all three modes; sanity-check that the
+    # container_data wide frame includes columns from each surface.
+    cd, rl = assemble_outputs(
+        result, mode_name=("truck_rail", "rail_vessel", "vessel_truck"),
+    )
+    assert "train_arrival_actual" in cd.columns, (
+        "truck_rail / rail_vessel event surface not present"
+    )
+    assert "sts_unload" in cd.columns, (
+        "vessel event surface not present"
+    )
+    assert "drayage_gate_out" in cd.columns, (
+        "drayage event surface not present"
+    )
+    assert rl.height == len(result.output.consumption_log), (
+        f"resource_log row count diverged from collector: "
+        f"got {rl.height}, expected {len(result.output.consumption_log)}"
     )

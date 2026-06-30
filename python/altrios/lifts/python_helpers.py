@@ -26,14 +26,18 @@ catalog calls into:
 * ``assemble_outputs`` -- post-run helper that materializes the
   freight ``container_data`` / ``resource_log`` DataFrames from a
   :class:`RunResult` (called by demos and the smoke script after
-  :func:`run_site`).
+  :func:`run_site`). Accepts either a single ``mode_name`` for a
+  single-mode site or a sequence of mode names for a combined
+  multi-mode site, in which case the expected event-type surface is
+  the union across all named modes and mode-specific post-processors
+  run only for modes present in the set.
 """
 from __future__ import annotations
 
 import random
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import polars as pl
 import simpy
@@ -124,19 +128,17 @@ def build_freight_state(
     3. Attach a fresh ``container_events: list`` to ``state`` (the
        freight helpers call :func:`utilities.record_container_event`,
        which appends to this attribute).
-    4. Attach a fresh ``loaded_ocs_by_train: dict`` so the train graph's
-       load/depart steps can hand off OC labels.
-    5. Build the union of every freight mode's :class:`ResourceSpec`
+    4. Build the union of every freight mode's :class:`ResourceSpec`
        set, instantiate the SimPy pools, and attach each to ``state``.
        Done here (rather than via the catalog YAML's ``resources:``
        field) because the existing freight :class:`ResourceSpec`
        callables -- capacity, init_items, partition_by -- are Python
        functions that the engine's YAML resource-spec form doesn't
        accept directly.
-    6. Set the freight logging threshold via
+    5. Set the freight logging threshold via
        :func:`utilities.set_log_level` so basic-level log lines from
        the catalog helpers fire.
-    7. Compute and attach the yard-distance table to
+    6. Compute and attach the yard-distance table to
        ``state.distances`` so :func:`yard_flow.yard_tractor_haul` can
        read it without re-running the geometry.
 
@@ -149,10 +151,9 @@ def build_freight_state(
     consumption_records.clear()
 
     # Defensive on second-run reuse: a SimpleNamespace.__init__ already
-    # produced a fresh state, but resetting these here keeps the
+    # produced a fresh state, but resetting this here keeps the
     # contract explicit.
     state.container_events = []
-    state.loaded_ocs_by_train = {}
 
     # Build the union of every freight mode's specs (capacity callables
     # read from `config` so any site-level overrides on yard.track_number
@@ -540,7 +541,16 @@ def setup_train_arrival(*, env, entity) -> SimpleNamespace:
     """Normalize a ``train``-kind entity into a SimpleNamespace of
     typed fields the train-arrival graph downstream steps consume via
     ``bindings.meta.<field>`` (asteval can't call ``int``/``float``/
-    ``list``/``range``, so type coercion has to happen in Python)."""
+    ``list``/``range``, so type coercion has to happen in Python).
+
+    The ``loaded_ocs`` field is a per-arrival list shared by reference
+    across ``load_one_oc`` (appends OCs) and
+    ``record_train_depart_events`` (drains them). Keeping it on meta
+    (rather than a state-wide dict keyed by ``train_id``) isolates
+    concurrent train arrivals that share the same ``train_id`` -- e.g.
+    a combined site where the same consist plan is routed by more
+    than one mode -- so the train-depart event count is independent
+    of arrival interleaving."""
     attrs = dict(entity.attrs) if hasattr(entity, "attrs") else dict(vars(entity))
     train_id = int(attrs.get("train_id") or 0)
     ic_count = int(attrs.get("full_cars") or 0)
@@ -555,6 +565,7 @@ def setup_train_arrival(*, env, entity) -> SimpleNamespace:
         departure_time=departure_time,
         ic_ids=list(range(1, ic_count + 1)),
         oc_ids=list(range(oc_count)),
+        loaded_ocs=[],
     )
 
 
@@ -622,11 +633,11 @@ def unload_one_ic(*, env, state, config, track_id, train_id, ic_id):
 
 
 @register("freight.load_one_oc")
-def load_one_oc(*, env, state, config, track_id, train_id):
+def load_one_oc(*, env, state, config, track_id, train_id, loaded_ocs):
     """Pull one OC off the stack and load it onto the train.
 
-    The loaded OC is appended to
-    ``state.loaded_ocs_by_train[train_id]`` so the post-load
+    The loaded OC is appended to ``loaded_ocs`` (a per-arrival list
+    threaded in from the meta SimpleNamespace) so the post-load
     ``freight.record_train_depart_events`` step can record the
     ``train_depart`` row for each OC at the actual departure time.
     """
@@ -658,28 +669,23 @@ def load_one_oc(*, env, state, config, track_id, train_id):
     finally:
         yield rtg_pool.put(rtg_obj)
 
-    tid = int(train_id)
-    state.loaded_ocs_by_train.setdefault(tid, []).append(oc)
+    loaded_ocs.append(oc)
 
 
 @register("freight.record_train_depart_events")
-def record_train_depart_events(*, env, state, train_id) -> None:
+def record_train_depart_events(*, env, state, train_id, loaded_ocs) -> None:
     """Record ``train_depart`` for the train and for every OC the load
-    phase placed on it. The OCs come from
-    ``state.loaded_ocs_by_train[train_id]``, populated by
-    ``freight.load_one_oc``. The bucket is cleared after to avoid
-    leaking across runs that share the same state.
+    phase placed on it. The OCs come from the per-arrival
+    ``loaded_ocs`` list populated by ``freight.load_one_oc``.
     """
     tid = int(train_id)
     utilities.record_container_event(
         state, f"Train-{tid}", "train_depart", env.now,
     )
-    loaded = state.loaded_ocs_by_train.get(tid, [])
-    for oc in loaded:
+    for oc in loaded_ocs:
         utilities.record_container_event(
             state, oc, "train_depart", env.now,
         )
-    state.loaded_ocs_by_train.pop(tid, None)
 
 
 # ---- drayage-arrival decomposition ---------------------------------
@@ -862,7 +868,7 @@ def record_vessel_depart(*, env, state, vessel_id):
 
 
 def assemble_outputs(
-    result, *, mode_name: str,
+    result, *, mode_name: str | Sequence[str],
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """End-of-run output assembly for B-phase freight runs.
 
@@ -879,16 +885,30 @@ def assemble_outputs(
     result
         The :class:`RunResult` returned by :func:`run_site`.
     mode_name
-        ``"truck_rail"``, ``"rail_vessel"``, or ``"vessel_truck"``.
-        Selects which event-type surface to backfill (so missing
-        columns appear as null rather than silently absent).
+        Either a single mode name (``"truck_rail"``, ``"rail_vessel"``,
+        ``"vessel_truck"``) or a sequence of mode names for a combined
+        multi-mode site. The expected event-type surface is the union
+        across all named modes (preserving the per-mode declaration
+        order, deduplicated). Mode-specific post-processors run only
+        for modes present in the set: e.g. the truck_rail derived
+        columns are emitted iff ``"truck_rail"`` is in the set.
 
     Returns
     -------
     (container_data, resource_log)
         Two polars DataFrames.
     """
-    event_types = list(EVENT_TYPES_BY_MODE[mode_name])
+    if isinstance(mode_name, str):
+        active_modes: list[str] = [mode_name]
+    else:
+        active_modes = list(mode_name)
+    seen: set[str] = set()
+    event_types: list[str] = []
+    for m in active_modes:
+        for t in EVENT_TYPES_BY_MODE[m]:
+            if t not in seen:
+                seen.add(t)
+                event_types.append(t)
 
     # Container events are dual-written to ``state.container_events``
     # AND the engine's ``result.output.event_log``. Prefer the
@@ -981,7 +1001,7 @@ def assemble_outputs(
     # extraction) — inlined here rather than as a separate registered
     # post-process callable because the catalog post_process hook
     # isn't yet plumbed through the runner.
-    if mode_name == "truck_rail":
+    if "truck_rail" in active_modes:
         container_data = _truck_rail_post_process(container_data)
 
     return container_data, resource_log

@@ -148,6 +148,7 @@ modes:
                 config: "{config}"
                 track_id: "{bindings.track_id}"
                 train_id: "{bindings.meta.train_id}"
+                loaded_ocs: "{bindings.meta.loaded_ocs}"
           - id: wait_for_depart
             type: timeout
             params:
@@ -161,6 +162,7 @@ modes:
                 env: "{env}"
                 state: "{state}"
                 train_id: "{bindings.meta.train_id}"
+                loaded_ocs: "{bindings.meta.loaded_ocs}"
             next: release_track
           - id: release_track
             type: release
@@ -300,6 +302,7 @@ modes:
                 config: "{config}"
                 track_id: "{bindings.track_id}"
                 train_id: "{bindings.meta.train_id}"
+                loaded_ocs: "{bindings.meta.loaded_ocs}"
           - id: wait_for_depart
             type: timeout
             params:
@@ -313,6 +316,7 @@ modes:
                 env: "{env}"
                 state: "{state}"
                 train_id: "{bindings.meta.train_id}"
+                loaded_ocs: "{bindings.meta.loaded_ocs}"
             next: release_track
           - id: release_track
             type: release
@@ -561,6 +565,10 @@ schedule_mappings:
   train_arrivals:
     builder: freight.build_train_schedule
     terminal_name: Allouez
+  truck_rail_train_arrivals:
+    builder: freight.build_train_schedule
+    terminal_name: Allouez
+    mode: truck_rail
   rail_vessel_train_arrivals:
     builder: freight.build_train_schedule
     terminal_name: Allouez
@@ -576,6 +584,10 @@ schedule_mappings:
   vessel_arrivals:
     builder: freight.build_vessel_schedule
     terminal_name: Allouez
+  rail_vessel_vessel_arrivals:
+    builder: freight.build_vessel_schedule
+    terminal_name: Allouez
+    mode: rail_vessel
   vessel_truck_vessel_arrivals:
     builder: freight.build_vessel_schedule
     terminal_name: Allouez
