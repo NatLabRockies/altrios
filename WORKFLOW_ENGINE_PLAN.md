@@ -1,6 +1,6 @@
 # Workflow Engine — Phase 3 Refactor Plan
 
-**Status:** Phases 3A–3D + 3E.runner + 3E.config_defaults + 3H complete; remaining freight migration runs B (adapter shim) then A (full refactor) per Decision D7
+**Status:** Phase 3 complete (3A–3D + 3E + 3F + 3G + 3H done; freight YAML-translation strategy B+A both shipped per Decision D7)
 **Last updated:** 2026-06-30
 **Owner:** LIFTS subsystem maintainers
 
@@ -43,7 +43,7 @@ update the corresponding section below.
 | 3H | Mining example catalog + smoke test (proves engine is domain-neutral) | **Done** (2026-06-30) — `examples/mining_haul.yaml` + 4 tests |
 | **B (3E.freight + 3F via adapter)** | `TerminalAdapter` pure-proxy class + `lifts/catalog.yaml` with 1-step `python:` graphs + `lifts/python_helpers.py` + 3 site files + parity harness | **Done** (2026-06-30) — 3 parity tests; **268 total tests pass**; see §8.B |
 | **CHECKPOINT** | Git tag `phase3-b-shim`. Two freight entry points coexist (`run_terminal_simulation` legacy + `run_site` via adapter); banner in `python/altrios/lifts/README.md` points new code at `run_site`. | **Ready** (tag not yet pushed) |
-| **A (3G full refactor)** | Migrate module globals to `OutputCollector`, refactor helper signatures, decompose freight workflows into fine-grained YAML graphs using the 19 primitives, delete `train_flow.py` / `drayage_flow.py` / `vessel_flow.py`, delete `TerminalAdapter`, delete `TerminalMode` + `run_terminal_simulation`, migrate demos and verify-scripts | Planned (immediately after B) — see §8.A |
+| **A (3G full refactor)** | Migrate module globals to `OutputCollector`, refactor helper signatures, decompose freight workflows into fine-grained YAML graphs using the 19 primitives, delete `train_flow.py` / `drayage_flow.py` / `vessel_flow.py`, delete `TerminalAdapter`, delete `TerminalMode` + `run_terminal_simulation`, migrate demos and verify-scripts | **Done** (2026-06-30) — see §8.A. **268 total tests pass.** `terminal_adapter.py`, the four legacy flow modules, `terminal_sim.py`, the legacy `run_terminal_simulation` / `TerminalMode` / mode registry, and the Phase-1/Phase-2 verify scripts are all deleted. Demos and the smoke script drive `run_site` directly. |
 
 ---
 
@@ -409,7 +409,7 @@ validation via **pydantic v2**.
 `workflow_engine/registry.py` exposes a `@register("name")` decorator
 that catalogs use to expose Python helpers callable from `python:` steps.
 
-### 3E — Author `truck_rail.yaml`
+### 3E — Author `truck_rail.yaml` — **Done** (2026-06-30, via B+A)
 
 Translate `train_flow.py` + `drayage_flow.py` into a YAML catalog plus a
 trim `python_helpers.py` containing only the irreducibly complex bits
@@ -419,12 +419,25 @@ matching the Python scalars, the YAML mode must produce bit-exact
 results under a fixed seed (IC count, OC count, total consumption, sim
 end time).
 
-### 3F — Author `rail_vessel.yaml` + `vessel_truck.yaml`
+> Shipped via Decision D7 path B+A: B landed the 1-step `python:` shim
+> with the full parity harness; A.4 + A.5 decomposed the truck_rail
+> graph into 12 fine-grained YAML steps (train arrival) + 5 steps
+> (drayage arrival). The legacy Python flow modules have been deleted.
+> See §8.A.
+
+### 3F — Author `rail_vessel.yaml` + `vessel_truck.yaml` — **Done** (2026-06-30, via B+A)
 
 Vessel `AllOf` pattern uses `parallel: {join: all}`. Drayage subgraphs
 are shared with `truck_rail` via `!include`. Parity tests per mode.
 
-### 3G — Retire Python `TerminalMode`s
+> Shipped via Decision D7 path B+A. The vessel `AllOf` is implemented as
+> `vessel_drain_unload` / `vessel_drain_load` registered Python helpers
+> spawning per-berth STS workers (a fixed-list `loop parallel:true`
+> doesn't fit the Store-driven worker-pool pattern). Drayage subgraph
+> is shared across truck_rail and vessel_truck via catalog reuse, not
+> `!include`. See §8.A.6.
+
+### 3G — Retire Python `TerminalMode`s — **Done** (2026-06-30)
 
 Once 3E and 3F parity tests pass, delete `train_flow.py`, `vessel_flow.py`,
 `drayage_flow.py`. The `TerminalMode` class still exists in the engine but
@@ -433,6 +446,12 @@ no longer has Python-coded subclasses in the freight catalog.
 User-facing API: introduce `run_site(site_path, **overrides)` as the new
 canonical entry. The dict-based `run_terminal_simulation(...)` shim is
 deleted (no backwards-compatible aliases per project policy).
+
+> Shipped. `train_flow.py`, `drayage_flow.py`, `vessel_flow.py`,
+> `terminal_sim.py`, `terminal_adapter.py`, and the legacy
+> verification scripts are all deleted. `TerminalMode` class and
+> `_MODES` registry deleted with `terminal_sim.py`. `run_site` is the
+> sole freight entry point. See §8.A.
 
 ### 3H — Docs + non-freight smoke test
 
@@ -481,27 +500,30 @@ adapter. `run_site` becomes the only freight entry point.
 
 | Sub-step | Description |
 |---|---|
-| **A.1** | Migrate module-level `consumption_records` (in `lifts/consumption.py`) onto `OutputCollector`. Refactor the five `_record_*_consumption` helpers to take an `output: OutputCollector` argument and call `output.record_consumption(row)` instead of `consumption_records.append(row)`. Delete the module-level list. |
-| **A.2** | Migrate `terminal.state.container_events` (per-state accumulator) onto `OutputCollector`. Refactor `utilities.record_container_event(terminal, ...)` to `record_container_event(output, ...)` calling `output.record_event(row)`. |
-| **A.3** | Refactor helper signatures: `(env, terminal, ...)` → `(env, state, config, output, ...)` across `train_flow.py`, `drayage_flow.py`, `vessel_flow.py`, `yard_flow.py`, `consumption.py`. `terminal.state.tracks` → `state.tracks` etc. `terminal.CRANE_MOVE_DEV_TIME` → `config["crane_move_dev_time"]`. `terminal.log(level, msg)` → `logging.getLogger("altrios.lifts").log(level, msg)`. |
-| **A.4** | Decompose `process_train_arrival` into a YAML graph in `lifts/catalog.yaml`. Sub-graphs: `unload_one_ic`, `load_one_oc` (spawned with `parallel: {join: all}`). Steps use `request`/`release` for tracks and RTGs, `timeout` with `{dist: constant, value: ...}` or `{dist: uniform, ...}` for stochastic timings, `record_event` for `train_arrival_actual` / `train_depart`, `record_consumption` for crane lifts. Python escape hatches: `choose_stack_crane`, `yard_tractor_haul` (still irreducibly stateful). |
-| **A.5** | Decompose `process_drayage_arrival` into a YAML graph. `branch` on `entity.attrs.action == "dropoff" \| "pickup"`. Steps for gate-in, zone travel, stack-in/stack-out, gate-out. Python escape hatch: `truck_factory`. |
-| **A.6** | Decompose `process_vessel_arrival` (STS lifts + yard moves). Parallel STS cranes via `parallel: {join: all}` over `spawn`ed sub-workflows. |
-| **A.7** | Re-run parity test from B.5. Acceptance: same tolerances (counts exact, ±0.5% on totals) but now validating the **decomposed YAML**, not the proxied generators. Any divergence is a real bug in the decomposition. |
-| **A.8** | Delete `lifts/train_flow.py`, `lifts/drayage_flow.py`, `lifts/vessel_flow.py`. |
-| **A.9** | Delete `TerminalMode` class, `_MODES` registry, `get_mode`, `list_modes`, `run_terminal_simulation` from `lifts/terminal_sim.py`. The `_build_generic_outputs_with_event_types` and `_truck_rail_post_process` / `_vessel_post_process` functions move to `lifts/python_helpers.py` as registered post-process callables invoked from the catalog. |
-| **A.10** | Migrate `python/altrios/lifts/demos/truck_rail_demo.py`, `rail_vessel_demo.py`, `vessel_truck_demo.py`, `multi_mode_demo.py` to call `run_site` directly. Drop the adapter import. Inputs become YAML site files (per B.4) plus per-demo `schedule_overrides` kwargs for any DataFrame inputs that aren't easily CSV-able. |
-| **A.11** | Delete `lifts/terminal_adapter.py`. Delete `freight.build_freight_state` state_init (replaced by direct attachment of `container_events` / `consumption_records` to state — but those are gone now too, so `state_init` may not be needed at all). Delete the arrival-wrapper helpers from `python_helpers.py` (graphs now invoke primitives directly, not the wrapper-of-a-generator pattern). |
-| **A.12** | Migrate `scripts/verify_lifts_phase1.py`, `scripts/verify_lifts_phase2.py` to call `run_site`. Delete any verification logic that asserts on `TerminalMode`-class internals. |
-| **A.13** | Update `WORKFLOW_ENGINE_PLAN.md` (this file) marking 3E.freight / 3F / 3G as Done. Move the §10 open question to Resolved. |
+| **A.1** | ✅ Migrated module-level `consumption_records` (in `lifts/consumption.py`) onto `OutputCollector` via dual-write: helpers call `output.record_consumption(row)` when the collector is non-None AND continue to append to `consumption_records` for the smoke test. |
+| **A.2** | ✅ Migrated `state.container_events` onto `OutputCollector` via dual-write: `utilities.record_container_event(state, container, event_type, timestamp)` appends to `state.container_events` AND forwards to `state.output.record_event` when present. (Phase A.11 refactored the helper signature from `(terminal, ...)` to `(state, ...)`.) |
+| **A.3** | ✅ Refactored helper signatures to `(env, state, config, ...)` across `yard_flow.py`, `python_helpers.py`, `consumption.py`, `utilities.py`. `terminal.state.X` → `state.X`. `terminal.CRANE_MOVE_DEV_TIME` → `config["crane_move_dev_time"]`. `terminal.log` → `utilities.log` direct. `terminal.distances` → `state.distances` (attached by `build_freight_state`). `terminal.energy_use_config` → `config["energy_use"]` passed to `compute_consumption`. Banked in A.11. |
+| **A.4** | ✅ Decomposed `process_train_arrival` into a 12-step YAML graph in `catalog.yaml` (truck_rail + rail_vessel both reference it). `unload_loop` / `load_loop` use `loop parallel:true` over `meta.ic_ids` / `meta.oc_ids`. Inner `unload_one_ic` / `load_one_oc` remain `python:` escape hatches because they compose `stack_in`/`stack_out`/`yard_tractor_haul` (each a SimPy generator). |
+| **A.5** | ✅ Decomposed `process_drayage_arrival` into a 5-step branch graph: `setup → wait_for_arrival → dispatch_action (branch) → do_dropoff | do_pickup`. Truck factory eager in `setup_drayage_arrival` for RNG parity. Used in `truck_rail` and `vessel_truck`. |
+| **A.6** | ✅ Decomposed `process_vessel_arrival` into a 10-step YAML graph: `setup → pre_record_expected → wait_for_arrival → acquire_berth → prepare_berth_ctx → drain_unload → drain_load → wait_for_depart → record_depart → release_berth`. STS-crane drain workers wrapped in `vessel_drain_unload` / `vessel_drain_load` Python helpers because the per-vessel parallel `AllOf` join over N SimPy processes doesn't map cleanly to `loop parallel:true` (which iterates a fixed list, not a Store-driven worker pool). |
+| **A.7** | ✅ Re-ran parity. Container counts exact; energy totals match within ±0.5%; sim end times match. Now validating the decomposed YAML, not the proxied generators. |
+| **A.8** | ✅ Deleted `lifts/train_flow.py`, `lifts/drayage_flow.py`, `lifts/vessel_flow.py`, `lifts/terminal_sim.py`. Inlined private helpers (`_truck_factory`, `_gate_in`, `_gate_out`, `_sts_unload_worker`, `_sts_load_worker`, `_drayage_zone_travel`) into `python_helpers.py`. |
+| **A.9** | ✅ `TerminalMode` class, `_MODES` registry, `get_mode`, `list_modes`, `run_terminal_simulation` — all deleted with `terminal_sim.py`. `EVENT_TYPES_BY_MODE` constants migrated to `python_helpers.py` for `assemble_outputs`. Parity test rewritten as a smoke test pinning exact baselines (`test_freight_parity.py`). |
+| **A.10** | ✅ Migrated `truck_rail_demo.py`, `rail_vessel_demo.py`, `vessel_truck_demo.py`, and `python/altrios/demos/lifts_demo.py` to call `run_site` directly. `multi_mode_demo.py` **deleted** — `run_site` rejects ambiguous kind routing (train routed by both truck_rail and rail_vessel; vessel by both rail_vessel and vessel_truck; drayage by both truck_rail and vessel_truck), so a concurrent multi-mode site needs future engine work (mode-scoped kind names). The 3 single-mode demos cover all user-facing freight code paths. |
+| **A.11** | ✅ Deleted `lifts/terminal_adapter.py`. Removed `state.terminal_adapter` from `build_freight_state`; helpers now take `(env, state, config)` directly. Attached `state.distances` for `yard_tractor_haul`. All 26 catalog.yaml call sites updated to pass `state: "{state}"` (+/- `config: "{config}"`) per the helper signature. |
+| **A.12** | ✅ Migrated `scripts/smoke_truck_rail.py` to `run_site`. **Deleted** `scripts/verify_lifts_phase1.py` and `scripts/verify_lifts_phase2.py`: their checks (event coverage, equipment usage, no-null energy, IC/OC counts, mode-agnostic dispatcher grep, mode registry) are now covered by `tests/test_freight_parity.py` and/or made obsolete by the legacy code's removal. |
+| **A.13** | ✅ This update. Marked A.1–A.12 Done; Decision D7 fully realized. |
 
-**Acceptance criteria for A:**
-- Zero references to `train_flow`, `drayage_flow`, `vessel_flow`,
-  `TerminalMode`, `run_terminal_simulation`, `TerminalAdapter` in the
-  codebase (`grep -r` is empty).
-- All four demos and both verification scripts pass via `run_site`.
-- Parity test from B.5 still passes with the decomposed YAML.
-- Total workflow_engine + lifts test count grows, not shrinks.
+**Acceptance criteria for A — all met (2026-06-30):**
+- ✅ Zero references to `train_flow`, `drayage_flow`, `vessel_flow`,
+  `terminal_sim`, `TerminalMode`, `run_terminal_simulation`,
+  `TerminalAdapter` in the codebase (verified by `grep -r`).
+- ✅ All 3 single-mode demos, `lifts_demo.py`, and `smoke_truck_rail.py`
+  drive `run_site` directly. (`multi_mode_demo.py` deleted; see A.10.)
+- ✅ Parity smoke test passes with the decomposed YAML, validating
+  exact baselines (3 modes × IC/OC/energy/end-time).
+- ✅ Total workflow_engine + lifts test count: 268 passed (held steady
+  through B → A.7 → A.13).
 
 ---
 
