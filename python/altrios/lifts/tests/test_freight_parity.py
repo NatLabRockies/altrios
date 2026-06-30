@@ -80,3 +80,77 @@ def test_rail_vessel_smoke():
 def test_vessel_truck_smoke():
     """vessel_truck run_site path produces expected counts + energy."""
     _assert_baseline("vessel_truck", "allouez_vessel_truck.yaml")
+
+
+# ---- Multi-mode smoke ----------------------------------------------
+#
+# The ``allouez_combined.yaml`` site activates ``truck_rail`` +
+# ``vessel_truck`` simultaneously, sharing the yard-crane / chassis /
+# stack / yard-tractor pools. The smoke pins entity counts and
+# aggregate consumption so resource-sharing regressions (e.g. accidental
+# double-counting from a dispatcher change) surface immediately. It
+# does NOT depend on :func:`assemble_outputs` since v1 of that helper
+# is single-mode; we read totals straight off the engine collector.
+
+_COMBINED_BASELINE = {
+    "trains": 20,
+    "vessels": 4,
+    "drayage": 1944,
+    "event_rows": 19710,
+    "consumption_rows": 13654,
+    "consumption_total": 3247.34,
+    "env_now": 336.264,
+}
+
+
+def test_combined_truck_rail_vessel_truck_smoke():
+    """allouez_combined activates two modes against shared pools; pin
+    arrival counts, event/consumption row counts, total consumption,
+    and sim-end time."""
+    result = run_site(
+        str(_SITES_DIR / "allouez_combined.yaml"), seed=42,
+    )
+
+    by_kind: dict[str, int] = {}
+    for ent in result.entities:
+        by_kind[ent.kind] = by_kind.get(ent.kind, 0) + 1
+
+    assert by_kind.get("train", 0) == _COMBINED_BASELINE["trains"], (
+        f"train count drifted: got {by_kind.get('train', 0)}, "
+        f"baseline {_COMBINED_BASELINE['trains']}"
+    )
+    assert by_kind.get("vessel", 0) == _COMBINED_BASELINE["vessels"], (
+        f"vessel count drifted: got {by_kind.get('vessel', 0)}, "
+        f"baseline {_COMBINED_BASELINE['vessels']}"
+    )
+    assert by_kind.get("drayage", 0) == _COMBINED_BASELINE["drayage"], (
+        f"drayage count drifted: got {by_kind.get('drayage', 0)}, "
+        f"baseline {_COMBINED_BASELINE['drayage']}"
+    )
+
+    assert _approx(
+        len(result.output.event_log), _COMBINED_BASELINE["event_rows"]
+    ), (
+        f"event_log row count drifted: got {len(result.output.event_log)}, "
+        f"baseline {_COMBINED_BASELINE['event_rows']}"
+    )
+    assert _approx(
+        len(result.output.consumption_log),
+        _COMBINED_BASELINE["consumption_rows"],
+    ), (
+        f"consumption_log row count drifted: "
+        f"got {len(result.output.consumption_log)}, "
+        f"baseline {_COMBINED_BASELINE['consumption_rows']}"
+    )
+    consumption_total = sum(
+        float(r.get("consumption_value") or 0.0)
+        for r in result.output.consumption_log
+    )
+    assert _approx(consumption_total, _COMBINED_BASELINE["consumption_total"]), (
+        f"total consumption drifted: got {consumption_total:.2f}, "
+        f"baseline {_COMBINED_BASELINE['consumption_total']:.2f}"
+    )
+    assert _approx(float(result.env.now), _COMBINED_BASELINE["env_now"]), (
+        f"env.now drifted: got {result.env.now:.3f}, "
+        f"baseline {_COMBINED_BASELINE['env_now']:.3f}"
+    )

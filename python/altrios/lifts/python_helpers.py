@@ -203,6 +203,7 @@ def _resources_root() -> Path:
 @register("freight.build_train_schedule")
 def build_train_schedule(
     *, schedule: Any, terminal_name: str = "Allouez",
+    mode: str | None = None,
     env=None, state=None, config=None, layout=None, rng=None,
 ) -> list[dict]:
     """Thin wrapper over :func:`utilities.build_train_timetable`.
@@ -213,6 +214,11 @@ def build_train_schedule(
     ``Train_Type`` to ``"Intermodal"`` so freight-parity baselines
     line up. **Callers that pass a real DataFrame are NOT subject to
     this override.**
+
+    ``mode`` (optional) is stamped onto every returned arrival dict
+    when set. Used by combined multi-mode sites where ``train`` is
+    routed by more than one active mode and the dispatcher needs an
+    explicit hint per arrival.
     """
     if schedule is None:
         df = pl.read_csv(_resources_root() / "train_consist_plan.csv")
@@ -220,15 +226,20 @@ def build_train_schedule(
     else:
         df = _resolve_table(schedule, _resources_root() / "train_consist_plan.csv")
     entries = utilities.build_train_timetable(df, terminal_name, as_dicts=True)
-    return [
+    out = [
         {**e, "kind": "train", "id": f"train-{e['train_id']}"}
         for e in entries
     ]
+    if mode is not None:
+        for e in out:
+            e["mode"] = mode
+    return out
 
 
 @register("freight.build_drayage_schedule_synth")
 def build_drayage_schedule_synth(
     *, schedule: Any, terminal_name: str = "Allouez",
+    mode: str | None = None,
     env=None, state=None, config=None, layout=None, rng=None,
 ) -> list[dict]:
     """Drayage builder used by ``truck_rail`` mode.
@@ -238,14 +249,21 @@ def build_drayage_schedule_synth(
     each train; see :func:`_synthesize_drayage_from_trains`).
     When ``schedule`` is supplied, delegates to
     :func:`utilities.build_drayage_schedule`.
+
+    ``mode`` (optional) is stamped onto every returned arrival dict
+    when set.
     """
     if schedule is not None:
         df = _resolve_table(schedule, _resources_root() / "drayage_schedule.csv")
         entries = utilities.build_drayage_schedule(df, terminal_name, as_dicts=True)
-        return [
+        out = [
             {**e, "kind": "drayage", "id": f"drayage-{e['truck_id']}"}
             for e in entries
         ]
+        if mode is not None:
+            for e in out:
+                e["mode"] = mode
+        return out
 
     # No explicit drayage schedule: synthesize from trains (one
     # dropoff per OC just before each train, one pickup per IC just
@@ -253,28 +271,40 @@ def build_drayage_schedule_synth(
     df = pl.read_csv(_resources_root() / "train_consist_plan.csv")
     df = df.with_columns(pl.lit("Intermodal").alias("Train_Type"))
     train_entries = utilities.build_train_timetable(df, terminal_name, as_dicts=True)
-    return [
+    out = [
         {**e, "kind": "drayage", "id": f"drayage-{e['truck_id']}"}
         for e in _synthesize_drayage_from_trains(train_entries)
     ]
+    if mode is not None:
+        for e in out:
+            e["mode"] = mode
+    return out
 
 
 @register("freight.build_drayage_schedule_csv")
 def build_drayage_schedule_csv(
     *, schedule: Any, terminal_name: str = "Allouez",
+    mode: str | None = None,
     env=None, state=None, config=None, layout=None, rng=None,
 ) -> list[dict]:
     """Drayage builder used by ``vessel_truck`` mode.
 
     Falls back to the canonical ``drayage_schedule.csv`` when
     ``schedule is None``. Vessel<->truck flows have no train consist
-    plan to synthesize from, so the CSV fallback IS the default."""
+    plan to synthesize from, so the CSV fallback IS the default.
+
+    ``mode`` (optional) is stamped onto every returned arrival dict
+    when set."""
     df = _resolve_table(schedule, _resources_root() / "drayage_schedule.csv")
     entries = utilities.build_drayage_schedule(df, terminal_name, as_dicts=True)
-    return [
+    out = [
         {**e, "kind": "drayage", "id": f"drayage-{e['truck_id']}"}
         for e in entries
     ]
+    if mode is not None:
+        for e in out:
+            e["mode"] = mode
+    return out
 
 
 # ``freight.build_drayage_schedule`` is a convenience alias dispatching
@@ -284,12 +314,15 @@ def build_drayage_schedule_csv(
 @register("freight.build_drayage_schedule")
 def build_drayage_schedule(
     *, schedule: Any, terminal_name: str = "Allouez",
+    mode: str | None = None,
     env=None, state=None, config=None, layout=None, rng=None,
 ) -> list[dict]:
     """Default drayage builder. Delegates to
-    :func:`build_drayage_schedule_synth` (synthesize-from-trains)."""
+    :func:`build_drayage_schedule_synth` (synthesize-from-trains).
+
+    ``mode`` (optional) is forwarded to the underlying builder."""
     return build_drayage_schedule_synth(
-        schedule=schedule, terminal_name=terminal_name,
+        schedule=schedule, terminal_name=terminal_name, mode=mode,
         env=env, state=state, config=config, layout=layout, rng=rng,
     )
 
@@ -297,15 +330,23 @@ def build_drayage_schedule(
 @register("freight.build_vessel_schedule")
 def build_vessel_schedule(
     *, schedule: Any, terminal_name: str = "Allouez",
+    mode: str | None = None,
     env=None, state=None, config=None, layout=None, rng=None,
 ) -> list[dict]:
-    """Thin wrapper over :func:`utilities.build_vessel_schedule`."""
+    """Thin wrapper over :func:`utilities.build_vessel_schedule`.
+
+    ``mode`` (optional) is stamped onto every returned arrival dict
+    when set."""
     df = _resolve_table(schedule, _resources_root() / "vessel_call_list.csv")
     entries = utilities.build_vessel_schedule(df, terminal_name, as_dicts=True)
-    return [
+    out = [
         {**e, "kind": "vessel", "id": f"vessel-{e['vessel_id']}"}
         for e in entries
     ]
+    if mode is not None:
+        for e in out:
+            e["mode"] = mode
+    return out
 
 
 def _synthesize_drayage_from_trains(

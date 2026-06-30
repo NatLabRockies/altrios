@@ -553,16 +553,30 @@ schedule_mappings:
   # Per-stream schedule builders. The site's ``schedules:`` block
   # keys reference these names; values are passed as ``schedule=`` to
   # the builder. Builders return list[dict] with kind / id /
-  # arrival_time / per-entry attrs.
+  # arrival_time / per-entry attrs. Entries marked with ``mode:`` have
+  # the dispatcher hint stamped onto every arrival dict so combined
+  # multi-mode sites (where more than one active mode routes the same
+  # kind) dispatch unambiguously. Single-mode sites can omit ``mode:``
+  # because the dispatcher's uncontended-kind fallback handles them.
   train_arrivals:
     builder: freight.build_train_schedule
     terminal_name: Allouez
+  rail_vessel_train_arrivals:
+    builder: freight.build_train_schedule
+    terminal_name: Allouez
+    mode: rail_vessel
   truck_rail_drayage_arrivals:
     builder: freight.build_drayage_schedule_synth
     terminal_name: Allouez
+    mode: truck_rail
   vessel_truck_drayage_arrivals:
     builder: freight.build_drayage_schedule_csv
     terminal_name: Allouez
+    mode: vessel_truck
   vessel_arrivals:
     builder: freight.build_vessel_schedule
     terminal_name: Allouez
+  vessel_truck_vessel_arrivals:
+    builder: freight.build_vessel_schedule
+    terminal_name: Allouez
+    mode: vessel_truck
