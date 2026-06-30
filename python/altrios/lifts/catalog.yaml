@@ -229,17 +229,92 @@ modes:
                 env: "{env}"
                 state: "{state}"
                 entity: "{entity}"
+      # Phase A.6: vessel arrival decomposition. Workers (unload/load)
+      # are wrapped in single python helpers because they internally
+      # spawn N STS-crane processes + AllOf-join, which is awkward to
+      # express as a YAML parallel loop. Everything around the workers
+      # (setup -> wait -> berth acquire -> depart -> release) is YAML.
       - name: handle_vessel_arrival
-        entry: call_legacy
+        entry: setup
         steps:
-          - id: call_legacy
+          - id: setup
             type: python
             params:
-              call: freight.process_vessel_arrival
+              call: freight.setup_vessel_arrival
               args:
                 env: "{env}"
-                state: "{state}"
                 entity: "{entity}"
+              bind: meta
+            next: pre_record_expected
+          - id: pre_record_expected
+            type: python
+            params:
+              call: freight.vessel_pre_record_expected
+              args:
+                env: "{env}"
+                terminal: "{state.terminal_adapter}"
+                meta: "{bindings.meta}"
+            next: wait_for_arrival
+          - id: wait_for_arrival
+            type: timeout
+            params:
+              duration: "{max(0.0, bindings.meta.arrival_time - env.now)}"
+            next: acquire_berth
+          - id: acquire_berth
+            type: request
+            params:
+              pool: berths
+              bind: berth_req
+            next: prepare_berth_ctx
+          - id: prepare_berth_ctx
+            type: python
+            params:
+              call: freight.prepare_vessel_berth_ctx
+              args:
+                env: "{env}"
+                terminal: "{state.terminal_adapter}"
+                meta: "{bindings.meta}"
+              bind: berth_ctx
+            next: drain_unload
+          - id: drain_unload
+            type: python
+            params:
+              call: freight.vessel_drain_unload
+              args:
+                env: "{env}"
+                terminal: "{state.terminal_adapter}"
+                meta: "{bindings.meta}"
+                berth_ctx: "{bindings.berth_ctx}"
+            next: drain_load
+          - id: drain_load
+            type: python
+            params:
+              call: freight.vessel_drain_load
+              args:
+                env: "{env}"
+                terminal: "{state.terminal_adapter}"
+                meta: "{bindings.meta}"
+                berth_ctx: "{bindings.berth_ctx}"
+            next: wait_for_depart
+          - id: wait_for_depart
+            type: timeout
+            params:
+              duration: "{max(0.0, bindings.meta.departure_time - env.now)}"
+            next: record_depart
+          - id: record_depart
+            type: python
+            params:
+              call: freight.record_vessel_depart
+              args:
+                env: "{env}"
+                terminal: "{state.terminal_adapter}"
+                vessel_id: "{bindings.meta.vessel_id}"
+            next: release_berth
+          - id: release_berth
+            type: release
+            params:
+              pool: berths
+              bind: berth_req
 
   # ---- vessel_truck ----
   - name: vessel_truck
@@ -248,16 +323,86 @@ modes:
       drayage: handle_drayage_arrival
     graphs:
       - name: handle_vessel_arrival
-        entry: call_legacy
+        entry: setup
         steps:
-          - id: call_legacy
+          - id: setup
             type: python
             params:
-              call: freight.process_vessel_arrival
+              call: freight.setup_vessel_arrival
               args:
                 env: "{env}"
-                state: "{state}"
                 entity: "{entity}"
+              bind: meta
+            next: pre_record_expected
+          - id: pre_record_expected
+            type: python
+            params:
+              call: freight.vessel_pre_record_expected
+              args:
+                env: "{env}"
+                terminal: "{state.terminal_adapter}"
+                meta: "{bindings.meta}"
+            next: wait_for_arrival
+          - id: wait_for_arrival
+            type: timeout
+            params:
+              duration: "{max(0.0, bindings.meta.arrival_time - env.now)}"
+            next: acquire_berth
+          - id: acquire_berth
+            type: request
+            params:
+              pool: berths
+              bind: berth_req
+            next: prepare_berth_ctx
+          - id: prepare_berth_ctx
+            type: python
+            params:
+              call: freight.prepare_vessel_berth_ctx
+              args:
+                env: "{env}"
+                terminal: "{state.terminal_adapter}"
+                meta: "{bindings.meta}"
+              bind: berth_ctx
+            next: drain_unload
+          - id: drain_unload
+            type: python
+            params:
+              call: freight.vessel_drain_unload
+              args:
+                env: "{env}"
+                terminal: "{state.terminal_adapter}"
+                meta: "{bindings.meta}"
+                berth_ctx: "{bindings.berth_ctx}"
+            next: drain_load
+          - id: drain_load
+            type: python
+            params:
+              call: freight.vessel_drain_load
+              args:
+                env: "{env}"
+                terminal: "{state.terminal_adapter}"
+                meta: "{bindings.meta}"
+                berth_ctx: "{bindings.berth_ctx}"
+            next: wait_for_depart
+          - id: wait_for_depart
+            type: timeout
+            params:
+              duration: "{max(0.0, bindings.meta.departure_time - env.now)}"
+            next: record_depart
+          - id: record_depart
+            type: python
+            params:
+              call: freight.record_vessel_depart
+              args:
+                env: "{env}"
+                terminal: "{state.terminal_adapter}"
+                vessel_id: "{bindings.meta.vessel_id}"
+            next: release_berth
+          - id: release_berth
+            type: release
+            params:
+              pool: berths
+              bind: berth_req
       - name: handle_drayage_arrival
         entry: setup
         steps:

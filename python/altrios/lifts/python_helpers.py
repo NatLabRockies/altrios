@@ -29,6 +29,7 @@ from types import SimpleNamespace
 from typing import Any, Iterable, Mapping
 
 import polars as pl
+import simpy
 
 from altrios.lifts import consumption, drayage_flow, train_flow, utilities, vessel_flow
 from altrios.lifts.classes import container, loggingLevel
@@ -629,6 +630,124 @@ def drayage_pickup(*, env, terminal, meta):
     yield env.process(drayage_flow._drayage_zone_travel(env, terminal, "to_stack"))
     ic = yield env.process(stack_out(env, terminal, container_obj=None))
     yield env.process(drayage_flow._gate_out(env, terminal, meta.truck_obj, container_obj=ic))
+
+
+# ---- A.6: vessel arrival decomposition --------------------------------
+
+
+@register("freight.setup_vessel_arrival")
+def setup_vessel_arrival(*, env, entity):
+    """Normalise one vessel-arrival schedule entry into a meta
+    SimpleNamespace consumed by the rest of the vessel graph."""
+    attrs = dict(entity.attrs) if hasattr(entity, "attrs") else dict(vars(entity))
+    return SimpleNamespace(
+        vessel_id=int(attrs["vessel_id"]),
+        vessel_name=attrs.get("vessel_name", attrs["vessel_id"]),
+        arrival_time=float(attrs["arrival_time"]),
+        departure_time=float(attrs["departure_time"]),
+        ic_count=int(attrs["inbound_containers"]),
+        oc_count=int(attrs["outbound_containers"]),
+    )
+
+
+@register("freight.vessel_pre_record_expected")
+def vessel_pre_record_expected(*, env, terminal, meta):
+    """Records ``vessel_arrival_expected`` for each IC at the scheduled
+    arrival time -- mirrors the pre-loop in
+    :func:`vessel_flow.process_vessel_arrival`."""
+    for ic_id in range(1, meta.ic_count + 1):
+        ic = container(type="Inbound", id=ic_id, train_id=meta.vessel_id)
+        utilities.record_container_event(
+            terminal, ic, "vessel_arrival_expected", meta.arrival_time,
+        )
+
+
+@register("freight.prepare_vessel_berth_ctx")
+def prepare_vessel_berth_ctx(*, env, terminal, meta):
+    """Once a berth has been acquired, pick a per-berth STS pool key,
+    stage the ic_queue, record ``vessel_arrival_actual`` for each IC,
+    and emit the basic berth-arrived log line. Returns a SimpleNamespace
+    consumed by the unload/load drain helpers."""
+    state = terminal.state
+    by_berth = state.sts_cranes_by_berth
+    berth_id = max(by_berth.keys(), key=lambda k: (len(by_berth[k].items), -k))
+    terminal.log(
+        loggingLevel.BASIC,
+        f"[Vessel] {meta.vessel_name} berth_id={berth_id} arrived at "
+        f"{env.now:.3f}",
+    )
+
+    ic_queue: simpy.Store = simpy.Store(env)
+    for ic_id in range(1, meta.ic_count + 1):
+        ic = container(type="Inbound", id=ic_id, train_id=meta.vessel_id)
+        ic_queue.put(ic)
+        utilities.record_container_event(
+            terminal, ic, "vessel_arrival_actual", env.now,
+        )
+
+    return SimpleNamespace(
+        berth_id=berth_id,
+        ic_queue=ic_queue,
+        sts_per_berth=by_berth[berth_id].capacity,
+        oc_remaining=[meta.oc_count],
+    )
+
+
+@register("freight.vessel_drain_unload")
+def vessel_drain_unload(*, env, terminal, meta, berth_ctx):
+    """Spawn one STS unload worker per crane slot at this berth and wait
+    for all of them to drain the per-vessel ic_queue.  Wraps the
+    parallel ``AllOf`` block from the legacy
+    :func:`vessel_flow.process_vessel_arrival`."""
+    procs = [
+        env.process(
+            vessel_flow._sts_unload_worker(
+                env, terminal, berth_ctx.berth_id, meta.vessel_id,
+                berth_ctx.ic_queue,
+            )
+        )
+        for _ in range(berth_ctx.sts_per_berth)
+    ]
+    yield simpy.events.AllOf(env, procs)
+    terminal.log(
+        loggingLevel.BASIC,
+        f"[Vessel] {meta.vessel_id} discharged {meta.ic_count} ICs at "
+        f"{env.now:.3f}",
+    )
+
+
+@register("freight.vessel_drain_load")
+def vessel_drain_load(*, env, terminal, meta, berth_ctx):
+    """Spawn one STS load worker per crane slot and wait for all of them
+    to dequeue ``oc_count`` OCs off the stack. No-op when
+    ``meta.oc_count == 0`` (so the caller can skip the conditional in
+    YAML)."""
+    if meta.oc_count <= 0:
+        return
+        yield  # unreachable; keeps this a generator for the engine
+    procs = [
+        env.process(
+            vessel_flow._sts_load_worker(
+                env, terminal, berth_ctx.berth_id, meta.vessel_id,
+                berth_ctx.oc_remaining,
+            )
+        )
+        for _ in range(berth_ctx.sts_per_berth)
+    ]
+    yield simpy.events.AllOf(env, procs)
+    terminal.log(
+        loggingLevel.BASIC,
+        f"[Vessel] {meta.vessel_id} loaded {meta.oc_count} OCs at "
+        f"{env.now:.3f}",
+    )
+
+
+@register("freight.record_vessel_depart")
+def record_vessel_depart(*, env, terminal, vessel_id):
+    """Record the final ``vessel_depart`` event for ``Vessel-{id}``."""
+    utilities.record_container_event(
+        terminal, f"Vessel-{int(vessel_id)}", "vessel_depart", env.now,
+    )
 
 
 # ---- output assembly -----------------------------------------------
