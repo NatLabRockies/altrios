@@ -65,7 +65,6 @@ class TrainPlannerConfig:
     })
     loco_info: pd.DataFrame = field(default_factory = lambda: pd.DataFrame({
         "Diesel_Large": {
-            "Capacity_Cars": 20,
             "Fuel_Type": "Diesel",
             "Min_Servicing_Time_Hr": 3.0,
             "Rust_Loco": alt.Locomotive.default(),
@@ -73,7 +72,6 @@ class TrainPlannerConfig:
             "Lifespan_Years": defaults.LOCO_LIFESPAN
             },
         "BEL": {
-            "Capacity_Cars": 20,
             "Fuel_Type": "Electricity",
             "Min_Servicing_Time_Hr": 3.0,
             "Rust_Loco": alt.Locomotive.default_battery_electric_loco(),

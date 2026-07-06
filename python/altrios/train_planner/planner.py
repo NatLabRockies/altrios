@@ -97,7 +97,7 @@ def dispatch(
                 message = (
                     message
                     + f"""
-                {row["Node"]}: {row["count"]}"""
+                    {row["Node"]}: {row["count"]}"""
                 )
         else:
             # Show counts of locomotives servicing or refueling at the origin
@@ -160,7 +160,7 @@ def dispatch(
         diesel_to_require = diesel_candidates.eq(True).cum_sum().eq(1).arg_max()
 
         # Get horsepower of the required diesel locomotive
-        diesel_to_require_hp = loco_pool.filter(diesel_filter).select(pl.first("HP"))
+        diesel_to_require_hp = loco_pool.filter(diesel_filter).select(pl.first("HP")).item()
 
         # Remove the diesel from candidates to avoid double-counting
         candidates[diesel_to_require] = False
@@ -250,7 +250,6 @@ def update_refuel_queue(
     loco_pool: pl.DataFrame,
     refuelers: pl.DataFrame,
     current_time: float,
-    event_tracker: pl.DataFrame,
 ) -> Tuple[pl.DataFrame, pl.DataFrame]:
     """
     Update locomotive refueling status, manage service queues, and track events.
@@ -267,28 +266,25 @@ def update_refuel_queue(
         DataFrame containing all refueling ports in the network with capacity information
     current_time : float
         Current simulation time in hours
-    event_tracker : pl.DataFrame
-        DataFrame tracking locomotive events (arrivals, refueling, etc.)
 
     Returns
     -------
     Tuple[pl.DataFrame, pl.DataFrame]
         loco_pool : Updated locomotive pool DataFrame with new statuses
-        event_tracker : Updated event tracker with new refueling/servicing events
+        refuels : New refueling events
     """
 
     # Identify locomotives that have arrived at their destination
     arrived = loco_pool.select(
-        (pl.col("Status") == "Dispatched") & (pl.col("Arrival_Time") <= current_time)
+        (pl.col("Status") == "Dispatched") & (pl.col("Arrival_Time").is_not_null()) & (pl.col("Arrival_Time") <= current_time)
     ).to_series()
 
     # Process newly arrived locomotives
     if arrived.sum() > 0:
         # Update loco_pool with refueling information and new status
-        loco_pool = (
-            loco_pool
+        loco_pool = (loco_pool
             # Remove old refueler info columns to avoid duplication
-            .drop(["Refueler_J_Per_Hr", "Port_Count", "Battery_Headroom_J"])
+            .drop(["Refueler_J_Per_Hr", "Port_Count", "Battery_Headroom_J"], strict=False)
             # Join with refuelers data to get updated refueling information at current location
             .join(
                 refuelers.select(
@@ -339,19 +335,20 @@ def update_refuel_queue(
                 "Node",
                 "Locomotive_Type",
                 "Fuel_Type",
+                "Refueling_Done_Time",
                 "Arrival_Time",
                 "Locomotive_ID",
                 descending=False,
                 nulls_last=True,
             )
         )
+
         # Organize locomotives by charger type and node for queue processing
         charger_type_breakouts = (
             loco_pool.filter(
-                # Only consider locomotives in refuel queue without scheduled completion times
+                # Only consider locomotives in refuel queue
                 pl.col("Status") == "Refuel_Queue",
-                (pl.col("Refueling_Done_Time") >= current_time)
-                | (pl.col("Refueling_Done_Time").is_null()),
+                (pl.col("Refueling_Done_Time") >= current_time) | pl.col("Refueling_Done_Time").is_null()
             )
             # Partition by node and locomotive type to process each charger separately
             .partition_by(["Node", "Locomotive_Type"])
@@ -417,104 +414,47 @@ def update_refuel_queue(
             # Drop temporary column
             .drop("Refueling_Done_Time_right")
         )
-
-    # Identify locomotives that have finished refueling
-    refueling_finished = loco_pool.select(
-        (pl.col("Status") == "Refuel_Queue")
-        & (pl.col("Refueling_Done_Time") <= current_time)
-    ).to_series()
-
-    # Count how many locomotives finished refueling
-    refueling_finished_count = refueling_finished.sum()
-
-    # Process locomotives that finished refueling
-    if refueling_finished_count > 0:
-        # Record the refueling events (both start and end times)
-        new_rows = pl.DataFrame(
-            [
-                # Create event types - half 'Refueling_Start', half 'Refueling_End'
-                np.concatenate(
-                    [
-                        np.tile("Refueling_Start", refueling_finished_count),
-                        np.tile("Refueling_End", refueling_finished_count),
-                    ]
-                ),
-                # Create time values - start times followed by end times
-                np.concatenate(
-                    [
-                        loco_pool.filter(refueling_finished)
-                        .select(
-                            pl.col("Refueling_Done_Time") - pl.col("Refuel_Duration")
-                        )
-                        .to_series(),
-                        loco_pool.filter(refueling_finished).get_column(
-                            "Refueling_Done_Time"
-                        ),
-                    ]
-                ),
-                # Create locomotive IDs - duplicated for start and end events
-                np.tile(
-                    loco_pool.filter(refueling_finished).get_column("Locomotive_ID"), 2
-                ),
-            ],
-            schema=event_tracker.columns,
-            orient="col",
+    
+    refuel_finished_conditions = [(pl.col("Refueling_Done_Time").is_null() | (pl.col("Refueling_Done_Time") <= current_time))]
+    servicing_finished_conditions = [(pl.col("Servicing_Done_Time").is_null() | (pl.col("Servicing_Done_Time") <= current_time))]
+    new_refuel_finished_conditions = refuel_finished_conditions + [pl.col("Refueling_Done_Time").is_not_null()]
+    refuels = (loco_pool
+        .filter(new_refuel_finished_conditions)
+        .select(
+            pl.col("Locomotive_ID", "Arrival_Time"),
+            (pl.col("Refueling_Done_Time") - pl.col("Refuel_Duration")).alias("Refuel_Start_Time_Planned_Hr"),
+            pl.col("Refueling_Done_Time").alias("Refuel_End_Time_Planned_Hr")
         )
+    ).unique()
 
-        # Add new events to the tracker
-        event_tracker = pl.concat([event_tracker, new_rows])
-
-        # Update locomotive pool with post-refueling states
-        loco_pool = loco_pool.with_columns(
+    # Update locomotive pool with post-refueling states
+    loco_pool = (loco_pool
+        .with_columns(
             # Update SOC to target value for refueled locomotives
-            pl.when(refueling_finished)
-            .then(pl.col("SOC_Target_J"))
-            .otherwise(pl.col("SOC_J"))
-            .alias("SOC_J"),
+            pl.when(new_refuel_finished_conditions)
+                .then(pl.col("SOC_Target_J"))
+                .otherwise(pl.col("SOC_J"))
+                .alias("SOC_J"),
             # Clear refueling done time for finished locomotives
-            pl.when(refueling_finished)
-            .then(pl.lit(None))
-            .otherwise(pl.col("Refueling_Done_Time"))
-            .alias("Refueling_Done_Time"),
-            # Update status based on servicing needs
-            pl.when(
-                pl.lit(refueling_finished)
-                & (pl.col("Servicing_Done_Time") <= current_time)
-            )
-            .then(pl.lit("Ready"))  # Ready if servicing also complete
-            .when(
-                pl.lit(refueling_finished)
-                & (pl.col("Servicing_Done_Time") > current_time)
-            )
-            .then(pl.lit("Servicing"))  # Move to servicing if still needed
-            .otherwise(pl.col("Status"))
-            .alias("Status"),
+            pl.when(new_refuel_finished_conditions)
+                .then(pl.lit(None))
+                .otherwise(pl.col("Refueling_Done_Time"))
+                .alias("Refueling_Done_Time"),
+            pl.when(servicing_finished_conditions)
+                .then(pl.lit(None))
+                .otherwise(pl.col("Servicing_Done_Time"))
+                .alias("Servicing_Done_Time"),
+            pl.when(refuel_finished_conditions + servicing_finished_conditions)
+                .then(pl.lit("Ready"))
+                .when(refuel_finished_conditions)
+                .then(pl.lit("Servicing"))
+                .otherwise(pl.col("Status"))
+                .alias("Status"),
         )
-
-    # Identify locomotives that have finished servicing
-    servicing_finished = loco_pool.select(
-        (pl.col("Status") == "Servicing")
-        & (pl.col("Servicing_Done_Time") <= current_time)
-    ).to_series()
-
-    # Process locomotives that finished servicing
-    if servicing_finished.sum() > 0:
-        # Update locomotive pool with post-servicing states
-        loco_pool = loco_pool.with_columns(
-            # Mark serviced locomotives as ready
-            pl.when(servicing_finished)
-            .then(pl.lit("Ready"))
-            .otherwise(pl.col("Status"))
-            .alias("Status"),
-            # Clear servicing done time for finished locomotives
-            pl.when(servicing_finished)
-            .then(pl.lit(None))
-            .otherwise(pl.col("Servicing_Done_Time"))
-            .alias("Servicing_Done_Time"),
-        )
+    )
 
     # Return sorted locomotive pool and updated event tracker
-    return loco_pool.sort("Locomotive_ID"), event_tracker
+    return loco_pool.sort("Locomotive_ID"), refuels
 
 
 def run_train_planner(
@@ -529,6 +469,8 @@ def run_train_planner(
     config: planner_config.TrainPlannerConfig = planner_config.TrainPlannerConfig(),
     demand_file: Union[pl.DataFrame, Path, str] = defaults.DEMAND_FILE,
     network_charging_guidelines: Optional[pl.DataFrame] = None,
+    consist_plan_in: Optional[pl.DataFrame] = None,
+    loco_map: Optional[dict[str, str]] = None
 ) -> Tuple[
     pl.DataFrame,
     pl.DataFrame,
@@ -568,6 +510,8 @@ def run_train_planner(
         Source of demand data, either as DataFrame or file path
     network_charging_guidelines : Optional[pl.DataFrame]
         Guidelines for charging infrastructure by location
+    consist_plan_in : Optional[pl.DataFrame]
+        Pre-determined train consist plan, if applicable.
 
     Returns
     -------
@@ -580,114 +524,148 @@ def run_train_planner(
     """
     # Append additional locomotive info to configuration
     config.loco_info = data_prep.append_loco_info(config.loco_info)
+    freight_type_to_car_type = data_prep.get_freight_to_car_mapping(rail_vehicles)           
+    if consist_plan_in is None:
+        # Load freight demand data and get list of nodes
+        demand, node_list = data_prep.load_freight_demand(demand_file, config)
 
-    # Load freight demand data and get list of nodes
-    demand, node_list = data_prep.load_freight_demand(demand_file, config)
-
-    # Set default return demand generators if none provided
-    if config.return_demand_generators is None:
-        config.return_demand_generators = (
-            train_demand_generators.get_default_return_demand_generators()
-        )
-
-    # Create mapping from freight types to car types
-    freight_type_to_car_type = {}
-    for rv in rail_vehicles:
-        rv_dict = rv.to_pydict()
-        # Check for duplicate mappings (should not happen)
-        if rv_dict["freight_type"] in freight_type_to_car_type:
-            assert f"More than one rail vehicle car type for freight type {rv_dict['freight_type']}"
-        else:
-            # Map this freight type to its car type
-            freight_type_to_car_type[rv_dict["freight_type"]] = rv_dict["car_type"]
-
-    # Handle single train mode (simple scheduling)
-    if config.single_train_mode:
-        # Generate demand trains without returns or rebalancing
-        demand = train_demand_generators.generate_demand_trains(
-            demand,
-            demand_returns=pl.DataFrame(),
-            demand_rebalancing=pl.DataFrame(),
-            rail_vehicles=rail_vehicles,
-            config=config,
-        )
-        # Create a simple dispatch schedule with one train per day
-        dispatch_schedule = (
-            demand.with_row_index(name="index")
-            .with_columns(pl.col("index").mul(24.0).alias("Hour"))  # 24-hour intervals
-            .drop("index")
-        )
-    else:
-        # Initialize empty dataframes for return and rebalancing demand
-        demand_returns = pl.DataFrame()
-        demand_rebalancing = pl.DataFrame()
-
-        # If no dispatch scheduler is set, aggregate demand
-        if config.dispatch_scheduler is None:
-            # Define variables to group by
-            grouping_vars = ["Origin", "Destination", "Train_Type"]
-            aggregations = []
-
-            # Add optional grouping variables if present
-            if "Number_of_Days" in demand.collect_schema():
-                grouping_vars.append("Number_of_Days")
-
-            # Add aggregations for container or car counts if present
-            if "Number_of_Containers" in demand.collect_schema():
-                # Convert containers to cars
-                aggregations.append(
-                    pl.col("Number_of_Containers")
-                    .sum()
-                    .truediv(config.containers_per_car)
-                )
-            if "Number_of_Cars" in demand.collect_schema():
-                aggregations.append(pl.col("Number_of_Cars").sum())
-
-            # Group and aggregate demand
-            demand = demand.group_by(grouping_vars).agg(
-                pl.max_horizontal(aggregations).ceil().alias("Number_of_Cars")
+        # Set default return demand generators if none provided
+        if config.return_demand_generators is None:
+            config.return_demand_generators = (
+                train_demand_generators.get_default_return_demand_generators()
             )
 
-        # Generate return and rebalancing demand if not already scheduled
-        if "Hour" not in demand.schema:
-            # Generate return demand (empty cars going back)
-            demand_returns = train_demand_generators.generate_return_demand(
-                demand, config
-            )
-
-            # Generate rebalancing demand for manifest trains if needed
-            if demand.filter(pl.col("Train_Type").str.contains("Manifest")).height > 0:
-                demand_rebalancing = (
-                    train_demand_generators.generate_manifest_rebalancing_demand(
-                        demand, node_list, config
-                    )
-                )
-
-        # Set up dispatch scheduler if not provided
-        dispatch_scheduler = config.dispatch_scheduler
-        if dispatch_scheduler is None:
-            # Generate full demand including returns and rebalancing
+        # Handle single train mode (simple scheduling)
+        if config.single_train_mode:
+            # Generate demand trains without returns or rebalancing
             demand = train_demand_generators.generate_demand_trains(
                 demand,
-                demand_returns,
-                demand_rebalancing,
-                rail_vehicles,
-                freight_type_to_car_type,
-                config,
+                demand_returns=pl.DataFrame(),
+                demand_rebalancing=pl.DataFrame(),
+                rail_vehicles=rail_vehicles,
+                config=config,
             )
-            # Set default scheduler
-            dispatch_scheduler = schedulers.dispatch_uniform_demand_uniform_departure
+            # Create a simple dispatch schedule with one train per day
+            dispatch_schedule = (
+                demand.with_row_index(name="index")
+                .with_columns(pl.col("index").mul(24.0).alias("Hour"))  # 24-hour intervals
+                .drop("index")
+            )
+        else:
+            # Initialize empty dataframes for return and rebalancing demand
+            demand_returns = pl.DataFrame()
+            demand_rebalancing = pl.DataFrame()
 
-        # Create dispatch schedule using configured scheduler
-        dispatch_schedule = dispatch_scheduler(demand, rail_vehicles, freight_type_to_car_type, config)
-        # Uncomment to add random jitter to departure times
-        # dispatch_schedule = dispatch_schedule.with_columns(pl.col("Hour").add(pl.random.rand()))
+            # If no dispatch scheduler is set, aggregate demand
+            if config.dispatch_scheduler is None:
+                # Define variables to group by
+                grouping_vars = ["Origin", "Destination", "Train_Type"]
+                aggregations = []
 
-    # Create locomotive pool if not provided
-    if loco_pool is None:
-        loco_pool = data_prep.build_locopool(
-            config=config, demand_file=demand, dispatch_schedule=dispatch_schedule
+                # Add optional grouping variables if present
+                if "Number_of_Days" in demand.collect_schema():
+                    grouping_vars.append("Number_of_Days")
+
+                # Add aggregations for container or car counts if present
+                if "Number_of_Containers" in demand.collect_schema():
+                    # Convert containers to cars
+                    aggregations.append(
+                        pl.col("Number_of_Containers")
+                        .sum()
+                        .truediv(config.containers_per_car)
+                    )
+                if "Number_of_Cars" in demand.collect_schema():
+                    aggregations.append(pl.col("Number_of_Cars").sum())
+
+                # Group and aggregate demand
+                demand = demand.group_by(grouping_vars).agg(
+                    pl.max_horizontal(aggregations).ceil().alias("Number_of_Cars")
+                )
+
+            # Generate return and rebalancing demand if not already scheduled
+            if "Hour" not in demand.schema:
+                # Generate return demand (empty cars going back)
+                demand_returns = train_demand_generators.generate_return_demand(
+                    demand, config
+                )
+
+                # Generate rebalancing demand for manifest trains if needed
+                if demand.filter(pl.col("Train_Type").str.contains("Manifest")).height > 0:
+                    demand_rebalancing = (
+                        train_demand_generators.generate_manifest_rebalancing_demand(
+                            demand, node_list, config
+                        )
+                    )
+
+            # Set up dispatch scheduler if not provided
+            if config.dispatch_scheduler is None:
+                # Generate full demand including returns and rebalancing
+                demand = train_demand_generators.generate_demand_trains(
+                    demand,
+                    demand_returns,
+                    demand_rebalancing,
+                    rail_vehicles,
+                    freight_type_to_car_type,
+                    config,
+                )
+
+                # Set default scheduler
+                config.dispatch_scheduler = (
+                    schedulers.dispatch_uniform_demand_uniform_departure
+                )
+
+            # Create dispatch schedule using configured scheduler
+            dispatch_schedule = (config.dispatch_scheduler(
+                demand, rail_vehicles, freight_type_to_car_type, config)
+                .with_row_index("Train_ID", offset=1)
+            )
+            # Uncomment to add random jitter to departure times
+            # dispatch_schedule = dispatch_schedule.with_columns(pl.col("Hour").add(pl.random.rand()))
+
+        # Create locomotive pool if not provided
+        if loco_pool is None:
+            loco_pool = data_prep.build_locopool(
+                config=config, demand_file=demand, dispatch_schedule=dispatch_schedule
+            )
+        active_ods = demand.select(["Origin", "Destination"]).unique()
+    else:
+        demand = None
+        node_list = (
+            pl.concat(
+                [consist_plan_in.get_column("Origin_ID"), consist_plan_in.get_column("Destination_ID")]
+            )
+            .unique()
+            .sort()
         )
+        active_ods = consist_plan_in.select("Origin_ID", "Destination_ID").unique().rename({"Origin_ID": "Origin", "Destination_ID": "Destination"})
+        if loco_pool is None:
+            loco_pool = (consist_plan_in
+                .drop((cs.starts_with("Train_", "Destination_", "Departure_", "TrainSimVec_Index") | cs.ends_with("_Empty", "_Loaded", "_Hr", "_hr")) & (~cs.by_name("Departure_Time_Planned_Hr")))
+                .sort("Locomotive_ID", "Departure_Time_Planned_Hr")
+                .group_by(pl.all().exclude("Origin_ID", "Departure_Time_Planned_Hr"), maintain_order=True).first()
+                .drop("Departure_Time_Planned_Hr")
+                .unique()
+                .rename({"Origin_ID": "Node"})
+                .with_columns(
+                    pl.col("Locomotive_ID").cast(pl.UInt32),
+                    pl.lit("Ready").alias("Status"),
+                )
+                .pipe(data_prep.add_loco_status_columns)
+                .pipe(data_prep.loco_info_to_pool, config)
+            )
+            if loco_map is not None:
+                loco_pool = (loco_pool
+                    .with_columns(pl.col("Locomotive_Type").replace(loco_map))
+            )
+            dispatch_schedule = (consist_plan_in
+                .rename({"Origin_ID": "Origin", 
+                        "Destination_ID": "Destination",
+                        "Departure_Time_Planned_Hr": "Hour"})
+                .drop(cs.starts_with("Refuel"))
+                .group_by(~cs.starts_with("Locomotive_"))
+                    .agg(pl.col("Locomotive_ID").unique().alias("Locomotive_IDs"))
+                .with_columns(pl.sum_horizontal("Cars_Loaded", "Cars_Empty").alias("Number_of_Cars"))
+            )            
 
     # Create refuelers if not provided
     if refuelers is None:
@@ -706,7 +684,7 @@ def run_train_planner(
 
     # Apply charging guidelines to refuelers and loco_pool
     refuelers, loco_pool = data_prep.append_charging_guidelines(
-        refuelers, loco_pool, demand, network_charging_guidelines
+        refuelers, loco_pool, active_ods, network_charging_guidelines
     )
 
     # Get final departure time for simulation end
@@ -732,13 +710,7 @@ def run_train_planner(
     )
 
     # Initialize dataframe to track locomotive events
-    event_tracker = pl.DataFrame(
-        schema=[
-            ("Event_Type", pl.Utf8),
-            ("Time_Hr", pl.Float64),
-            ("Locomotive_ID", pl.UInt32),
-        ]
-    )
+    refuel_events = []
 
     # Initialize train ID counter and result lists
     train_id_counter = 1
@@ -759,19 +731,22 @@ def run_train_planner(
         # If there are trains to dispatch at this time
         if current_dispatches.height > 0:
             # Update refueling status for all locomotives
-            loco_pool, event_tracker = update_refuel_queue(
-                loco_pool, refuelers, current_time, event_tracker
+            loco_pool, refuels = update_refuel_queue(
+                loco_pool, refuelers, current_time
             )
+            refuel_events.append(refuels)
 
             # Process each train scheduled to depart at current time
             for this_train in current_dispatches.iter_rows(named=True):
                 # Only process trains with positive tonnage
-                if this_train["Tons_Per_Train"] > 0:
-                    # Generate unique train ID as string
-                    train_id = str(train_id_counter)
-
-                    # Handle locomotive selection differently in single train mode
-                    if config.single_train_mode:
+                if this_train["Number_of_Cars"] > 0:
+                    # Handle locomotive selection differently in single train mode, OR when a consist plan was provided
+                    if consist_plan_in is not None:
+                       selected = loco_pool.select(
+                           pl.col("Locomotive_ID").is_in(this_train["Locomotive_IDs"])                    
+                       ).to_series()
+                       dispatched = loco_pool.filter(selected) 
+                    elif config.single_train_mode:
                         # In single train mode, select all locomotives
                         selected = loco_pool.select(
                             pl.col("Locomotive_ID").is_not_null().alias("selected")
@@ -792,6 +767,7 @@ def run_train_planner(
                         # Filter to only selected locomotives
                         dispatched = loco_pool.filter(selected)
 
+                    # START SHARED STUFF HERE
                     # Calculate drag coefficient if configured
                     if config.drag_coeff_function is not None:
                         # Apply drag coefficient function based on number of cars
@@ -803,8 +779,12 @@ def run_train_planner(
                         cd_area_vec = None
 
                     # Configure rail vehicles for this train
-                    rv_to_use, n_cars_by_type = data_prep.configure_rail_vehicles(
-                        this_train, rail_vehicles, freight_type_to_car_type
+                    rv_to_use, n_cars_by_type = data_prep.configure_rail_vehicles(                  
+                        train_type = this_train["Train_Type"],
+                        cars_loaded = this_train["Cars_Loaded"],
+                        cars_empty = this_train["Cars_Empty"],
+                        rail_vehicles = rail_vehicles, 
+                        freight_type_to_car_type = freight_type_to_car_type
                     )
 
                     # Create train configuration
@@ -832,7 +812,7 @@ def run_train_planner(
 
                     # Calculate state of charge as percentage of capacity
                     loco_start_soc_pct = dispatched.select(
-                        pl.col("SOC_J") / pl.col("Capacity_J")
+                        (pl.col("SOC_J") / pl.col("Capacity_J")).alias("Departure_SOC_J")
                     ).to_series()
 
                     # Create list of locomotive objects from configuration
@@ -844,6 +824,15 @@ def run_train_planner(
                         .copy()
                         for loco_type in dispatched.get_column("Locomotive_Type")
                     ]
+
+                    if ("Train_Weight_tons" in this_train) or ("Train_Length_meters" in this_train):
+                        rv_to_use = data_prep.scale_rv_mass_and_length(
+                            rv_to_use,
+                            n_cars_by_type,
+                            locos,
+                            this_train["Train_Weight_tons"] * alt.utilities.KG_PER_TON,
+                            this_train["Train_Length_meters"],
+                        )
 
                     # Set state of charge for electric locomotives
                     for i, loco in enumerate(locos):
@@ -868,7 +857,7 @@ def run_train_planner(
 
                     # Create train simulation builder
                     tsb = alt.TrainSimBuilder(
-                        train_id=train_id,
+                        train_id=str(train_id_counter), # TODO: use train ID and match on it in sim_manager 
                         origin_id=this_train["Origin"],
                         destination_id=this_train["Destination"],
                         train_config=train_config,
@@ -885,6 +874,7 @@ def run_train_planner(
                     )
 
                     # Generate estimated travel times
+
                     (est_time_net, loco_con_out) = alt.make_est_times(
                         slts, network, config.failed_sim_logging_path
                     )
@@ -976,51 +966,22 @@ def run_train_planner(
                             )
                         )
                         .otherwise(pl.col("SOC_J"))
-                        .alias("SOC_J"),
+                        .alias("SOC_J")
                     )
 
-                    # Populate the output dataframe with the dispatched trains
-                    # Count how many locomotives were selected
-                    new_row_count = selected.sum()
-
                     # Create new rows for the train consist plan
-                    new_rows = pl.DataFrame(
-                        [
-                            # Train ID (same for all locomotives in this train)
-                            pl.Series(repeat(train_id_counter, new_row_count)),
-                            # Train type (same for all locomotives)
-                            pl.Series(repeat(this_train["Train_Type"], new_row_count)),
-                            # Locomotive IDs (unique per locomotive)
-                            loco_pool.filter(selected).get_column("Locomotive_ID"),
-                            # Locomotive types (unique per locomotive)
-                            loco_pool.filter(selected).get_column("Locomotive_Type"),
-                            # Origin (same for all locomotives)
-                            pl.Series(repeat(this_train["Origin"], new_row_count)),
-                            # Destination (same for all locomotives)
-                            pl.Series(repeat(this_train["Destination"], new_row_count)),
-                            # Number of loaded cars (same for all locomotives)
-                            pl.Series(repeat(this_train["Cars_Loaded"], new_row_count)),
-                            # Number of empty cars (same for all locomotives)
-                            pl.Series(repeat(this_train["Cars_Empty"], new_row_count)),
-                            # Number of loaded containers (same for all locomotives)
-                            pl.Series(
-                                repeat(this_train["Containers_Loaded"], new_row_count)
-                            ),
-                            # Number of empty containers (same for all locomotives)
-                            pl.Series(
-                                repeat(this_train["Containers_Empty"], new_row_count)
-                            ),
-                            # Starting SOC (unique per locomotive)
-                            loco_start_soc_j,
-                            # Departure time (same for all locomotives)
-                            pl.Series(repeat(current_time, new_row_count)),
-                            # Estimated arrival time (same for all locomotives)
-                            pl.Series(
-                                repeat(current_time + travel_time, new_row_count)
-                            ),
-                        ],
-                        schema=train_consist_plan.columns,
-                        orient="col",
+                    new_rows = (loco_pool
+                        .filter(selected)
+                        .select("Locomotive_ID", "Locomotive_Type")
+                        .with_columns(
+                            loco_start_soc_j.alias("Departure_SOC_J"),
+                            pl.lit(train_id_counter).alias("Train_ID"),
+                            pl.lit(current_time).alias("Departure_Time_Planned_Hr"),
+                            pl.lit(current_time + travel_time).alias("Arrival_Time_Planned_Hr")
+                        )
+                        .join(pl.DataFrame([this_train]), how="cross")
+                        .rename({"Origin": "Origin_ID", "Destination": "Destination_ID"})
+                        .select(train_consist_plan.columns)
                     )
 
                     # Add new rows to the train consist plan
@@ -1036,9 +997,10 @@ def run_train_planner(
             # Set current time to infinity to finish processing any remaining refueling
             current_time = float("inf")
             # Final update of refueling queues
-            loco_pool, event_tracker = update_refuel_queue(
-                loco_pool, refuelers, current_time, event_tracker
+            loco_pool, refuels = update_refuel_queue(
+                loco_pool, refuelers, current_time
             )
+            refuel_events.append(refuels)
             # Mark simulation as complete
             done = True
         else:
@@ -1058,32 +1020,23 @@ def run_train_planner(
             pl.col("Train_ID", "Locomotive_ID").cast(pl.UInt32),
         )
         # Sort by locomotive ID and train ID
-        .sort(["Locomotive_ID", "Train_ID"], descending=False)
+        .sort(["Train_ID", "Locomotive_ID"], descending=False)
     )
 
     # Convert categorical columns in loco_pool and refuelers to strings
     loco_pool = loco_pool.with_columns(cs.categorical().cast(str))
     refuelers = refuelers.with_columns(cs.categorical().cast(str))
 
-    # Sort event tracker by locomotive ID, time, and event type
-    event_tracker = event_tracker.sort(["Locomotive_ID", "Time_Hr", "Event_Type"])
-
-    # Extract refueling start times from event tracker
-    service_starts = (
-        event_tracker.filter(pl.col("Event_Type") == "Refueling_Start")
-        .get_column("Time_Hr")
-        .rename("Refuel_Start_Time_Planned_Hr")
-    )
-
-    # Extract refueling end times from event tracker
-    service_ends = (
-        event_tracker.filter(pl.col("Event_Type") == "Refueling_End")
-        .get_column("Time_Hr")
-        .rename("Refuel_End_Time_Planned_Hr")
-    )
-
+    refuel_events= pl.concat(refuel_events, how="diagonal_relaxed")
     # Add refueling start and end times to the train consist plan
-    train_consist_plan = train_consist_plan.with_columns(service_starts, service_ends)
+    if (consist_plan_in is None) and (refuel_events.height != train_consist_plan.height):
+        raise Exception(
+            f"Some refuel events were not accounted for."
+        )
+
+    train_consist_plan = (train_consist_plan
+        .join(refuel_events, how="left", left_on=["Locomotive_ID", "Arrival_Time_Planned_Hr"], right_on=["Locomotive_ID", "Arrival_Time"])
+    )
 
     # Return results
     return (
