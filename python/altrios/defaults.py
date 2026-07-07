@@ -18,7 +18,7 @@ DIESEL_REFUELER_COST_USD = 0.0
 BEL_CHARGE_RATE_KW = 750.0
 BEL_CHARGE_RATE_J_PER_HR = (BEL_CHARGE_RATE_KW / 1000.0 / utilities.MWH_PER_MJ) * 1e6 
 BEL_CHARGER_EFFICIENCY = 0.9
-BEL_CHARGER_COST_USD = BEL_CHARGE_RATE_KW * 1000 # NREL Cost of Charging (Borlaug) showing ~linear trend on kW; #ICCT report showing little change through 2030
+BEL_CHARGER_COST_USD = BEL_CHARGE_RATE_KW * 1000 # NLR Cost of Charging (Borlaug) showing ~linear trend on kW; #ICCT report showing little change through 2030
 BEL_CHARGER_LIFESPAN = 15
 
 BASE_ANALYSIS_YEAR = 2022
@@ -40,4 +40,4 @@ FUEL_EMISSIONS_FILE = alt.resources_root() / "metrics_inputs" / "GREET-CA_Emissi
 GRID_EMISSIONS_FILE = alt.resources_root() / "metrics_inputs" / "Cambium23_allScenarios_annual_gea.csv"
 ELECTRICITY_PRICE_FILE = alt.resources_root() / "metrics_inputs" / "EIA_Electricity_Prices.csv"
 LIQUID_FUEL_PRICE_FILE = alt.resources_root() / "metrics_inputs" / "EIA_Liquid_Fuel_Prices.csv"
-BATTERY_PRICE_FILE = alt.resources_root() / "metrics_inputs" / "NREL_ATB_Battery_Cost_Forecasts.csv"
+BATTERY_PRICE_FILE = alt.resources_root() / "metrics_inputs" / "NLR_ATB_Battery_Cost_Forecasts.csv"
