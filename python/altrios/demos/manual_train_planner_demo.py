@@ -48,7 +48,7 @@ train_planner_config = planner_config.TrainPlannerConfig()
 # from your own pre-planned source.
 print("Loading example `consist_plan_in`")
 consist_plan_in = pl.read_csv(
-    alt.resources_root() / "demo_data/manual_train_planner_demo/train_consist_plan_2.csv"
+    alt.resources_root() / "demo_data/manual_train_planner_demo/demo_train_consist_plan.csv"
 )
 
 # %%
