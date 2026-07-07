@@ -10,7 +10,7 @@ from altrios import defaults
 
 import altrios as alt
 from altrios.train_planner import planner, planner_config
-from altrios import metric_calculator as metrics 
+from altrios import metric_calculator as metrics
 
 
 def main(
