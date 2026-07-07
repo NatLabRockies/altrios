@@ -6,7 +6,7 @@ use std::io::prelude::*;
 #[serde_api]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
 #[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
-/// See [supplementary documentation.](https://nrel.github.io/altrios/doc/rail-network.html)
+/// See [supplementary documentation.](https://natlabrockies.github.io/altrios/doc/rail-network.html)
 pub struct LinkIdx {
     /// index of link within network
     idx: u32,
