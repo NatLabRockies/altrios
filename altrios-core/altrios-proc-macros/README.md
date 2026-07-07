@@ -1,6 +1,6 @@
 # altrios-proc-macros
 
-![Altrios Logo](https://raw.githubusercontent.com/NatLabRockies/altrios/main/.github/images/ALTRIOS-logo-web.jpg)
+![ALTRIOS Logo](/.github/images/ALTRIOS-logo-web.png)
 
 [![homepage](https://img.shields.io/badge/homepage-altrios-blue)](https://www.NatLabRockies.gov/transportation/altrios.html) [![rust-tests](https://github.com/NatLabRockies/altrios/actions/workflows/rust-tests.yaml/badge.svg)](https://github.com/NatLabRockies/altrios/actions/workflows/rust-tests.yaml) [![Documentation](https://img.shields.io/badge/doc-mdBook-blue.svg)](https://NatLabRockies.github.io/altrios/) [![GitHub](https://img.shields.io/badge/GitHub-altrios-blue.svg)](https://github.com/NatLabRockies/altrios)
 
