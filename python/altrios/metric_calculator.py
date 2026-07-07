@@ -23,7 +23,7 @@ liquid_fuel_prices_eia = (
     .select(["Year", "   Diesel Fuel (distillate fuel oil) 6/"])
     .rename({"   Diesel Fuel (distillate fuel oil) 6/": "Price"})
 )
-battery_prices_nrel_atb = (pl.read_csv(source=defaults.BATTERY_PRICE_FILE)).filter(
+battery_prices_nlr_atb = (pl.read_csv(source=defaults.BATTERY_PRICE_FILE)).filter(
     pl.col("Scenario") == "Moderate"
 )
 
@@ -1431,7 +1431,7 @@ def import_energy_prices_eia(
 
 
 def add_battery_costs(loco_info: pd.DataFrame, year: int) -> pd.DataFrame:
-    prices_to_use = battery_prices_nrel_atb.filter(
+    prices_to_use = battery_prices_nlr_atb.filter(
         (pl.col("Year") - pl.lit(year)).abs().min()
         == (pl.col("Year") - pl.lit(year)).abs()
     )
