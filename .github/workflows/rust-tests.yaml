@@ -18,7 +18,7 @@ on:
 
 jobs:
   test:
-    if: github.repository == 'nrel/altrios' || github.repository == 'nrel/altrios-private'
+    if: github.repository == 'natlabrockies/altrios' || github.repository == 'natlabrockies/altrios-private' || github.repository == 'natlabrockies/altrios-applied'
 
     runs-on: ubuntu-latest
 
