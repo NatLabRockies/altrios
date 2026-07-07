@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "altrios"
 version = "1.0.0"
 authors = [
-    { name = "ALTRIOS Team", email = "altrios@nrel.gov" },
+    { name = "ALTRIOS Team", email = "altrios@nlr.gov" },
     { name = "Chad Baker, Lead Developer" },
     { name = "Nick Reinicke, Developer" },
     { name = "Matt Bruchon, Developer" },
@@ -54,8 +54,8 @@ dependencies = [
 ]
 
 [project.urls]
-homepage = "https://www.nrel.gov/transportation/altrios.html"
-source = "https://github.com/NREL/altrios"
+homepage = "https://www.nlr.gov/transportation/altrios"
+source = "https://github.com/NatLabRockies/altrios"
 
 [project.optional-dependencies]
 dev = [

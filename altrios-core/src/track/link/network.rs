@@ -56,7 +56,7 @@ pub struct Link {
     /// example would be at a switch, where there would be foul links running from the switch points
     /// to the clearance point. Due to the geometric overlap of the foul links, only one may be
     /// occupied at a given time. For further explanation, see the [graphical
-    /// example](https://nrel.github.io/altrios/api-doc/rail-network.html?highlight=network#link-lockout).
+    /// example](https://natlabrockies.github.io/altrios/api-doc/rail-network.html?highlight=network#link-lockout).
     pub link_idxs_lockout: Vec<LinkIdx>,
 
     #[serde(skip)]
