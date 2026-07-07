@@ -1,6 +1,6 @@
 # Press Releases
 
-* [All Aboard! NREL Releases First Comprehensive, Open-Source Software for Freight Rail Decarbonization](https://www.nlr.gov/news/detail/program/2023/nrel-altrios-release) | National Renewable Energy Laboratory
+* [All Aboard! NREL Releases First Comprehensive, Open-Source Software for Freight Rail Decarbonization](https://www.nlr.gov/news/detail/program/2023/nrel-altrios-release) | National Laboratory of the Rockies
 
 * [SwRI helps create open-source software to assist rail industry decarbonization efforts](https://www.swri.org/press-release/swri-helps-create-open-source-software-assist-rail-industry-decarbonization-efforts) | Southwest Research Institute
 
