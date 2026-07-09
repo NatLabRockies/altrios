@@ -97,25 +97,17 @@ impl Mass for HybridLoco {
 impl LocoTrait for Box<HybridLoco> {
     fn set_curr_pwr_max_out(
         &mut self,
-        pwr_aux: Option<si::Power>,
+        pwr_aux: si::Power,
         elev_and_temp: Option<(si::Length, si::ThermodynamicTemperature)>,
         // amount of assigned train mass for this locomotive
-        train_mass_for_loco: Option<si::Mass>,
-        train_speed: Option<si::Velocity>,
+        train_mass_for_loco: si::Mass,
+        train_speed: si::Velocity,
+        // TODO: make the lookahead controls for the HEL and pipe these in
+        speed_limit_lookahead: (si::Velocity, si::Velocity),
+        elev_lookahead: (si::Length, si::Length),
         dt: si::Time,
     ) -> anyhow::Result<()> {
-        let mass_for_loco: si::Mass = train_mass_for_loco.with_context(|| {
-            format!(
-                "{}\n`train_mass_for_loco` must be provided for `HybridLoco` ",
-                format_dbg!()
-            )
-        })?;
-        let train_speed: si::Velocity = train_speed.with_context(|| {
-            format!(
-                "{}\n`train_speed` must be provided for `HybridLoco` ",
-                format_dbg!()
-            )
-        })?;
+        let mass_for_loco = train_mass_for_loco;
         match &mut self.pt_cntrl {
             HybridPowertrainControls::RGWDB(rgwb) => {
                 rgwb.state.on_time_too_short.update(*self.fc.state.engine_on.get_stale(|| format_dbg!())? && *self.fc.state.time_on.get_stale(|| format_dbg!())?
@@ -158,12 +150,8 @@ impl LocoTrait for Box<HybridLoco> {
             }
         };
 
-        self.res.set_curr_pwr_out_max(
-            dt,
-            pwr_aux.with_context(|| format!("{}\nExpected `pwr_aux` to be Some", format_dbg!()))?,
-            disch_buffer,
-            chrg_buffer,
-        )?;
+        self.res
+            .set_curr_pwr_out_max(dt, pwr_aux, disch_buffer, chrg_buffer)?;
 
         self.gen.set_cur_pwr_max_out(
             *self.fc.state.pwr_out_max.get_fresh(|| format_dbg!())?,

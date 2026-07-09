@@ -129,16 +129,18 @@ impl LocoTrait for ConventionalLoco {
     /// power that can be absorbed by the RES/battery
     fn set_curr_pwr_max_out(
         &mut self,
-        pwr_aux: Option<si::Power>,
+        pwr_aux: si::Power,
         elev_and_temp: Option<(si::Length, si::ThermodynamicTemperature)>,
-        _train_mass: Option<si::Mass>,
-        _train_speed: Option<si::Velocity>,
+        _train_mass: si::Mass,
+        _train_speed: si::Velocity,
+        _speed_limit_lookahead: (si::Velocity, si::Velocity),
+        _elev_lookahead: (si::Length, si::Length),
         dt: si::Time,
     ) -> anyhow::Result<()> {
         self.fc.set_cur_pwr_out_max(elev_and_temp, dt)?;
         self.gen.set_cur_pwr_max_out(
             *self.fc.state.pwr_out_max.get_fresh(|| format_dbg!())?,
-            Some(pwr_aux.with_context(|| format_dbg!("`pwr_aux` not provided"))?),
+            Some(pwr_aux),
         )?;
         self.edrv.set_cur_pwr_max_out(
             *self

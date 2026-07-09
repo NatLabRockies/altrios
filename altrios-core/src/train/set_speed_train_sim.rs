@@ -367,7 +367,7 @@ impl SetSpeedTrainSim {
         // )?;
         // set aux power loads.  this will be calculated in the locomotive model and be loco type dependent.
         self.loco_con.set_pwr_aux(Some(true))?;
-        let train_mass = Some(self.state.mass_compound().with_context(|| format_dbg!())?);
+        let train_mass = self.state.mass_compound().with_context(|| format_dbg!())?;
 
         let elev_and_temp: Option<(si::Length, si::ThermodynamicTemperature)> =
             if let Some(tt) = &self.temp_trace {
@@ -385,10 +385,15 @@ impl SetSpeedTrainSim {
 
         // set the max power out for the consist based on calculation of each loco state
         self.loco_con.set_curr_pwr_max_out(
-            None,
+            si::Power::ZERO,
             elev_and_temp,
             train_mass,
-            Some(*self.state.speed.get_stale(|| format_dbg!())?),
+            *self.state.speed.get_stale(|| format_dbg!())?,
+            *self
+                .state
+                .lookahead_speed_limit
+                .get_fresh(|| format_dbg!())?,
+            *self.state.lookahead_elev.get_fresh(|| format_dbg!())?,
             self.speed_trace
                 .dt(*self.state.i.get_fresh(|| format_dbg!())?),
         )?;
@@ -403,7 +408,7 @@ impl SetSpeedTrainSim {
         self.loco_con.solve_energy_consumption(
             *self.state.pwr_whl_out.get_fresh(|| format_dbg!())?,
             train_mass,
-            Some(self.speed_trace.speed[*self.state.i.get_fresh(|| format_dbg!())?]),
+            self.speed_trace.speed[*self.state.i.get_fresh(|| format_dbg!())?],
             self.speed_trace
                 .dt(*self.state.i.get_fresh(|| format_dbg!())?),
             Some(true),

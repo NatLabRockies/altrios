@@ -34,10 +34,12 @@ fn test_consist() {
     consist.set_pwr_aux(Some(true)).unwrap();
     consist
         .set_curr_pwr_max_out(
+            si::Power::ZERO,
             None,
-            None,
-            Some(5e6 * uc::LB),
-            Some(10.0 * uc::MPH),
+            5e6 * uc::LB,
+            10.0 * uc::MPH,
+            (si::Velocity::ZERO, si::Velocity::ZERO),
+            (si::Length::ZERO, si::Length::ZERO),
             1.0 * uc::S,
         )
         .unwrap();
@@ -93,8 +95,8 @@ fn test_consist() {
     consist
         .solve_energy_consumption(
             uc::W * 1e6,
-            Some(5e6 * uc::LB),
-            Some(10.0 * uc::MPH),
+            5e6 * uc::LB,
+            10.0 * uc::MPH,
             uc::S * 1.0,
             Some(true),
         )

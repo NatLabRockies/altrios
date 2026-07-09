@@ -523,10 +523,15 @@ impl SpeedLimitTrainSim {
         timer!(self
             .loco_con
             .set_curr_pwr_max_out(
-                None,
+                Default::default(),
                 elev_and_temp,
-                Some(self.state.mass_compound().with_context(|| format_dbg!())?),
-                Some(*self.state.speed.get_stale(|| format_dbg!())?),
+                self.state.mass_compound().with_context(|| format_dbg!())?,
+                *self.state.speed.get_stale(|| format_dbg!())?,
+                *self
+                    .state
+                    .lookahead_speed_limit
+                    .get_fresh(|| format_dbg!())?,
+                *self.state.lookahead_elev.get_fresh(|| format_dbg!())?,
                 *self.state.dt.get_fresh(|| format_dbg!())?,
             )
             .with_context(|| format_dbg!())?);
@@ -543,8 +548,8 @@ impl SpeedLimitTrainSim {
             .loco_con
             .solve_energy_consumption(
                 *self.state.pwr_whl_out.get_fresh(|| format_dbg!())?,
-                Some(self.state.mass_compound().with_context(|| format_dbg!())?),
-                Some(*self.state.speed.get_fresh(|| format_dbg!())?),
+                self.state.mass_compound().with_context(|| format_dbg!())?,
+                *self.state.speed.get_fresh(|| format_dbg!())?,
                 *self.state.dt.get_fresh(|| format_dbg!())?,
                 Some(true),
             )
@@ -587,6 +592,22 @@ impl SpeedLimitTrainSim {
     ) -> anyhow::Result<()> {
         let network = network.as_ref();
         let timed_path = timed_path.as_ref();
+
+        // The code below is wrong, but the idea is that you need to make two vectors:
+        // - one with offset and elevation for the entire timed_path
+        // - one with offset and speed_limit for the entire timed_path
+        // This approach might work, but it's not 100% thought through.  For example, it doesn't account for train length.
+        // Maybe we could get away with only using the speed limit at front of the train because for the xEL controls, we don't need precise knowledge of the speed limit.
+        let mut lookahead_path: Vec<(si::Length, si::Length, si::Velocity)> = vec![];
+        for tpx in timed_path {
+            let link_idx = tpx.link_idx;
+            let link = network
+                .iter()
+                .find(|&link| link.idx_curr == link_idx)
+                .with_context(|| format_dbg!())?;
+            lookahead_path.extend(link.iter().map(|));
+        }
+
         if timed_path.is_empty() {
             bail!("Timed path cannot be empty!");
         }
@@ -1055,12 +1076,14 @@ impl SpeedLimitTrainSim {
     }
 
     fn recalc_braking_points(&mut self) -> anyhow::Result<()> {
-        self.braking_points.recalc(
-            &self.state,
-            &self.fric_brake,
-            &self.train_res,
-            &self.path_tpc,
-        )
+        self.braking_points
+            .recalc(
+                &self.state,
+                &self.fric_brake,
+                &self.train_res,
+                &self.path_tpc,
+            )
+            .with_context(|| format_dbg!())
     }
 }
 

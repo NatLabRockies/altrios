@@ -48,6 +48,7 @@ impl ResMethod for Strap {
         path_tpc: &PathTpc,
         dir: &Dir,
     ) -> anyhow::Result<()> {
+        // TODO: figure out why these need `update_unchecked` and try to remove that need
         state.offset_back.update_unchecked(
             *state.offset.get_unchecked(|| format_dbg!())?
                 - *state.length.get_unchecked(|| format_dbg!())?,

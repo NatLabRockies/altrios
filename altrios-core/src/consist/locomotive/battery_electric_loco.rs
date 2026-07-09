@@ -17,7 +17,7 @@ pub struct BatteryElectricLoco {
     /// control strategy for distributing power demand between `fc` and `res`
     #[has_state]
     #[serde(default)]
-    pub pt_cntrl: BatteryPowertrainControls,
+    pub pt_cntrl: RESPowertrainControls,
     // /// field for tracking current state
     // #[serde(default)]
     // pub state: BELState,
@@ -123,60 +123,26 @@ impl SerdeAPI for BatteryElectricLoco {}
 impl LocoTrait for BatteryElectricLoco {
     fn set_curr_pwr_max_out(
         &mut self,
-        pwr_aux: Option<si::Power>,
+        pwr_aux: si::Power,
         _elev_and_temp: Option<(si::Length, si::ThermodynamicTemperature)>,
-        train_mass: Option<si::Mass>,
-        train_speed: Option<si::Velocity>,
+        mass_for_loco: si::Mass,
+        train_speed: si::Velocity,
+        speed_limit_lookahead: (si::Velocity, si::Velocity),
+        elev_lookahead: (si::Length, si::Length),
         dt: si::Time,
     ) -> anyhow::Result<()> {
-        let mass_for_loco: si::Mass = train_mass.with_context(|| {
-            format!(
-                "{}\n`train_mass_for_loco` must be provided for `BatteryElectricLoco` ",
-                format_dbg!()
+        let (disch_buffer, chrg_buffer) = self
+            .pt_cntrl
+            .get_res_buffers(
+                mass_for_loco,
+                train_speed,
+                speed_limit_lookahead,
+                elev_lookahead,
             )
-        })?;
-        let train_speed: si::Velocity = train_speed.with_context(|| {
-            format!(
-                "{}\n`train_speed` must be provided for `BatteryElectricLoco` ",
-                format_dbg!()
-            )
-        })?;
+            .with_context(|| format_dbg!())?;
 
-        let disch_buffer: si::Energy = match &self.pt_cntrl {
-            BatteryPowertrainControls::RGWDB(rgwb) => {
-                (0.5 * mass_for_loco
-                    * (rgwb
-                        .speed_soc_disch_buffer
-                        .with_context(|| format_dbg!())?
-                        .powi(typenum::P2::new())
-                        - train_speed.powi(typenum::P2::new())))
-                .max(si::Energy::ZERO)
-                    * rgwb
-                        .speed_soc_disch_buffer_coeff
-                        .with_context(|| format_dbg!())?
-            }
-        };
-        let chrg_buffer: si::Energy = match &self.pt_cntrl {
-            BatteryPowertrainControls::RGWDB(rgwb) => {
-                (0.5 * mass_for_loco
-                    * (train_speed.powi(typenum::P2::new())
-                        - rgwb
-                            .speed_soc_regen_buffer
-                            .with_context(|| format_dbg!())?
-                            .powi(typenum::P2::new())))
-                .max(si::Energy::ZERO)
-                    * rgwb
-                        .speed_soc_regen_buffer_coeff
-                        .with_context(|| format_dbg!())?
-            }
-        };
-
-        self.res.set_curr_pwr_out_max(
-            dt,
-            pwr_aux.with_context(|| anyhow!(format_dbg!("`pwr_aux` not provided")))?,
-            disch_buffer,
-            chrg_buffer,
-        )?;
+        self.res
+            .set_curr_pwr_out_max(dt, pwr_aux, disch_buffer, chrg_buffer)?;
         self.edrv.set_cur_pwr_max_out(
             *self.res.state.pwr_prop_max.get_fresh(|| format_dbg!())?,
             None,
@@ -208,70 +174,137 @@ impl LocoTrait for BatteryElectricLoco {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, IsVariant, From, TryInto)]
-pub enum BatteryPowertrainControls {
-    /// Greedily uses [ReversibleEnergyStorage] with buffers that derate charge
-    /// and discharge power inside of static min and max SOC range.  Also, includes
-    /// buffer for forcing [FuelConverter] to be active/on.
-    RGWDB(Box<RESGreedyWithDynamicBuffersBEL>),
+/// Methods for RES powertrain controls
+pub trait RESPtCntrlMethods {
+    /// Get discharge and charge buffers
+    ///
+    /// # Arguments
+    /// - `mass_for_loco`: portion of train mass assigned to this locomotive
+    /// - `train_speed`: train speed at current time
+    /// - `speed_limit_lookahead`: train  speed limit at lookahead distance
+    /// - `elev_lookahead`: elevation at front of train at lookahead distance
+    fn get_res_buffers(
+        &self,
+        mass_for_loco: si::Mass,
+        train_speed: si::Velocity,
+        speed_limit_lookahead: (si::Velocity, si::Velocity),
+        elev_lookahead: (si::Length, si::Length),
+    ) -> anyhow::Result<(si::Energy, si::Energy)>;
 }
 
-impl Default for BatteryPowertrainControls {
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, IsVariant, From, TryInto)]
+pub enum RESPowertrainControls {
+    /// Greedily uses [ReversibleEnergyStorage] with buffers that derate charge
+    /// and discharge power inside of static min and max SOC range.
+    RGWDB(Box<RESGreedyWithDynamicBuffersBEL>),
+    // TODO: implement on the HEL
+    // TODO: make another variant of this that includes lookahead for catenary
+    /// Uses [ReversibleEnergyStorage] with buffers that derate charge and
+    /// discharge power inside of static min and max SOC range.  In this
+    /// variant, all buffers are based on lookahead speed and elevation.
+    LookaheadSpeedAndElev(Box<LookaheadSpeedAndElev>),
+}
+
+impl RESPtCntrlMethods for RESPowertrainControls {
+    fn get_res_buffers(
+        &self,
+        mass_for_loco: si::Mass,
+        train_speed: si::Velocity,
+        speed_limit_lookahead: (si::Velocity, si::Velocity),
+        elev_lookahead: (si::Length, si::Length),
+    ) -> anyhow::Result<(si::Energy, si::Energy)> {
+        let (disch_buffer, chrg_buffer) = match &self {
+            RESPowertrainControls::RGWDB(rgwdb) => rgwdb
+                .get_res_buffers(
+                    mass_for_loco,
+                    train_speed,
+                    speed_limit_lookahead,
+                    elev_lookahead,
+                )
+                .with_context(|| format_dbg!())?,
+            RESPowertrainControls::LookaheadSpeedAndElev(lase) => lase
+                .get_res_buffers(
+                    mass_for_loco,
+                    train_speed,
+                    speed_limit_lookahead,
+                    elev_lookahead,
+                )
+                .with_context(|| format_dbg!())?,
+        };
+
+        Ok((disch_buffer, chrg_buffer))
+    }
+}
+
+impl Default for RESPowertrainControls {
     fn default() -> Self {
         Self::RGWDB(Default::default())
     }
 }
 
-impl Init for BatteryPowertrainControls {
+impl Init for RESPowertrainControls {
     fn init(&mut self) -> Result<(), Error> {
         match self {
             Self::RGWDB(rgwb) => rgwb.init()?,
+            Self::LookaheadSpeedAndElev(lase) => lase.init()?,
         }
         Ok(())
     }
 }
 
-impl SetCumulative for BatteryPowertrainControls {
+impl SetCumulative for RESPowertrainControls {
     fn set_cumulative<F: Fn() -> String>(&mut self, dt: si::Time, loc: F) -> anyhow::Result<()> {
         match self {
             Self::RGWDB(rgwdb) => {
                 rgwdb.set_cumulative(dt, || format!("{}\n{}", loc(), format_dbg!()))?
             }
-        }
-        Ok(())
-    }
-}
-
-impl Step for BatteryPowertrainControls {
-    fn step<F: Fn() -> String>(&mut self, loc: F) -> anyhow::Result<()> {
-        match self {
-            Self::RGWDB(rgwdb) => rgwdb.step(|| format!("{}\n{}", loc(), format_dbg!()))?,
-        }
-        Ok(())
-    }
-}
-
-impl SaveState for BatteryPowertrainControls {
-    fn save_state<F: Fn() -> String>(&mut self, loc: F) -> anyhow::Result<()> {
-        match self {
-            Self::RGWDB(rgwdb) => rgwdb.save_state(|| format!("{}\n{}", loc(), format_dbg!()))?,
-        }
-        Ok(())
-    }
-}
-
-impl CheckAndResetState for BatteryPowertrainControls {
-    fn check_and_reset<F: Fn() -> String>(&mut self, loc: F) -> anyhow::Result<()> {
-        match self {
-            Self::RGWDB(rgwdb) => {
-                rgwdb.check_and_reset(|| format!("{}\n{}", loc(), format_dbg!()))?
+            Self::LookaheadSpeedAndElev(lase) => {
+                lase.set_cumulative(dt, || format!("{}\n{}", loc(), format_dbg!()))?
             }
         }
         Ok(())
     }
 }
 
-impl StateMethods for BatteryPowertrainControls {}
+impl Step for RESPowertrainControls {
+    fn step<F: Fn() -> String>(&mut self, loc: F) -> anyhow::Result<()> {
+        match self {
+            Self::RGWDB(rgwdb) => rgwdb.step(|| format!("{}\n{}", loc(), format_dbg!()))?,
+            Self::LookaheadSpeedAndElev(lase) => {
+                lase.step(|| format!("{}\n{}", loc(), format_dbg!()))?
+            }
+        }
+        Ok(())
+    }
+}
+
+impl SaveState for RESPowertrainControls {
+    fn save_state<F: Fn() -> String>(&mut self, loc: F) -> anyhow::Result<()> {
+        match self {
+            Self::RGWDB(rgwdb) => rgwdb.save_state(|| format!("{}\n{}", loc(), format_dbg!()))?,
+            Self::LookaheadSpeedAndElev(lase) => {
+                lase.save_state(|| format!("{}\n{}", loc(), format_dbg!()))?
+            }
+        }
+        Ok(())
+    }
+}
+
+impl CheckAndResetState for RESPowertrainControls {
+    fn check_and_reset<F: Fn() -> String>(&mut self, loc: F) -> anyhow::Result<()> {
+        match self {
+            Self::RGWDB(rgwdb) => {
+                rgwdb.check_and_reset(|| format!("{}\n{}", loc(), format_dbg!()))?
+            }
+            Self::LookaheadSpeedAndElev(lase) => {
+                lase.check_and_reset(|| format!("{}\n{}", loc(), format_dbg!()))?
+            }
+        }
+        Ok(())
+    }
+}
+
+impl StateMethods for RESPowertrainControls {}
 
 /// Greedily uses [ReversibleEnergyStorage] with buffers that derate charge
 /// and discharge power inside of static min and max SOC range.  Also, includes
@@ -298,6 +331,40 @@ pub struct RESGreedyWithDynamicBuffersBEL {
     #[serde(default)]
     /// history of current state
     pub history: RGWDBStateBELHistoryVec,
+}
+
+impl RESPtCntrlMethods for RESGreedyWithDynamicBuffersBEL {
+    fn get_res_buffers(
+        &self,
+        mass_for_loco: si::Mass,
+        train_speed: si::Velocity,
+        _speed_limit_lookahead: (si::Velocity, si::Velocity),
+        _elev_lookahead: (si::Length, si::Length),
+    ) -> anyhow::Result<(si::Energy, si::Energy)> {
+        let disch_buffer: si::Energy = (0.5
+            * mass_for_loco
+            * (self
+                .speed_soc_disch_buffer
+                .with_context(|| format_dbg!())?
+                .powi(typenum::P2::new())
+                - train_speed.powi(typenum::P2::new())))
+        .max(si::Energy::ZERO)
+            * self
+                .speed_soc_disch_buffer_coeff
+                .with_context(|| format_dbg!())?;
+        let chrg_buffer: si::Energy = (0.5
+            * mass_for_loco
+            * (train_speed.powi(typenum::P2::new())
+                - self
+                    .speed_soc_regen_buffer
+                    .with_context(|| format_dbg!())?
+                    .powi(typenum::P2::new())))
+        .max(si::Energy::ZERO)
+            * self
+                .speed_soc_regen_buffer_coeff
+                .with_context(|| format_dbg!())?;
+        Ok((disch_buffer, chrg_buffer))
+    }
 }
 
 #[pyo3_api]
@@ -339,3 +406,72 @@ impl RGWDBStateBEL {}
 
 impl Init for RGWDBStateBEL {}
 impl SerdeAPI for RGWDBStateBEL {}
+
+/// Uses [ReversibleEnergyStorage] with buffers that derate charge and discharge
+/// power inside of static min and max SOC range.  All buffers are based on
+/// lookahead speed and elevation.
+#[serde_api]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default, StateMethods, SetCumulative)]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[non_exhaustive]
+pub struct LookaheadSpeedAndElev {
+    /// Coefficient for modifying amount of accel buffer
+    pub speed_soc_disch_buffer_coeff: Option<si::Ratio>,
+    /// Coefficient for modifying amount of regen buffer
+    pub speed_soc_regen_buffer_coeff: Option<si::Ratio>,
+    #[serde(default)]
+    pub state: LookaheadSpeedAndElevStateBEL,
+    #[serde(default)]
+    /// history of current state
+    pub history: LookaheadSpeedAndElevStateBELHistoryVec,
+}
+
+impl RESPtCntrlMethods for LookaheadSpeedAndElev {
+    fn get_res_buffers(
+        &self,
+        mass_for_loco: si::Mass,
+        train_speed: si::Velocity,
+        speed_limit_lookahead: (si::Velocity, si::Velocity),
+        elev_lookahead: (si::Length, si::Length),
+    ) -> anyhow::Result<(si::Energy, si::Energy)> {
+        todo!("Steven should populate this method")
+    }
+}
+
+#[pyo3_api]
+impl LookaheadSpeedAndElev {}
+
+impl Init for LookaheadSpeedAndElev {
+    fn init(&mut self) -> Result<(), Error> {
+        init_opt_default!(self, speed_soc_disch_buffer_coeff, 1.0 * uc::R);
+        init_opt_default!(self, speed_soc_regen_buffer_coeff, 1.0 * uc::R);
+        Ok(())
+    }
+}
+impl SerdeAPI for LookaheadSpeedAndElev {}
+
+#[serde_api]
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    Deserialize,
+    Serialize,
+    PartialEq,
+    HistoryVec,
+    StateMethods,
+    SetCumulative,
+)]
+#[serde(default)]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+/// State for [LookaheadSpeedAndElev ]
+pub struct LookaheadSpeedAndElevStateBEL {
+    /// time step index
+    pub i: TrackedState<usize>,
+}
+
+#[pyo3_api]
+impl LookaheadSpeedAndElevStateBEL {}
+
+impl Init for LookaheadSpeedAndElevStateBEL {}
+impl SerdeAPI for LookaheadSpeedAndElevStateBEL {}
