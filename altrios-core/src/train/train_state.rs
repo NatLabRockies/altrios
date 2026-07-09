@@ -257,7 +257,7 @@ impl TrainState {
     /// All base, freight, and rotational mass
     pub fn mass_compound(&self) -> anyhow::Result<si::Mass> {
         Ok(self
-            .mass() 
+            .mass()
             .with_context(|| format_dbg!())? // extract result
             .with_context(|| format!("{}\nExpected `Some`", format_dbg!()))? // extract option
             + *self.mass_rot.get_unchecked(|| format_dbg!())?)

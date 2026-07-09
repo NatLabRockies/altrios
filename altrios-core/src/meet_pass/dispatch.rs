@@ -83,7 +83,7 @@ fn check_deadlock(
     // Swap link idxs blocked back into train disp moved
     train_disps[train_idx_moved.idx()].swap_link_idxs_blocking(&mut link_idxs_blocked);
 
-    if errors.len() > 0 {
+    if !errors.is_empty() {
         Err(errors)
     } else {
         Ok((has_deadlock, train_idx_begin))

@@ -99,6 +99,74 @@ pub fn check_od_pair_valid(
     }
 }
 
+/// Collect previous links needed to accommodate train length when placing train at origin.
+///
+/// When a train is placed at an origin link, the back of the train may extend beyond
+/// the beginning of that link. This function collects previous links until there is
+/// enough total length to contain the entire train, or returns an error if the train
+/// is too long to fit on the available track.
+///
+/// # Arguments
+/// * `origin_link_idx` - The link where the train's front will be placed
+/// * `train_length` - The total length of the train
+/// * `network` - The network of links
+///
+/// # Returns
+/// A vector of link indices starting from the furthest previous link and ending with
+/// the origin link, ordered so the train can be placed with its front at the origin.
+fn get_links_for_train_placement(
+    origin_link_idx: LinkIdx,
+    train_length: si::Length,
+    network: &[Link],
+) -> anyhow::Result<Vec<LinkIdx>> {
+    let origin_link = &network[origin_link_idx.idx()];
+
+    // If the train fits on the origin link alone, just return it
+    if origin_link.length >= train_length {
+        return Ok(vec![origin_link_idx]);
+    }
+
+    // We need to collect previous links to accommodate the train
+    let mut link_path = Vec::with_capacity(8);
+    link_path.push(origin_link_idx);
+
+    let mut total_length = origin_link.length;
+    let mut current_link_idx = origin_link_idx;
+
+    // Keep adding previous links until we have enough length
+    while total_length < train_length {
+        let current_link = &network[current_link_idx.idx()];
+
+        // Get the previous link (prefer idx_prev over idx_prev_alt)
+        let prev_link_idx = if current_link.idx_prev.is_real() {
+            current_link.idx_prev
+        } else if current_link.idx_prev_alt.is_real() {
+            current_link.idx_prev_alt
+        } else {
+            // No more previous links available
+            bail!(
+                "Train too long for initial route: train length ({:.2} m) exceeds available \
+                track length ({:.2} m). The origin link '{}' and its previous links do not \
+                provide enough length to place the train. Consider using a different origin \
+                or reducing train length.",
+                train_length.get::<si::meter>(),
+                total_length.get::<si::meter>(),
+                origin_link_idx
+            );
+        };
+
+        let prev_link = &network[prev_link_idx.idx()];
+        total_length += prev_link.length;
+        link_path.push(prev_link_idx);
+        current_link_idx = prev_link_idx;
+    }
+
+    // Reverse the path so it goes from previous links to origin
+    link_path.reverse();
+
+    Ok(link_path)
+}
+
 /// Get link indexes that lead to the destination (CURRENTLY ALLOWS LOOPS THAT
 /// ARE TOO SMALL TO FIT THE TRAIN!)
 pub fn get_link_idx_options(
@@ -514,11 +582,11 @@ fn add_new_join_paths(
 /// # Arguments
 ///
 /// * `speed_limit_train_sim` - `SpeedLimitTrainSim` is an instance of
-///    train simulation in which speed is allowed to vary according to train
-///    capabilities and speed limit.
+///   train simulation in which speed is allowed to vary according to train
+///   capabilities and speed limit.
 /// * `network` - Network comprises an ensemble of links (path between junctions
-///    along the rail with heading, grade, and location) this simulation
-///    operates on.
+///   along the rail with heading, grade, and location) this simulation
+///   operates on.
 /// * `path_for_failed_sim` - if provided, saves failed `speed_limit_train_sim` at Path
 ///
 /// # Returns
@@ -637,8 +705,12 @@ pub fn make_est_times<N: AsRef<[Link]>>(
         saved_sims.push(SavedSim {
             train_sim: {
                 let mut train_sim = Box::new(speed_limit_train_sim.clone());
+                // Get the links needed to place the train (may include previous links if train is longer than origin link)
+                let train_length = *train_sim.state.length.get_fresh(|| format_dbg!())?;
+                let link_path = get_links_for_train_placement(orig.link_idx, train_length, network)
+                    .with_context(|| format_dbg!())?;
                 train_sim
-                    .extend_path_tpc(network, &[orig.link_idx])
+                    .extend_path_tpc(network, &link_path)
                     .with_context(|| format_dbg!())?;
                 train_sim
             },
@@ -908,4 +980,148 @@ pub fn make_est_times_py(
     };
 
     make_est_times(speed_limit_train_sim, network, path_for_failed_sim)
+}
+
+#[cfg(test)]
+mod test_train_placement {
+    use super::*;
+    use crate::track::link::network::Network;
+
+    /// Helper function to get the project resources path
+    fn get_resources_path() -> PathBuf {
+        project_root::get_project_root()
+            .unwrap()
+            .join("python/altrios/resources")
+    }
+
+    /// Test case 1: get_links_for_train_placement returns single link when train fits
+    /// Link 71 (Minneapolis origin) is ~2682m, train is 1800m - should return just the origin link.
+    #[test]
+    fn test_get_links_for_train_placement_fits_on_single_link() {
+        let resources = get_resources_path();
+
+        // Load network
+        let network = Network::from_file(resources.join("networks/Taconite-NoBalloon.yaml"), false)
+            .expect("Failed to load network");
+        let links = &network.1; // Get the Vec<Link> from the Network tuple
+
+        let origin_link_idx = LinkIdx::new(71); // Minneapolis
+        let train_length = 1800.0 * uc::M; // 100 cars * 18m
+
+        let result = get_links_for_train_placement(origin_link_idx, train_length, links);
+
+        assert!(
+            result.is_ok(),
+            "Should succeed when train fits on origin link"
+        );
+        let link_path = result.unwrap();
+        assert_eq!(link_path.len(), 1, "Should return just the origin link");
+        assert_eq!(
+            link_path[0], origin_link_idx,
+            "Should return the origin link"
+        );
+    }
+
+    /// Test case 2: Train longer than initial link with no previous links available
+    /// Link 71 (Minneapolis origin) has idx_prev: 0, so a train longer than 2682m should fail.
+    #[test]
+    fn test_get_links_for_train_placement_too_long_no_previous() {
+        let resources = get_resources_path();
+
+        // Load network
+        let network = Network::from_file(resources.join("networks/Taconite-NoBalloon.yaml"), false)
+            .expect("Failed to load network");
+        let links = &network.1;
+
+        let origin_link_idx = LinkIdx::new(71); // Minneapolis
+        let train_length = 3000.0 * uc::M; // Longer than the ~2682m link
+
+        let result = get_links_for_train_placement(origin_link_idx, train_length, links);
+
+        assert!(
+            result.is_err(),
+            "Should fail when train is too long and no previous links available"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Train too long"),
+            "Error should mention 'Train too long', got: {}",
+            err_msg
+        );
+    }
+
+    /// Test case 3: Very long train (500 cars = 9000m)
+    /// Should definitely fail as there's not enough track.
+    #[test]
+    fn test_get_links_for_train_placement_500_cars() {
+        let resources = get_resources_path();
+
+        // Load network
+        let network = Network::from_file(resources.join("networks/Taconite-NoBalloon.yaml"), false)
+            .expect("Failed to load network");
+        let links = &network.1;
+
+        let origin_link_idx = LinkIdx::new(71); // Minneapolis
+        let train_length = 9000.0 * uc::M; // 500 cars * 18m
+
+        let result = get_links_for_train_placement(origin_link_idx, train_length, links);
+
+        assert!(result.is_err(), "500-car train should fail");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Train too long"),
+            "Error should mention 'Train too long', got: {}",
+            err_msg
+        );
+    }
+
+    /// Test case 4: Train that needs previous links should collect them correctly
+    /// Find a link in the network that has previous links and test that it collects them.
+    #[test]
+    fn test_get_links_for_train_placement_uses_previous_links() {
+        let resources = get_resources_path();
+
+        // Load network
+        let network = Network::from_file(resources.join("networks/Taconite-NoBalloon.yaml"), false)
+            .expect("Failed to load network");
+        let links = &network.1;
+
+        // Link 70 has idx_prev: 71 (based on the network structure)
+        // Let's check if we can find a link with previous links
+        let origin_link_idx = LinkIdx::new(70);
+        let origin_link = &links[origin_link_idx.idx()];
+
+        // Skip this test if link 70 doesn't have a valid previous link
+        if !origin_link.idx_prev.is_real() {
+            println!("Skipping test: Link 70 has no previous links");
+            return;
+        }
+
+        // Create a train that's longer than link 70 but shorter than link 70 + its previous links
+        let train_length = origin_link.length + 100.0 * uc::M;
+
+        let result = get_links_for_train_placement(origin_link_idx, train_length, links);
+
+        // If the previous links have enough length, this should succeed and return multiple links
+        if result.is_ok() {
+            let link_path = result.unwrap();
+            assert!(
+                link_path.len() >= 2,
+                "Should return at least 2 links when train is longer than origin"
+            );
+            assert_eq!(
+                *link_path.last().unwrap(),
+                origin_link_idx,
+                "Last link should be origin"
+            );
+        } else {
+            // If it fails, it should be because of insufficient track length
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("Train too long"),
+                "If it fails, error should mention 'Train too long', got: {}",
+                err_msg
+            );
+        }
+    }
 }

@@ -275,7 +275,11 @@ impl SerdeAPI for ReversibleEnergyStorage {
             Ok(network) => network,
             Err(err) => res_legacy::ReversibleEnergyStorageLegacy::from_file(filepath, false)
                 .map_err(|old_err| {
-                    Error::SerdeError(format!("\nattempting to load as `ReversibleEnergyStorage`:\n{}\nattempting to load as `ReversibleEnergyStorageLegacy`:\n{}", err, old_err))
+                    Error::SerdeError(
+                        format!(
+                            "\nattempting to load as `ReversibleEnergyStorage`:\n{err}\nattempting to load as `ReversibleEnergyStorageLegacy`:\n{old_err}"
+                        )
+                    )
                 })?
                 .into(),
         };

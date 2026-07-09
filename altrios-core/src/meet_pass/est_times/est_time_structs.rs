@@ -57,11 +57,14 @@ impl SavedSim {
     /// Step the train sim forward and save appropriate state data in the movement
     pub fn update_movement(&mut self, movement: &mut Vec<SimpleState>) -> anyhow::Result<()> {
         let condition = |train_sim: &mut SpeedLimitTrainSim| -> anyhow::Result<bool> {
-            let (_, speed_target) = train_sim.braking_points.calc_speeds(
-                *train_sim.state.offset.get_fresh(|| format_dbg!())?,
-                *train_sim.state.speed.get_fresh(|| format_dbg!())?,
-                train_sim.fric_brake.ramp_up_time * train_sim.fric_brake.ramp_up_coeff,
-            );
+            let (_, speed_target) = train_sim
+                .braking_points
+                .calc_speeds(
+                    *train_sim.state.offset.get_fresh(|| format_dbg!())?,
+                    *train_sim.state.speed.get_fresh(|| format_dbg!())?,
+                    train_sim.fric_brake.ramp_up_time * train_sim.fric_brake.ramp_up_coeff,
+                )
+                .with_context(|| format_dbg!())?;
             Ok(speed_target > si::Velocity::ZERO
                 || (
                     train_sim.is_finished()

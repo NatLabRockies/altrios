@@ -33,8 +33,8 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
 ]
 dependencies = [
-    "pandas>=2",
-    "numpy~=1.24",
+    "numpy>=1.24, <=2.3.2",
+    "pandas>=2.1.2",
     "pymoo==0.6",
     "openpyxl",
     "xlrd",
@@ -62,8 +62,9 @@ dev = [
     "pytest~=8.3",
     "maturin~=1.8",
     "python-lsp-server~=1.10",
-    "ruff~=0.9",
-    "pylsp-mypy~=0.7.0",
+    "pylsp-mypy>=0.7.0",
+    "pylsp-rope>=0.1.17",
+    "ruff>=0.11.3",
     "memory_profiler~=0.61.0",
     "mypy>=1.15.0",
 ]
@@ -100,10 +101,94 @@ dev = { features = ["dev"], solve-group = "default" }
 
 [tool.pixi.tasks]
 cargo_test = "cargo test"
-py_test = "maturin develop --release && pixi run -e dev pytest -v"
+py_test = "pixi run -e dev maturin develop --release && pixi run -e dev pytest -v"
 build_and_test = { depends-on = ["cargo_test", "py_test"] }
 
 fmt = "ruff"
 lint = "pylint"
 style = { depends-on = ["fmt", "lint"] }
+
+[tool.ruff]
+# Specify Python version
+target-version = "py311"
+# Maximum line length
+line-length = 100
+# Exclude specific paths
+exclude = [
+    "site-packages" # Ignore all errors in site-packages
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["altrios"]
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint]
+preview = true
+select = [
+  "A", # flake8-builtins
+  "ARG", # flake8-unused-arguments
+  # "B", # flake8-bugbear
+  "C", # Pylint: Convention
+  "C4", # flake8-comprehensions
+  "C90", # mccabe
+  "COM", # flake8-commas
+  "D", # pydocstyle
+  "E", # Error
+  "F", # Pyflakes
+  "G", # flake8-logging-format
+  "I", # isort
+  "LOG", # flake8-logging
+  "N", # pep8-naming
+  "NPY", # numpy-specific
+  "PERF", # Perflint
+  # "PL", # Pylint
+  "Q", # flake8-quotes
+  "SIM", # flake8-simplify
+  # "TID", # flake8-tidy-imports (absolute imports)
+  "UP", # pyupgrade
+  "W" # Warning
+]
+ignore = [
+  "D400", # first-line-should-end-with-a-period
+  "E266", # Too many leading `#`
+  "N817", # CamelCase `LatinHypercubeSampling` imported as acronym `LHS`
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+# https://mypy.readthedocs.io/en/stable/config_file.html
+# https://mypy.readthedocs.io/en/stable/config_file.html#example-pyproject-toml
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+allow_redefinition = true
+exclude = [
+    # '^file1\.py$',  # TOML literal string (single-quotes, no escaping necessary)
+    # "^file2\\.py$",  # TOML basic string (double-quotes, backslash and other characters need escaping)
+]
+
+# mypy per-module options:
+
+# [[tool.mypy.overrides]]
+# module = "mycode.foo.*"
+# disallow_untyped_defs = true
+
+# [[tool.mypy.overrides]]
+# module = "mycode.bar"
+# warn_return_any = false
+
+[[tool.mypy.overrides]]
+module = [
+    "pymoo.*",
+]
+ignore_missing_imports = true
 

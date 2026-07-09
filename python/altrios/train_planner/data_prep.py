@@ -237,7 +237,7 @@ def build_locopool(
                 .mean()
             ) / config.containers_per_car
         else:
-            raise KeyError("No valid columns in demand DataFrame")
+            raise Exception("No valid columns in demand DataFrame")
         if config.single_train_mode:
             initial_size = math.ceil(cars_per_od / min(config.cars_per_locomotive.values()))
             rows = initial_size
@@ -507,28 +507,29 @@ def configure_rail_vehicles(
     single_train_dispatch: Dict,
     available_rail_vehicles: List[alt.RailVehicle],
     freight_type_to_car_type: Dict,
-) -> (List[alt.RailVehicle], Dict[str, int]):
+) -> (list[alt.RailVehicle], dict[str, int]):
     freight_types = []
     n_cars_by_type = {}
     this_train_type = single_train_dispatch["Train_Type"]
     if single_train_dispatch["Cars_Loaded"] > 0:
         freight_type = f"{this_train_type}_Loaded"
         freight_types.append(freight_type)
-        car_type = None
         if freight_type in freight_type_to_car_type:
             car_type = freight_type_to_car_type[freight_type]
         else:
-            raise ValueError(f"Rail vehicle car type not found for freight type {freight_type}.")
+            raise Exception(f"Rail vehicle car type not found for freight type {freight_type}.")
         n_cars_by_type[car_type] = int(single_train_dispatch["Cars_Loaded"])
     if single_train_dispatch["Cars_Empty"] > 0:
         freight_type = f"{this_train_type}_Empty"
         freight_types.append(freight_type)
-        car_type = None
         if freight_type in freight_type_to_car_type:
             car_type = freight_type_to_car_type[freight_type]
         else:
-            raise ValueError(f"Rail vehicle car type not found for freight type {freight_type}.")
+            raise Exception(f"Rail vehicle car type not found for freight type {freight_type}.")
         n_cars_by_type[car_type] = int(single_train_dispatch["Cars_Empty"])
+
+    assert len(n_cars_by_type) > 0, \
+        "`single_train_dispatch[\"Cars_Loaded\"]` and `single_train_dispatch[\"Cars_Empty\"]` are both zero"
 
     rv_to_use = [
         vehicle

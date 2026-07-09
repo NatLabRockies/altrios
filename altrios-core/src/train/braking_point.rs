@@ -32,6 +32,15 @@ pub struct BrakingPoints {
     points: Vec<BrakingPoint>,
     /// index within [Self::points]
     idx_curr: usize,
+    /// tolerance above speed limit for speed limit violations -- i.e. if the
+    /// speed limit is 30 mph and `speed_limit_tol` is 10 mph (the default),
+    /// then the allowed speed limit when checking is 40 mph
+    #[serde(default = "def_speed_lim_tol")]
+    speed_limit_tol: si::Velocity,
+}
+
+fn def_speed_lim_tol() -> si::Velocity {
+    10.0 * uc::MPH
 }
 
 impl Init for BrakingPoints {}
@@ -45,13 +54,13 @@ impl BrakingPoints {
     /// - offset: location along the current TPC path since train started moving
     /// - speed: current train speed
     /// - adj_ramp_up_time: corrected ramp up time to account for approximately
-    ///     linear brake build up
+    ///   linear brake build up
     pub fn calc_speeds(
         &mut self,
         offset: si::Length,
         speed: si::Velocity,
         adj_ramp_up_time: si::Time,
-    ) -> (si::Velocity, si::Velocity) {
+    ) -> anyhow::Result<(si::Velocity, si::Velocity)> {
         if self.points.first().unwrap().offset <= offset {
             self.idx_curr = 0;
         } else {
@@ -59,8 +68,8 @@ impl BrakingPoints {
                 self.idx_curr -= 1;
             }
         }
-        assert!(
-            speed <= self.points[self.idx_curr].speed_limit,
+        ensure!(
+            speed <= self.points[self.idx_curr].speed_limit + self.speed_limit_tol,
             "Speed limit violated! idx_curr={:?}, offset={:?}, speed={speed:?}, speed_limit={:?}, speed_target={:?}",
             self.idx_curr,
             self.points[self.idx_curr].offset,
@@ -78,7 +87,7 @@ impl BrakingPoints {
             idx -= 1;
         }
 
-        (self.points[self.idx_curr].speed_limit, speed_target)
+        Ok((self.points[self.idx_curr].speed_limit, speed_target))
     }
 
     /// Any time [PathTpc] is updated, everything is recalculated
@@ -90,38 +99,47 @@ impl BrakingPoints {
         path_tpc: &PathTpc,
     ) -> anyhow::Result<()> {
         self.points.clear();
+
         self.points.push(BrakingPoint {
             offset: path_tpc.offset_end(),
+
             ..Default::default()
         });
 
         let mut train_state = train_state.clone();
+
         let mut train_res = train_res.clone();
+
         // `update_unchecked` is needed here because `solve_required_pwr` also calls this
+
         train_state
             .offset
             .update_unchecked(path_tpc.offset_end(), || format_dbg!())?;
+
         train_state
             .speed
             .update_unchecked(si::Velocity::ZERO, || format_dbg!())?;
+
         train_res.update_res(&mut train_state, path_tpc, &Dir::Unk)?;
+
         let speed_points = path_tpc.speed_points();
+
         let mut idx = path_tpc.speed_points().len();
 
         // Iterate backwards through all the speed points
+
         while 0 < idx {
             idx -= 1;
+
             if speed_points[idx].speed_limit.abs() > self.points.last().unwrap().speed_limit {
                 // Iterate until breaking through the speed limit curve
                 loop {
                     let bp_curr = *self.points.last().unwrap();
-
                     // Update speed limit
                     while bp_curr.offset <= speed_points[idx].offset {
                         idx -= 1;
                     }
                     let speed_limit = speed_points[idx].speed_limit.abs();
-
                     train_state
                         .offset
                         .update_unchecked(bp_curr.offset, || format_dbg!())?;
@@ -129,7 +147,6 @@ impl BrakingPoints {
                         .speed
                         .update_unchecked(bp_curr.speed_limit, || format_dbg!())?;
                     train_res.update_res(&mut train_state, path_tpc, &Dir::Bwd)?;
-
                     ensure!(
                         fric_brake.force_max + train_state.res_net()? > si::Force::ZERO,
                         format!(
@@ -160,7 +177,6 @@ impl BrakingPoints {
                     let vel_change = *train_state.dt.get_fresh(|| format_dbg!())?
                         * (fric_brake.force_max + train_state.res_net()?)
                         / train_state.mass_compound().with_context(|| format_dbg!())?;
-
                     // exit after adding a couple of points if the next braking curve point will exceed the speed limit
                     if speed_limit < bp_curr.speed_limit + vel_change {
                         self.points.push(BrakingPoint {
@@ -182,13 +198,13 @@ impl BrakingPoints {
                             speed_target: bp_curr.speed_target,
                         });
                     }
-
                     // Exit if the braking point passed the beginning of the path
                     if self.points.last().unwrap().offset < path_tpc.offset_begin() {
                         break;
                     }
                 }
             }
+
             self.points.push(BrakingPoint {
                 offset: speed_points[idx].offset,
                 speed_limit: speed_points[idx].speed_limit.abs(),
@@ -197,6 +213,7 @@ impl BrakingPoints {
         }
 
         self.idx_curr = self.points.len() - 1;
+
         Ok(())
     }
 }

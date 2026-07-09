@@ -1014,7 +1014,7 @@ pub fn run_speed_limit_train_sims(
                     })?;
                 let _ = sim
                     .walk_timed_path(&network, &timed_paths[idx])
-                    .map_err(|err| err.context(format!("train sim idx: {}", idx)));
+                    .map_err(|err| err.context(format!("train sim idx: {idx}")));
 
                 let mut new_soc_vec: Vec<f64> = vec![];
                 sim.loco_con
