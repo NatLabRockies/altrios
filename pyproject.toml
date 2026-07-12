@@ -51,6 +51,9 @@ dependencies = [
     "ipykernel~=6.29",
     "executing~=2.0",
     "pip",
+    "pyomo>=6.9",
+    "highspy>=1.11",
+    "scipy>=1.11",
 ]
 
 [project.urls]

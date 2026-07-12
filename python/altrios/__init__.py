@@ -14,6 +14,7 @@ from altrios.loaders.powertrain_components import _res_from_excel
 from altrios.utilities import copy_demo_files  # noqa: F401
 from altrios.utilities import package_root, resources_root  # noqa: F401
 from altrios import utilities as utils  # noqa: F401
+from altrios import energization  # noqa: F401
 
 # make everything in altrios_pyo3 available here
 from altrios.altrios_pyo3 import *  # noqa: F403

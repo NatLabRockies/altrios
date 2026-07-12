@@ -87,16 +87,15 @@ train_sim_without_cat2: alt.SpeedLimitTrainSim = tsb2.make_speed_limit_train_sim
 train_sim_without_cat2.set_save_interval(SAVE_INTERVAL)
 est_time_net_2, _consist = alt.make_est_times(train_sim_without_cat2, network_without_catenary)
 uniform_power_limit_watts=50_000_000.0
-# network_with_catenary = alt.utils.add_catenary_high_grade(
+# network_with_catenary = alt.energization.energize_high_grade(
 #     network,
 #     uniform_power_limit_watts,
 #     grade_threshold = 0.007
 # )
-network_with_catenary = alt.utils.add_catenary_even_spacing(
+network_with_catenary = alt.energization.energize_even_spacing(
     network,
     uniform_power_limit_watts,
     spacing_meters = (30_000.00, 30_000.00),
-    est_time_nets=[est_time_net_1],# est_time_net_2],
 )
 timed_link_path = next(
     iter(

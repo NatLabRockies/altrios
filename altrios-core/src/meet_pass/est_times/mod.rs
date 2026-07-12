@@ -99,8 +99,24 @@ pub fn check_od_pair_valid(
     }
 }
 
-/// Get link indexes that lead to the destination (CURRENTLY ALLOWS LOOPS THAT
-/// ARE TOO SMALL TO FIT THE TRAIN!)
+/// Build the set of links from which a destination is still reachable.
+///
+/// Performs a BACKWARD reachability flood starting from every destination link,
+/// walking `idx_prev`/`idx_prev_alt` and popping from a stack (traversal order is
+/// therefore depth-first, though only set membership matters). [`make_est_times`]
+/// uses the returned set to prune successor links that cannot reach a destination.
+/// NOTE: the set includes sidings/alternate routes that reach a destination — it does
+/// NOT distinguish mainline from siding.
+///
+/// # Arguments
+/// * `origs` - candidate origin locations (filtered/reordered on return).
+/// * `dests` - destination locations; their links seed the flood.
+/// * `links` - the rail network links.
+///
+/// # Returns
+/// `(reachable_link_idxs, origs_that_can_reach_a_dest)`.
+///
+/// CURRENTLY ALLOWS LOOPS THAT ARE TOO SMALL TO FIT THE TRAIN!
 pub fn get_link_idx_options(
     origs: &[Location],
     dests: &[Location],
@@ -163,8 +179,19 @@ pub fn get_link_idx_options(
     Ok((link_idx_set, origs))
 }
 
-/// Convert sequence of train states to sequence of estimated times
-/// that will be added to the estimated time network.
+/// Convert a segment of simulated train `movement` (states over time) into the sequence
+/// of `EstTime` nodes to append to the network.
+///
+/// Emits an Arrive event when the train's HEAD reaches each link point and a Clear event
+/// when its TAIL clears it (whichever boundary is passed next), interpolating the
+/// pass-through speed and time between movement samples. Output is written into
+/// `est_times_add` (cleared first).
+///
+/// # Arguments
+/// * `est_times_add` - output buffer of freshly built `EstTime` nodes.
+/// * `movement` - simulated states (offset/speed/time) for this path segment.
+/// * `link_pts` - link boundary points (offsets) that the head/tail cross.
+/// * `length` - train length, used to offset tail (Clear) events from head (Arrive) events.
 fn update_est_times_add(
     est_times_add: &mut Vec<EstTime>,
     movement: &[SimpleState],
@@ -242,9 +269,20 @@ fn update_est_times_add(
     Ok(())
 }
 
-/// Insert a new estimated time into the network.
-/// Insertion may not occur if the estimated time would be a duplicate.
-/// Returns true if insertion occurred.
+/// Insert one estimated-time node into the shared DAG, or reuse an existing equivalent one.
+///
+/// `est_alt` acts as the caller's INSERTION CURSOR: it records where the current sim is
+/// attaching into the DAG. Starting from `est_alt.idx_prev`, this walks the `idx_next` /
+/// `idx_next_alt` chain looking for a node with the same `link_event` and a matching speed
+/// (`|Δspeed| < SPEED_DIFF_JOIN`):
+/// * if the slot after the cursor is empty, `est_insert` is appended and linked in;
+/// * if an equivalent node already exists, it is REUSED (no insertion) and the cursor
+///   advances onto it — this is how divergent sims share common prefixes/suffixes;
+/// * otherwise a Fake alternate node is created so the new event can hang off an
+///   `idx_next_alt` branch.
+/// `link_event_map` indexes node idxs by `link_event` for later join lookups.
+///
+/// Returns true iff a NEW node was actually inserted (i.e. the path split here).
 fn insert_est_time(
     est_times: &mut Vec<EstTime>,
     est_alt: &mut EstTime,
@@ -533,6 +571,33 @@ fn add_new_join_paths(
 /// * The provided origins or next link options are invalid.
 /// * The path is unexpectedly truncated.
 /// * The simulation fails internally while updating movements or extending paths.
+///
+/// # Algorithm notes / gotchas
+///
+/// * This is PATH ENUMERATION, not a shortest-path search (no Dijkstra/A*). Every
+///   route from an origin to a destination is explored. `saved_sims` is used as a
+///   STACK (`pop`), so branches are walked depth-first.
+/// * At each link the two candidate successors come straight from the NETWORK topology
+///   (`Link::idx_next`, `Link::idx_next_alt`); they are NOT recomputed here. When both
+///   can still reach a destination, the current sim continues on `idx_next` and a CLONED
+///   sim is pushed onto `saved_sims` to explore `idx_next_alt` later. This is how every
+///   destination-reaching route — INCLUDING SIDINGS — ends up in the network. The
+///   "shortest path" wording on `EstTime::idx_next` is the intended through-route
+///   convention, not a guarantee, and does not exclude sidings.
+/// * The `idx_next`/`idx_next_alt`/`idx_prev`/`idx_prev_alt` fields on `EstTime` are
+///   `EstIdx` values indexing into the `est_times` Vec (i.e. NODE indices in the output
+///   DAG), NOT `LinkIdx`. The actual link is in `link_event.link_idx`.
+/// * Nodes 0 and 1 are Fake sentinels: node 0 is the global head and node 1 carries the
+///   departure time; the origin nodes hang off node 1 via an `idx_next_alt` chain.
+/// * `est_alt` is a per-sim INSERTION CURSOR tracking where this sim currently attaches
+///   into the shared DAG; `insert_est_time` walks/extends `idx_next_alt` chains from it.
+/// * `has_split` flips to true once this sim diverges from already-inserted nodes; only
+///   then are JOINs attempted. A join merges this sim back into an existing branch when
+///   both a "space match" (aligned link events) and a "speed match"
+///   (`|Δspeed| < SPEED_DIFF_JOIN`) hold, turning the tree into a reconverging DAG and
+///   ending that sim's `'path` loop early.
+/// * After enumeration, `update_times_forward`/`update_times_backward` fill `time_sched`,
+///   and a final pass asserts the DAG's prev/next links are consistent.
 pub fn make_est_times<N: AsRef<[Link]>>(
     mut speed_limit_train_sim: SpeedLimitTrainSim,
     network: N,
@@ -558,8 +623,10 @@ pub fn make_est_times<N: AsRef<[Link]>>(
         .get_fresh(|| format_dbg!())?;
 
     // -----------------------------------------------------------------------
-    // Push initial "fake" nodes.
-    // These help define the start of our `EstTime` sequence.
+    // Push initial "fake" (sentinel) nodes that bracket the start of the DAG.
+    // Node 0 = global head sentinel (points forward to node 1). Node 1 = departure
+    // sentinel carrying `time_depart`; each origin is attached off node 1 via an
+    // `idx_next_alt` chain below. All `EstIdx` references elsewhere index into this Vec.
     // -----------------------------------------------------------------------
     est_times.push(EstTime {
         idx_next: 1,
@@ -669,6 +736,9 @@ pub fn make_est_times<N: AsRef<[Link]>>(
     // Main loop: process each saved simulation until `saved_sims` is empty.
     // -----------------------------------------------------------------------
     while let Some(mut sim) = saved_sims.pop() {
+        // `has_split` becomes true once this sim's path diverges from nodes already in the
+        // shared DAG; only after splitting do we try to JOIN back into an existing branch
+        // (space + speed match). Popping the stack makes branch traversal depth-first.
         let mut has_split = false;
         ensure!(
             sim.train_sim.link_idx_last().unwrap().is_real(),
@@ -757,7 +827,12 @@ pub fn make_est_times<N: AsRef<[Link]>>(
                     "Link idx next cannot be fake when making est times! link_idx_prev={link_idx_prev:?}"
                 );
 
-                // Collect the valid links that will allow reaching destination
+                // Successors come from the NETWORK topology (idx_next, idx_next_alt);
+                // keep only those from which a destination is still reachable. A 2-way
+                // split below means BOTH branches (e.g. mainline AND a siding) can reach
+                // the destination: the current sim takes idx_next and a CLONED sim is
+                // pushed onto `saved_sims` for idx_next_alt. That is how sidings enter the
+                // est-time network — they are not filtered out here or anywhere else.
                 let link_idxs_next_valid = [link_idx_next, link_idx_next_alt]
                     .into_iter()
                     .filter(|link_idx| link_idx_options.contains(link_idx))
