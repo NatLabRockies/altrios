@@ -71,9 +71,13 @@ impl ObjState for [CatPowerLimit] {
         validate_slice_real(&mut errors, self, "Catenary power limit");
         early_err!(errors, "Catenary power limits");
 
+        // Offsets are expected sorted by `offset_start`. Consecutive limits
+        // overlap when the next one starts before the previous one ends;
+        // properly separated (or touching) limits are valid, since a gap between
+        // limits simply means no catenary power there.
         if self
             .windows(2)
-            .any(|w| w[0].offset_end <= w[1].offset_start)
+            .any(|w| w[1].offset_start < w[0].offset_end)
         {
             errors.push(anyhow!(
                 "Catenary power limit offset pairs must be non-overlapping!"
