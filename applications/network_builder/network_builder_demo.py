@@ -123,6 +123,7 @@ def main(args: argparse.Namespace) -> None:
             waypoints=CONFIG.route_waypoints,
             fast=not args.with_elevation,
             max_grade=CONFIG.max_grade,
+            mapzen_fallback=CONFIG.mapzen_fallback,
         )
     )
     logger.info(f"Built network : {yaml_path}")

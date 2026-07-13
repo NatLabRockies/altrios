@@ -46,6 +46,11 @@ except ImportError:
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# Point REQUESTS_CA_BUNDLE at a CA bundle (e.g. an exported corporate root) to
+# verify TLS on elevation requests; unset, verification is skipped as for the
+# other requests in this module (corporate-proxy environments).
+SSL_VERIFY = os.environ.get("REQUESTS_CA_BUNDLE") or False
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
@@ -173,14 +178,66 @@ def filter_grade_spikes(elevations, distances, max_grade=MAX_GRADE, edge_buffer_
     return list(elevations)
 
 
-def fetch_elevations_3dep_bulk(locations):
-    """Fetch elevations for [(lat, lon), …] via OpenTopoData."""
+def fetch_elevations_usgs_epqs(locations, max_workers=8):
+    """Fetch elevations for [(lat, lon), …] from the USGS 3DEP Elevation Point
+    Query Service (EPQS), one request per point.
+
+    Returns a list the same length as ``locations`` with ``None`` wherever
+    EPQS has no coverage (it reports a large negative sentinel outside the
+    3DEP footprint).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    session = requests.Session()
+
+    def _one(pt):
+        lat, lon = pt
+        for attempt in range(4):
+            try:
+                r = session.get(
+                    "https://epqs.nationalmap.gov/v1/json",
+                    params={"x": lon, "y": lat, "wkid": 4326, "units": "Meters"},
+                    verify=SSL_VERIFY,
+                    timeout=30,
+                )
+                if r.status_code == 200:
+                    try:
+                        v = float(r.json().get("value"))
+                    except (TypeError, ValueError):
+                        return None
+                    # Sentinel / garbage outside 3DEP coverage
+                    if v < -11000 or v > 9000:
+                        return None
+                    return v
+            except Exception as e:
+                logger.debug(f"EPQS request failed ({lat}, {lon}): {e}")
+            time.sleep(1.5 * (attempt + 1))
+        return None
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        return list(ex.map(_one, locations))
+
+
+def fetch_elevations_3dep_bulk(locations, mapzen_fallback=True):
+    """Fetch elevations for [(lat, lon), …].
+
+    US points (lat < 49.001) are fetched in bulk from OpenTopoData's ned10m
+    (USGS NED 10 m). Points at/above the border are fetched directly from the
+    USGS 3DEP EPQS service, whose coverage extends past the border and shares
+    the US-side vertical datum — this avoids a dataset seam (and artificial
+    grade step) at border crossings. Mapzen via OpenTopoData is the fallback
+    for points beyond 3DEP coverage; pass ``mapzen_fallback=False`` for
+    USGS-only elevations (uncovered points are interpolated along the path).
+    """
     elevations = [None] * len(locations)
 
     us_indices = [i for i, (lat, _) in enumerate(locations) if lat < 49.001]
     ca_indices = [i for i, (lat, _) in enumerate(locations) if lat >= 49.001]
 
-    logger.info(f"Elevation: {len(us_indices)} US, {len(ca_indices)} CA")
+    logger.info(
+        f"Elevation: {len(us_indices)} US (ned10m), "
+        f"{len(ca_indices)} CA (USGS 3DEP EPQS, mapzen fallback)"
+    )
 
     def _fetch(indices, dataset="mapzen"):
         if not indices:
@@ -216,11 +273,46 @@ def fetch_elevations_3dep_bulk(locations):
             time.sleep(1.5)
 
     _fetch(us_indices, "ned10m")
-    _fetch(ca_indices, "mapzen")
 
-    valid = [e for e in elevations if e is not None]
-    avg = sum(valid) / len(valid) if valid else 0.0
-    elevations = [e if e is not None else avg for e in elevations]
+    if ca_indices:
+        epqs = fetch_elevations_usgs_epqs([locations[i] for i in ca_indices])
+        uncovered = []
+        for k, i in enumerate(ca_indices):
+            if epqs[k] is not None:
+                elevations[i] = epqs[k]
+            else:
+                uncovered.append(i)
+        if uncovered:
+            if mapzen_fallback:
+                logger.info(
+                    f"USGS 3DEP has no coverage for {len(uncovered)} points; "
+                    "falling back to mapzen"
+                )
+                _fetch(uncovered, "mapzen")
+            else:
+                logger.info(
+                    f"USGS 3DEP has no coverage for {len(uncovered)} points; "
+                    "mapzen fallback disabled, will interpolate along the path"
+                )
+
+    # Fill any still-missing points by interpolating along the point sequence
+    # (a global-average fill would paint long flat plateaus with steps at
+    # each end wherever a whole region's requests failed).
+    missing = [i for i, e in enumerate(elevations) if e is None]
+    if missing:
+        logger.warning(
+            f"{len(missing)} points have no elevation from any source; "
+            "interpolating along the path"
+        )
+        valid_idx = [i for i, e in enumerate(elevations) if e is not None]
+        if valid_idx:
+            filled = np.interp(
+                missing, valid_idx, [elevations[i] for i in valid_idx]
+            )
+            for i, v in zip(missing, filled):
+                elevations[i] = float(v)
+        else:
+            elevations = [0.0] * len(elevations)
     return elevations
 
 
@@ -378,7 +470,13 @@ def _identify_sidings(G, mainline_nodes):
 
 
 def export_path_with_sidings(
-    G, mainline_nodes, sidings, output_prefix, fast_mode=False, max_grade=MAX_GRADE
+    G,
+    mainline_nodes,
+    sidings,
+    output_prefix,
+    fast_mode=False,
+    max_grade=MAX_GRADE,
+    mapzen_fallback=True,
 ):
     """Build an ALTRIOS network YAML that includes the mainline plus
     siding branches with proper idx_next_alt / idx_prev_alt wiring."""
@@ -408,7 +506,9 @@ def export_path_with_sidings(
     if fast_mode:
         elevations = [0.0] * len(coords)
     else:
-        elevations = fetch_elevations_3dep_bulk(coords)
+        elevations = fetch_elevations_3dep_bulk(
+            coords, mapzen_fallback=mapzen_fallback
+        )
 
     # Apply Savitzky-Golay smoothing to mainline elevations (more sophisticated than rolling mean)
     mainline_elevs = elevations[: len(mainline_nodes)]
@@ -911,6 +1011,7 @@ def build_network(
     waypoints,
     fast=False,
     max_grade=MAX_GRADE,
+    mapzen_fallback=True,
 ):
     """Build an ALTRIOS network (mainline + sidings) from a local OSM XML extract.
 
@@ -965,7 +1066,13 @@ def build_network(
 
     # Export
     export_path_with_sidings(
-        G, full_path, sidings, output_prefix, fast_mode=fast, max_grade=max_grade
+        G,
+        full_path,
+        sidings,
+        output_prefix,
+        fast_mode=fast,
+        max_grade=max_grade,
+        mapzen_fallback=mapzen_fallback,
     )
     return output_prefix + ".yaml"
 

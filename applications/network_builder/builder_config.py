@@ -27,12 +27,16 @@ class BuilderConfig:
     - `output_name`: Basename for the built network files (written under the results dir).
     - `max_grade`: Maximum track grade (decimal, e.g. 0.04 = 4%) used to smooth elevation spikes.
     - `buffer_deg`: Buffer in degrees around the waypoint line when clipping the corridor (~0.4 deg ~ 45 km).
+    - `mapzen_fallback`: Allow falling back to Mapzen (via OpenTopoData) for points outside
+      USGS 3DEP coverage. Set False to force USGS-only elevations; points 3DEP cannot
+      resolve are then interpolated along the path instead.
     - `regions`: List of `{"name", "url"}` Geofabrik regional PBF entries covering the route (used only when downloading the OSM extract).
     - `waypoints`: Route waypoints `(name, lat, lon)`, ordered start -> end. Defines both the OSM clip area and the mainline route through the network.
     """
     output_name: str = "spokane_lethbridge"
     max_grade: float = 0.04
     buffer_deg: float = 0.4
+    mapzen_fallback: bool = True
     regions: List[Dict[str, str]] = field(default_factory=lambda: [
         {
             "name": "washington",
