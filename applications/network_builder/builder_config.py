@@ -27,6 +27,15 @@ class BuilderConfig:
     - `output_name`: Basename for the built network files (written under the results dir).
     - `max_grade`: Maximum track grade (decimal, e.g. 0.04 = 4%) used to smooth elevation spikes.
     - `buffer_deg`: Buffer in degrees around the waypoint line when clipping the corridor (~0.4 deg ~ 45 km).
+    - `endpoint_buffer_meters`: Length of the buffer links prepended/appended to the
+      mainline. ALTRIOS starts a train with its TAIL at offset 0 of the origin link
+      (front at one train length), so the buffer must be at least train length PLUS the
+      friction-braking distance from the buffer's speed limit (ALTRIOS's braking-point
+      sweep needs that headroom on the origin link; ~200 m for a typical freight consist
+      from 26.8 m/s). The front-of-train travel surplus over the corridor length is
+      (buffer - train length), so use train length + ~300 m for near-exact
+      front-at-origin -> front-at-destination corridor semantics. The default 3000 m
+      accommodates any train up to ~2.8 km.
     - `mapzen_fallback`: Allow falling back to Mapzen (via OpenTopoData) for points outside
       USGS 3DEP coverage. Set False to force USGS-only elevations; points 3DEP cannot
       resolve are then interpolated along the path instead.
@@ -36,6 +45,7 @@ class BuilderConfig:
     output_name: str = "spokane_lethbridge"
     max_grade: float = 0.04
     buffer_deg: float = 0.4
+    endpoint_buffer_meters: float = 3000.0
     mapzen_fallback: bool = True
     regions: List[Dict[str, str]] = field(default_factory=lambda: [
         {

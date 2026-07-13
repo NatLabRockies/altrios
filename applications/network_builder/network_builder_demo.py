@@ -124,6 +124,7 @@ def main(args: argparse.Namespace) -> None:
             fast=not args.with_elevation,
             max_grade=CONFIG.max_grade,
             mapzen_fallback=CONFIG.mapzen_fallback,
+            endpoint_buffer_meters=CONFIG.endpoint_buffer_meters,
         )
     )
     logger.info(f"Built network : {yaml_path}")

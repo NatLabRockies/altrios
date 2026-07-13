@@ -512,9 +512,16 @@ def export_path_with_sidings(
     fast_mode=False,
     max_grade=MAX_GRADE,
     mapzen_fallback=True,
+    endpoint_buffer_meters=3000.0,
 ):
     """Build an ALTRIOS network YAML that includes the mainline plus
-    siding branches with proper idx_next_alt / idx_prev_alt wiring."""
+    siding branches with proper idx_next_alt / idx_prev_alt wiring.
+
+    ``endpoint_buffer_meters`` sets the length of the start/end buffer links.
+    ALTRIOS puts the train's TAIL at offset 0 of the origin link, so this must
+    exceed the train length by at least the friction-braking distance from the
+    buffer's speed limit; the front-of-train travel surplus over the corridor
+    length is (buffer - train length)."""
 
     # ────── Elevations ──────
     # Collect unique nodes we need elevations for
@@ -699,7 +706,7 @@ def export_path_with_sidings(
 
     # ── Start buffer ──
     start_elev = elev_of(mainline_nodes[0])
-    sbl = 3000.0
+    sbl = endpoint_buffer_meters
     links.append(
         {
             "idx_curr": buf_fwd,
@@ -831,7 +838,7 @@ def export_path_with_sidings(
 
     # ── End buffer ──
     end_elev = elev_of(mainline_nodes[-1])
-    ebl = 3000.0
+    ebl = endpoint_buffer_meters
     last_main_fwd = mainline_indices[-1][0]
     last_main_rev = mainline_indices[-1][1]
 
@@ -1060,6 +1067,7 @@ def build_network(
     fast=False,
     max_grade=MAX_GRADE,
     mapzen_fallback=True,
+    endpoint_buffer_meters=3000.0,
 ):
     """Build an ALTRIOS network (mainline + sidings) from a local OSM XML extract.
 
@@ -1121,6 +1129,7 @@ def build_network(
         fast_mode=fast,
         max_grade=max_grade,
         mapzen_fallback=mapzen_fallback,
+        endpoint_buffer_meters=endpoint_buffer_meters,
     )
     return output_prefix + ".yaml"
 
