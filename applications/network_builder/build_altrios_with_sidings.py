@@ -939,6 +939,25 @@ def build_network(
         full_path.extend(seg[1:])
         current = target
 
+    # Prune out-and-back excursions (…, a, b, …, x, …, b, a, …): a waypoint
+    # that snaps to a node just off the through line (e.g. a dead-end border
+    # spur) makes the path double back over the same nodes. Trains cannot
+    # reverse mid-route, and revisited nodes corrupt the node-keyed elevation
+    # lookup (grade spikes). Cancelling any step that immediately retraces the
+    # previous edge removes such excursions entirely.
+    pruned = [full_path[0]]
+    for n in full_path[1:]:
+        if len(pruned) >= 2 and pruned[-2] == n:
+            pruned.pop()
+        else:
+            pruned.append(n)
+    if len(pruned) != len(full_path):
+        logger.info(
+            f"Pruned {len(full_path) - len(pruned)} out-and-back nodes "
+            "from the mainline path (waypoints snapped off the through line)"
+        )
+    full_path = pruned
+
     logger.info(f"Mainline path: {len(full_path)} nodes")
 
     # Detect sidings
