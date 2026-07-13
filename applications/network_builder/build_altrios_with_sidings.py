@@ -469,6 +469,41 @@ def _identify_sidings(G, mainline_nodes):
 # ── ALTRIOS export ───────────────────────────────────────────────────────────
 
 
+def validate_siding_wiring(links):
+    """Check the alternate-index reciprocity invariants ALTRIOS requires:
+
+        A.idx_next_alt = B  =>  B.idx_prev == A or B.idx_prev_alt == A
+        A.idx_prev_alt = B  =>  B.idx_next == A or B.idx_next_alt == A
+
+    Returns a list of violation strings (empty when the wiring is consistent).
+    """
+    by_idx = {l["idx_curr"]: l for l in links}
+    violations = []
+    for l in links:
+        a = l["idx_curr"]
+        na = l["idx_next_alt"]
+        if na:
+            b = by_idx.get(na)
+            if b is None:
+                violations.append(f"link {a}: idx_next_alt {na} does not exist")
+            elif b["idx_prev"] != a and b["idx_prev_alt"] != a:
+                violations.append(
+                    f"link {a}: idx_next_alt {na}, but link {na} has "
+                    f"idx_prev={b['idx_prev']} / idx_prev_alt={b['idx_prev_alt']}"
+                )
+        pa = l["idx_prev_alt"]
+        if pa:
+            b = by_idx.get(pa)
+            if b is None:
+                violations.append(f"link {a}: idx_prev_alt {pa} does not exist")
+            elif b["idx_next"] != a and b["idx_next_alt"] != a:
+                violations.append(
+                    f"link {a}: idx_prev_alt {pa}, but link {pa} has "
+                    f"idx_next={b['idx_next']} / idx_next_alt={b['idx_next_alt']}"
+                )
+    return violations
+
+
 def export_path_with_sidings(
     G,
     mainline_nodes,
@@ -948,6 +983,19 @@ def export_path_with_sidings(
                 # siding_rev_last.idx_prev is initialised to 0 in the siding loop
                 if srl["idx_prev"] == 0:
                     srl["idx_prev"] = arriving_rev
+
+    # ── Validate siding wiring ──
+    violations = validate_siding_wiring(links)
+    if violations:
+        logger.error(f"Siding alt-wiring has {len(violations)} violations:")
+        for v in violations[:20]:
+            logger.error(f"  {v}")
+        raise ValueError(
+            "Inconsistent idx_next_alt/idx_prev_alt wiring; ALTRIOS would "
+            "reject or mis-route this network."
+        )
+    n_junctions = sum(1 for l in links if l["idx_next_alt"] or l["idx_prev_alt"])
+    logger.info(f"Siding wiring OK ({n_junctions} links carry alt-junction indices)")
 
     # ── Speed limits ──
     logger.info("Setting speed limits (mainline=26.8 m/s, siding=6.7 m/s)…")
