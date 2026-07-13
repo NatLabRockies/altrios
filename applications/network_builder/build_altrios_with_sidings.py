@@ -511,6 +511,7 @@ def export_path_with_sidings(
     output_prefix,
     fast_mode=False,
     max_grade=MAX_GRADE,
+    include_lat_lons=True,
     mapzen_fallback=True,
     endpoint_buffer_meters=3000.0,
 ):
@@ -521,7 +522,11 @@ def export_path_with_sidings(
     ALTRIOS puts the train's TAIL at offset 0 of the origin link, so this must
     exceed the train length by at least the friction-braking distance from the
     buffer's speed limit; the front-of-train travel surplus over the corridor
-    length is (buffer - train length)."""
+    length is (buffer - train length).
+
+    With ``include_lat_lons`` (default), each link's ``headings`` entries also
+    carry the optional ``lat`` / ``lon`` fields from the ALTRIOS ``Heading``
+    schema — ignored by the simulation but available to downstream tools."""
 
     # ────── Elevations ──────
     # Collect unique nodes we need elevations for
@@ -621,6 +626,13 @@ def export_path_with_sidings(
         )
         u_e, v_e = elev_of(u), elev_of(v)
 
+        def heading_point(offset, heading, node_data):
+            pt = {"offset_meters": offset, "heading_radians": heading}
+            if include_lat_lons:
+                pt["lat"] = node_data["lat"]
+                pt["lon"] = node_data["lon"]
+            return pt
+
         fwd = {
             "idx_curr": fwd_idx,
             "idx_flip": rev_idx,
@@ -636,8 +648,8 @@ def export_path_with_sidings(
                 {"offset_meters": length, "elev_meters": v_e},
             ],
             "headings": [
-                {"offset_meters": 0.0, "heading_radians": heading_rad},
-                {"offset_meters": length, "heading_radians": heading_rad},
+                heading_point(0.0, heading_rad, u_d),
+                heading_point(length, heading_rad, v_d),
             ],
             "speed_set": [],
             "cat_power_limits": [],
@@ -659,8 +671,8 @@ def export_path_with_sidings(
                 {"offset_meters": length, "elev_meters": u_e},
             ],
             "headings": [
-                {"offset_meters": 0.0, "heading_radians": rev_heading},
-                {"offset_meters": length, "heading_radians": rev_heading},
+                heading_point(0.0, rev_heading, v_d),
+                heading_point(length, rev_heading, u_d),
             ],
             "speed_set": [],
             "cat_power_limits": [],
@@ -764,6 +776,12 @@ def export_path_with_sidings(
     geometry.append(
         {"link_idx": buf_fwd, "coordinates": [[p_buf[0], p_buf[1]], [p0[0], p0[1]]]}
     )
+    if include_lat_lons:
+        # links[-2] / links[-1] are the start-buffer fwd (p_buf -> p0) / rev pair
+        for h, (lon, lat) in zip(links[-2]["headings"], (p_buf, p0)):
+            h["lat"], h["lon"] = lat, lon
+        for h, (lon, lat) in zip(links[-1]["headings"], (p0, p_buf)):
+            h["lat"], h["lon"] = lat, lon
 
     # ── Mainline links ──
     for i in range(n_main_edges):
@@ -903,6 +921,12 @@ def export_path_with_sidings(
             "coordinates": [[p_l[0], p_l[1]], [p_end[0], p_end[1]]],
         }
     )
+    if include_lat_lons:
+        # links[-2] / links[-1] are the end-buffer fwd (p_l -> p_end) / rev pair
+        for h, (lon, lat) in zip(links[-2]["headings"], (p_l, p_end)):
+            h["lat"], h["lon"] = lat, lon
+        for h, (lon, lat) in zip(links[-1]["headings"], (p_end, p_l)):
+            h["lat"], h["lon"] = lat, lon
 
     # ─── Wire siding branches to mainline via idx_next_alt / idx_prev_alt ───
     #
@@ -1066,6 +1090,7 @@ def build_network(
     waypoints,
     fast=False,
     max_grade=MAX_GRADE,
+    include_lat_lons=True,
     mapzen_fallback=True,
     endpoint_buffer_meters=3000.0,
 ):
@@ -1128,6 +1153,7 @@ def build_network(
         output_prefix,
         fast_mode=fast,
         max_grade=max_grade,
+        include_lat_lons=include_lat_lons,
         mapzen_fallback=mapzen_fallback,
         endpoint_buffer_meters=endpoint_buffer_meters,
     )

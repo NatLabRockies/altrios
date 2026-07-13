@@ -36,6 +36,10 @@ class BuilderConfig:
       (buffer - train length), so use train length + ~300 m for near-exact
       front-at-origin -> front-at-destination corridor semantics. The default 3000 m
       accommodates any train up to ~2.8 km.
+    - `include_lat_lons`: Embed per-point lat/lon in each link's `headings` entries in the
+      network YAML (`Heading.lat` / `Heading.lon` are optional in the ALTRIOS schema and
+      ignored by the simulation; useful for downstream geospatial tools, e.g. the catenary
+      optimizer).
     - `mapzen_fallback`: Allow falling back to Mapzen (via OpenTopoData) for points outside
       USGS 3DEP coverage. Set False to force USGS-only elevations; points 3DEP cannot
       resolve are then interpolated along the path instead.
@@ -46,6 +50,7 @@ class BuilderConfig:
     max_grade: float = 0.04
     buffer_deg: float = 0.4
     endpoint_buffer_meters: float = 3000.0
+    include_lat_lons: bool = True
     mapzen_fallback: bool = True
     regions: List[Dict[str, str]] = field(default_factory=lambda: [
         {

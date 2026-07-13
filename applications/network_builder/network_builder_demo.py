@@ -123,6 +123,7 @@ def main(args: argparse.Namespace) -> None:
             waypoints=CONFIG.route_waypoints,
             fast=not args.with_elevation,
             max_grade=CONFIG.max_grade,
+            include_lat_lons=CONFIG.include_lat_lons,
             mapzen_fallback=CONFIG.mapzen_fallback,
             endpoint_buffer_meters=CONFIG.endpoint_buffer_meters,
         )
