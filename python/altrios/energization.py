@@ -14,6 +14,32 @@ if TYPE_CHECKING:
     )
 
 
+#: Default maximum real power (W) a substation can deliver when a
+#: :class:`Substation` does not set its own ``max_power_watts``. 20 MVA is a
+#: representative traction substation rating.
+DEFAULT_SUBSTATION_MAX_POWER_WATTS = 20.0e6
+
+#: Fraction of nominal voltage below which the pantograph voltage may not fall,
+#: used to derate voltage-limited deliverable power. 0.7 corresponds to the EN
+#: 50163 minimum of 17.5 kV on a 25 kV nominal system.
+DEFAULT_MIN_PANTOGRAPH_VOLTAGE_FRACTION = 0.7
+
+#: Literature (Route A) loop series impedance defaults per electrification type,
+#: given as ``(resistance_ohms_per_km, reactance_ohms_per_km)`` of the catenary
+#: loop (contact + messenger + return). Resistance drives energy loss; reactance
+#: only affects voltage drop (hence voltage-limited capacity). Users may override
+#: either value directly. ``ac_2x25_at`` values are the *effective* per-km
+#: impedance of a 2x25 kV autotransformer feed (current largely runs in the
+#: feeder, roughly halving effective impedance). ``ac_50kv`` shares the 25 kV
+#: single-track geometry; its benefit comes from the ``1/V**2`` loss scaling.
+ELECTRIFICATION_IMPEDANCE_DEFAULTS: Dict[str, Tuple[float, float]] = {
+    "ac_25kv_1x25": (0.20, 0.50),
+    "ac_2x25_at": (0.075, 0.15),
+    "ac_50kv": (0.20, 0.50),
+}
+
+
+
 def energize_uniform(
     network: alt.Network,
     uniform_power_limit_watts: float,
@@ -463,3 +489,637 @@ def energize_even_spacing(
         ]
 
     return alt.Network.from_pydict(network_dict)
+
+
+def _latlon_at_offset(link: dict, offset_meters: float) -> Optional[Tuple[float, float]]:
+    """Interpolate a link's (lat, lon) at a given along-track offset (meters)."""
+    headings = link.get("headings") or []
+    pts = [
+        (float(h["offset_meters"]), float(h["lat"]), float(h["lon"]))
+        for h in headings
+        if h.get("lat") is not None and h.get("lon") is not None
+    ]
+    if not pts:
+        return None
+    if len(pts) == 1:
+        return pts[0][1], pts[0][2]
+    if offset_meters <= pts[0][0]:
+        return pts[0][1], pts[0][2]
+    if offset_meters >= pts[-1][0]:
+        return pts[-1][1], pts[-1][2]
+    for (o0, la0, lo0), (o1, la1, lo1) in zip(pts[:-1], pts[1:]):
+        if o0 <= offset_meters <= o1:
+            span = o1 - o0
+            frac = 0.0 if span == 0 else (offset_meters - o0) / span
+            return la0 + frac * (la1 - la0), lo0 + frac * (lo1 - lo0)
+    return pts[-1][1], pts[-1][2]
+
+
+def _build_corridor_arc(
+    network_dict: tuple,
+    sample_spacing_meters: float,
+):
+    """Build a corridor arc-length reference from the network geometry.
+
+    Reuses the shared densify + longest-mainline machinery to produce, for every
+    link: the cumulative corridor arc-length at the link start (for mainline
+    links) plus a KD-tree that maps any lat/lon to the nearest mainline
+    arc-length (for sidings / opposite-direction / branch tracks).
+
+    Returns
+    -------
+    tuple
+        ``(arc_start_of_link, mainline_link_set, project_fn)`` where
+        ``project_fn(lat, lon) -> arc_meters`` returns the nearest mainline
+        arc-length, and ``arc_start_of_link[idx]`` is the corridor arc at the
+        start of mainline link ``idx`` (absent for non-mainline links).
+    """
+    import math
+    import numpy as np
+    from scipy.spatial import cKDTree
+    from altrios.optimization.energization_placement import _densify_links
+
+    link_by_idx: Dict[int, dict] = {
+        link["idx_curr"]: link for link in network_dict[1][1:]
+    }
+    candidate_idxs = list(link_by_idx.keys())
+    p_link, p_off0, _p_off1, p_lat, p_lon, p_len = _densify_links(
+        network_dict, candidate_idxs, sample_spacing_meters
+    )
+    n = len(p_link)
+    if n == 0:
+        raise ValueError(
+            "Line-loss modeling requires lat/lon geometry on the network links."
+        )
+    link_pieces: Dict[int, List[int]] = {}
+    for i in range(n):
+        link_pieces.setdefault(p_link[i], []).append(i)
+
+    mainline_links = _longest_mainline_path(link_by_idx, set(candidate_idxs))
+    mainline_link_set = set(mainline_links)
+
+    # Cumulative corridor arc-length along the mainline, per piece and per link.
+    arc_start_of_link: Dict[int, float] = {}
+    mainline_pieces: List[int] = []
+    arc = 0.0
+    for link_idx in mainline_links:
+        arc_start_of_link[link_idx] = arc
+        for i in link_pieces.get(link_idx, []):
+            mainline_pieces.append(i)
+        arc += float(link_by_idx[link_idx]["length_meters"])
+    if not mainline_pieces:
+        raise ValueError("Could not build a mainline corridor from the network.")
+
+    # Local equirectangular projection for KD-tree distance in meters.
+    lat_arr = np.asarray(p_lat)
+    lon_arr = np.asarray(p_lon)
+    lat0 = float(lat_arr.mean())
+    lon0 = float(lon_arr.mean())
+    m_per_deg_lat = 111_320.0
+    m_per_deg_lon = 111_320.0 * math.cos(math.radians(lat0))
+
+    def _to_xy(lat: float, lon: float):
+        return ((lon - lon0) * m_per_deg_lon, (lat - lat0) * m_per_deg_lat)
+
+    main_xy = np.array([_to_xy(p_lat[i], p_lon[i]) for i in mainline_pieces])
+    main_tree = cKDTree(main_xy)
+    # Arc-length at each mainline piece midpoint = link arc start + piece start.
+    main_arc = []
+    for i in mainline_pieces:
+        main_arc.append(arc_start_of_link[p_link[i]] + float(p_off0[i]))
+
+    def project_fn(lat: float, lon: float) -> float:
+        _dist, k = main_tree.query(_to_xy(lat, lon))
+        return float(main_arc[k])
+
+    return arc_start_of_link, mainline_link_set, project_fn
+
+
+def apply_line_losses(
+    network: alt.Network,
+    substations: "List[Substation]",
+    *,
+    system_voltage_volts: float = 25_000.0,
+    resistance_ohms_per_meter: Optional[float] = None,
+    reactance_ohms_per_meter: Optional[float] = None,
+    electrification_type: str = "ac_25kv_1x25",
+    default_substation_max_power_watts: float = DEFAULT_SUBSTATION_MAX_POWER_WATTS,
+    min_pantograph_voltage_fraction: float = DEFAULT_MIN_PANTOGRAPH_VOLTAGE_FRACTION,
+    base_power_limit_watts: Optional[float] = None,
+    sample_spacing_meters: float = 200.0,
+    corridor_match_meters: float = 1000.0,
+) -> "Tuple[alt.Network, Dict[str, dict]]":
+    """Precompute AC catenary line losses and derate energized power limits.
+
+    For every energized ``cat_power_limits`` interval already present on the
+    network, this computes the effective series resistance/reactance from the
+    interval to its feeding substation network along the rail corridor, then:
+
+    - stamps ``resistance_to_source_ohms`` / ``reactance_to_source_ohms`` /
+      ``voltage_volts`` / ``district_id`` on the interval so the simulation can
+      compute resistive line loss (``loss = resistance * (pwr / voltage)**2``)
+      each time step, and
+    - derates the interval ``power_limit_watts`` to the minimum of its base
+      rating, the substation-capacity-limited power (accounting for loss), and
+      the voltage-drop-limited power (minimum pantograph voltage).
+
+    The corridor is treated as linear in graph space (branching neglected); a
+    train between two adjacent substations is fed from both sides in parallel, so
+    the effective resistance at corridor position ``x`` between substations at
+    ``a < b`` is ``r * (x - a) * (b - x) / (b - a)`` (half the single-sided loss
+    at mid-span); beyond the outermost substation it is ``r * |x - a|``.
+
+    Parameters
+    ----------
+    network : alt.Network
+        A network that already carries ``cat_power_limits`` (e.g. from
+        :func:`energize_uniform`, :func:`energize_even_spacing`, or the
+        optimizer). Not mutated; a new network is returned.
+    substations : list of Substation
+        Feeding substations (user-provided or optimizer-produced). Each must have
+        a resolvable location (``lat``/``lon`` or ``link_idx``). ``max_power_watts``,
+        ``grid_emissions_region``, and ``voltage_volts`` are used if set.
+    system_voltage_volts : float, default 25000
+        Global nominal catenary voltage. Used where a substation does not
+        override it; also written to the network config.
+    resistance_ohms_per_meter, reactance_ohms_per_meter : float, optional
+        Loop series resistance/reactance per meter. If ``None``, taken from
+        ``electrification_type`` via :data:`ELECTRIFICATION_IMPEDANCE_DEFAULTS`.
+    electrification_type : str, default "ac_25kv_1x25"
+        Key into :data:`ELECTRIFICATION_IMPEDANCE_DEFAULTS` for default impedance.
+    default_substation_max_power_watts : float
+        Fallback substation power rating when a substation omits ``max_power_watts``.
+    min_pantograph_voltage_fraction : float, default 0.7
+        Minimum allowed pantograph voltage as a fraction of nominal, for the
+        voltage-drop-limited capacity.
+    base_power_limit_watts : float, optional
+        Base (pre-loss) power rating to derate from. If ``None``, each interval's
+        existing ``power_limit_watts`` is used as its base rating.
+    sample_spacing_meters : float, default 200.0
+        Along-track piece length for building the corridor arc-length reference.
+    corridor_match_meters : float, default 1000.0
+        Maximum lateral distance for matching an off-mainline interval to the
+        corridor; ignored (no loss modeled) beyond this.
+
+    Returns
+    -------
+    tuple of (alt.Network, dict)
+        The derated network and a ``substation_meta`` dict keyed by string
+        district id, each with ``grid_emissions_region``, ``max_power_watts``,
+        ``voltage_volts``, and corridor ``arc_meters``. Pass the metadata to
+        :func:`compute_line_losses` for grid-region attribution.
+    """
+    import math
+    from altrios.optimization.energization_placement import _link_midpoint_latlon
+
+    if resistance_ohms_per_meter is None or reactance_ohms_per_meter is None:
+        if electrification_type not in ELECTRIFICATION_IMPEDANCE_DEFAULTS:
+            raise ValueError(
+                f"Unknown electrification_type {electrification_type!r}; "
+                f"choose from {sorted(ELECTRIFICATION_IMPEDANCE_DEFAULTS)} or pass "
+                "resistance_ohms_per_meter and reactance_ohms_per_meter explicitly."
+            )
+        r_km, x_km = ELECTRIFICATION_IMPEDANCE_DEFAULTS[electrification_type]
+        if resistance_ohms_per_meter is None:
+            resistance_ohms_per_meter = r_km / 1000.0
+        if reactance_ohms_per_meter is None:
+            reactance_ohms_per_meter = x_km / 1000.0
+    r_per_m = float(resistance_ohms_per_meter)
+    x_per_m = float(reactance_ohms_per_meter)
+
+    network_dict = network.to_pydict()
+    link_by_idx: Dict[int, dict] = {
+        link["idx_curr"]: link for link in network_dict[1][1:]
+    }
+
+    arc_start_of_link, mainline_link_set, project_fn = _build_corridor_arc(
+        network_dict, sample_spacing_meters
+    )
+
+    # Resolve each substation to a corridor arc-length and collect metadata.
+    sub_records: List[dict] = []
+    substation_meta: Dict[str, dict] = {}
+    for sub in substations:
+        if sub.lat is not None and sub.lon is not None:
+            pos: Optional[Tuple[float, float]] = (float(sub.lat), float(sub.lon))
+        elif sub.link_idx is not None and sub.link_idx in link_by_idx:
+            pos = _link_midpoint_latlon(link_by_idx[sub.link_idx])
+        else:
+            pos = None
+        if pos is None:
+            raise ValueError(
+                f"Substation {sub.id!r} has no resolvable location "
+                "(provide lat/lon or a valid link_idx)."
+            )
+        arc = project_fn(pos[0], pos[1])
+        did = str(sub.id)
+        max_p = (
+            sub.max_power_watts
+            if sub.max_power_watts is not None
+            else default_substation_max_power_watts
+        )
+        volt = sub.voltage_volts if sub.voltage_volts is not None else system_voltage_volts
+        rec = {
+            "id": did,
+            "arc": arc,
+            "max_power_watts": float(max_p),
+            "voltage_volts": float(volt),
+            "grid_emissions_region": sub.grid_emissions_region,
+        }
+        sub_records.append(rec)
+        substation_meta[did] = {
+            "grid_emissions_region": sub.grid_emissions_region,
+            "max_power_watts": float(max_p),
+            "voltage_volts": float(volt),
+            "arc_meters": arc,
+        }
+    sub_records.sort(key=lambda s: s["arc"])
+    sub_arcs = [s["arc"] for s in sub_records]
+
+    def _feed(x: float):
+        """Return (left_record, right_record) feeding substations by corridor arc."""
+        import bisect
+
+        left = None
+        right = None
+        j = bisect.bisect_right(sub_arcs, x)
+        if j > 0:
+            left = sub_records[j - 1]
+        if j < len(sub_records):
+            right = sub_records[j]
+        # If the position coincides with a substation, treat it as directly fed.
+        return left, right
+
+    v_min_frac = float(min_pantograph_voltage_fraction)
+
+    for i in range(1, len(network_dict[1])):
+        link = network_dict[1][i]
+        cpls = link.get("cat_power_limits") or []
+        if not cpls:
+            continue
+        link_idx = link["idx_curr"]
+        on_mainline = link_idx in mainline_link_set
+        for cpl in cpls:
+            start = float(cpl["offset_start_meters"])
+            end = float(cpl["offset_end_meters"])
+            mid = 0.5 * (start + end)
+            if on_mainline:
+                x = arc_start_of_link[link_idx] + mid
+            else:
+                ll = _latlon_at_offset(link, mid)
+                if ll is None:
+                    continue
+                x = project_fn(ll[0], ll[1])
+
+            left, right = _feed(x)
+            r_eff = 0.0
+            x_eff = 0.0
+            feeding = None
+            secondary = None
+            frac_primary = 1.0
+            if left is not None and right is not None:
+                d1 = max(x - left["arc"], 0.0)
+                d2 = max(right["arc"] - x, 0.0)
+                span = d1 + d2
+                if span > 0.0:
+                    r_eff = r_per_m * d1 * d2 / span
+                    x_eff = x_per_m * d1 * d2 / span
+                    # Current divides inversely to path resistance (distance), so
+                    # the nearer substation supplies the larger share. Primary =
+                    # nearer; its share = distance to the *other* substation / D.
+                    if d1 <= d2:
+                        feeding, secondary = left, right
+                        frac_primary = d2 / span
+                    else:
+                        feeding, secondary = right, left
+                        frac_primary = d1 / span
+                else:
+                    feeding = left if d1 <= d2 else right
+            elif left is not None:
+                d1 = max(x - left["arc"], 0.0)
+                r_eff = r_per_m * d1
+                x_eff = x_per_m * d1
+                feeding = left
+            elif right is not None:
+                d2 = max(right["arc"] - x, 0.0)
+                r_eff = r_per_m * d2
+                x_eff = x_per_m * d2
+                feeding = right
+
+            base = (
+                float(base_power_limit_watts)
+                if base_power_limit_watts is not None
+                else float(cpl.get("power_limit_watts", 0.0))
+            )
+            if feeding is None:
+                # No reachable substation: keep base rating, model no loss.
+                cpl["resistance_to_source_ohms"] = 0.0
+                cpl["reactance_to_source_ohms"] = 0.0
+                cpl["voltage_volts"] = system_voltage_volts
+                continue
+
+            v = feeding["voltage_volts"]
+            p_sub_max = feeding["max_power_watts"]
+            # Substation-capacity-limited pantograph power: solve P + k P^2 = Pmax.
+            k = r_eff / (v * v) if v > 0.0 else 0.0
+            if k > 0.0:
+                p_pow = (-1.0 + math.sqrt(1.0 + 4.0 * k * p_sub_max)) / (2.0 * k)
+            else:
+                p_pow = p_sub_max
+            # Voltage-drop-limited power: V - (P/V)*|Z| >= V_min.
+            z_eff = math.hypot(r_eff, x_eff)
+            if z_eff > 0.0:
+                p_volt = v * (v - v_min_frac * v) / z_eff
+            else:
+                p_volt = float("inf")
+
+            new_power = min(base, p_pow, p_volt)
+            cpl["power_limit_watts"] = max(new_power, 0.0)
+            cpl["resistance_to_source_ohms"] = r_eff
+            cpl["reactance_to_source_ohms"] = x_eff
+            cpl["voltage_volts"] = v
+            cpl["district_id"] = feeding["id"]
+            if secondary is not None:
+                cpl["district_id_secondary"] = secondary["id"]
+                cpl["feed_fraction"] = frac_primary
+            else:
+                cpl["district_id_secondary"] = None
+                cpl["feed_fraction"] = None
+
+    network_dict[0]["system_voltage_volts"] = float(system_voltage_volts)
+    return alt.Network.from_pydict(network_dict), substation_meta
+
+
+def compute_line_losses(
+    train_sim,
+    substation_meta: Optional[Dict[str, dict]] = None,
+):
+    """Aggregate catenary line losses from a solved train simulation.
+
+    Reads the per-time-step resistive line loss the simulation recorded in each
+    dual-mode locomotive's catenary interface history, attributes it to the
+    feeding substation/district (by mapping the train position to the energized
+    ``cat_power_limits`` interval that carries the ``district_id``), and, if
+    ``substation_meta`` is provided, to each substation's grid-emissions region.
+
+    Parameters
+    ----------
+    train_sim : SpeedLimitTrainSim or dict
+        A solved train simulation (or its ``to_pydict()``), saved with a history
+        (``save_interval`` set).
+    substation_meta : dict, optional
+        The metadata returned by :func:`apply_line_losses`, keyed by district id.
+
+    Returns
+    -------
+    polars.DataFrame
+        One row per district with ``district_id``, ``grid_emissions_region``,
+        ``line_loss_energy_joules``, ``catenary_energy_joules`` (pantograph
+        energy drawn), and ``substation_energy_joules`` (pantograph + loss). A
+        final ``"__total__"`` row carries the network-wide totals.
+
+    Notes
+    -----
+    Network-wide totals come from each locomotive's *cumulative*
+    ``energy_line_loss`` / ``energy_elec_in`` (integrated every simulation step,
+    so exact regardless of ``save_interval``). When more than one district feeds
+    the train, the totals are apportioned across districts using the
+    (down-sampled) per-step power history as weights; the split is therefore
+    approximate but the totals are exact.
+    """
+    import polars as pl
+
+    ts = train_sim.to_pydict() if hasattr(train_sim, "to_pydict") else train_sim
+
+    # Per-step time deltas and train position (down-sampled by save_interval).
+    hist = ts.get("history", {})
+    dt_s = hist.get("dt_seconds")
+    offsets = hist.get("offset_meters")
+    if offsets is None:
+        offsets = hist.get("offset_back_meters")
+    if offsets is None:
+        raise ValueError(
+            "Train sim history lacks 'offset_meters'; run with a save_interval so "
+            "per-step history is recorded."
+        )
+    n_steps = len(offsets)
+    if dt_s is None:
+        # Fall back to differencing cumulative time.
+        times = hist.get("time_seconds")
+        if times is None:
+            raise ValueError(
+                "Train sim history lacks 'dt_seconds' and 'time_seconds'."
+            )
+        dt_s = [0.0] + [float(times[t]) - float(times[t - 1]) for t in range(1, len(times))]
+
+
+    # Flattened path cat_power_limits carry district_id along the path offset axis.
+    path_cpls = ts.get("path_tpc", {}).get("cat_power_limits", []) or []
+    cpl_bounds = [
+        (
+            float(c["offset_start_meters"]),
+            float(c["offset_end_meters"]),
+            c.get("district_id"),
+            c.get("district_id_secondary"),
+            c.get("feed_fraction"),
+        )
+        for c in path_cpls
+    ]
+
+    def _feed_at(offset: float):
+        """Return (primary_id, secondary_id, frac_primary) at a path offset."""
+        for s, e, did, did2, frac in cpl_bounds:
+            if offset < s:
+                break
+            if offset <= e:
+                fp = 1.0 if (did2 is None or frac is None) else float(frac)
+                return did, did2, fp
+        return None, None, 1.0
+
+    # Exact network-wide totals from the cumulative (every-step) energy fields,
+    # plus down-sampled per-step power for apportioning across substations. When
+    # a zone is fed from two sides, each step's power is split between the two
+    # feeding substations by the current-division fraction (nearer feeds more).
+    loco_vec = ts.get("loco_con", {}).get("loco_vec", []) or []
+    total_loss = 0.0
+    total_cat = 0.0
+    pwr_line_loss = [0.0] * n_steps
+    pwr_cat_in = [0.0] * n_steps
+    for loco in loco_vec:
+        lt = loco.get("loco_type", {})
+        dml = lt.get("DualModeLoco")
+        if dml is None:
+            continue
+        ch = dml.get("cat_int", {}).get("history", {})
+        ell = ch.get("energy_line_loss_joules")
+        ein = ch.get("energy_elec_in_joules")
+        if ell:
+            total_loss += float(ell[-1])
+        if ein:
+            total_cat += float(ein[-1])
+        pll = ch.get("pwr_line_loss_watts")
+        pin = ch.get("pwr_elec_in_watts")
+        if pll is not None:
+            for t in range(min(n_steps, len(pll))):
+                pwr_line_loss[t] += float(pll[t])
+        if pin is not None:
+            for t in range(min(n_steps, len(pin))):
+                pwr_cat_in[t] += float(pin[t])
+
+    # Per-substation weights from the sampled power history, split two-sided.
+    loss_w: Dict[Optional[str], float] = {}
+    cat_w: Dict[Optional[str], float] = {}
+    for t in range(n_steps):
+        primary, secondary, fp = _feed_at(float(offsets[t]))
+        dt = float(dt_s[t]) if t < len(dt_s) else 0.0
+        loss_e = pwr_line_loss[t] * dt
+        cat_e = pwr_cat_in[t] * dt
+        loss_w[primary] = loss_w.get(primary, 0.0) + loss_e * fp
+        cat_w[primary] = cat_w.get(primary, 0.0) + cat_e * fp
+        if secondary is not None and fp < 1.0:
+            loss_w[secondary] = loss_w.get(secondary, 0.0) + loss_e * (1.0 - fp)
+            cat_w[secondary] = cat_w.get(secondary, 0.0) + cat_e * (1.0 - fp)
+    loss_w_sum = sum(loss_w.values())
+    cat_w_sum = sum(cat_w.values())
+
+    districts = sorted(set(loss_w) | set(cat_w), key=lambda d: (d is None, d))
+    rows = []
+    for did in districts:
+        region = None
+        if substation_meta is not None and did in substation_meta:
+            region = substation_meta[did].get("grid_emissions_region")
+        # Apportion the exact totals by the sampled-power weights.
+        loss_frac = (loss_w.get(did, 0.0) / loss_w_sum) if loss_w_sum > 0 else 0.0
+        cat_frac = (cat_w.get(did, 0.0) / cat_w_sum) if cat_w_sum > 0 else 0.0
+        loss_j = total_loss * loss_frac
+        cat_j = total_cat * cat_frac
+        rows.append(
+            {
+                "district_id": did,
+                "grid_emissions_region": region,
+                "line_loss_energy_joules": loss_j,
+                "catenary_energy_joules": cat_j,
+                "substation_energy_joules": cat_j + loss_j,
+            }
+        )
+    rows.append(
+        {
+            "district_id": "__total__",
+            "grid_emissions_region": None,
+            "line_loss_energy_joules": total_loss,
+            "catenary_energy_joules": total_cat,
+            "substation_energy_joules": total_cat + total_loss,
+        }
+    )
+    return pl.DataFrame(rows)
+
+
+def substation_load_curves(
+    train_sim,
+    substation_meta: Optional[Dict[str, dict]] = None,
+):
+    """Per-substation load curves (power vs. time) from a solved train sim.
+
+    Splits each recorded time step's substation load (pantograph power drawn plus
+    line loss) between the one or two feeding substations by the same
+    current-division fractions used in :func:`compute_line_losses`, giving a load
+    time series per substation. Resolution follows the simulation ``save_interval``.
+
+    Parameters
+    ----------
+    train_sim : SpeedLimitTrainSim or dict
+        A solved train simulation (or its ``to_pydict()``) with history.
+    substation_meta : dict, optional
+        Metadata from :func:`apply_line_losses` (adds a ``grid_emissions_region``
+        column is not applied here; regions are available via that mapping).
+
+    Returns
+    -------
+    polars.DataFrame
+        Columns ``time_seconds`` and ``load_watts__<district_id>`` (one per
+        substation), plus ``load_watts__total``.
+    """
+    import polars as pl
+
+    ts = train_sim.to_pydict() if hasattr(train_sim, "to_pydict") else train_sim
+    hist = ts.get("history", {})
+    offsets = hist.get("offset_meters") or hist.get("offset_back_meters")
+    times = hist.get("time_seconds")
+    if offsets is None or times is None:
+        raise ValueError(
+            "Train sim history lacks 'offset_meters'/'time_seconds'; run with a "
+            "save_interval so per-step history is recorded."
+        )
+    n_steps = len(offsets)
+
+    path_cpls = ts.get("path_tpc", {}).get("cat_power_limits", []) or []
+    cpl_bounds = [
+        (
+            float(c["offset_start_meters"]),
+            float(c["offset_end_meters"]),
+            c.get("district_id"),
+            c.get("district_id_secondary"),
+            c.get("feed_fraction"),
+        )
+        for c in path_cpls
+    ]
+
+    def _feed_at(offset: float):
+        for s, e, did, did2, frac in cpl_bounds:
+            if offset < s:
+                break
+            if offset <= e:
+                fp = 1.0 if (did2 is None or frac is None) else float(frac)
+                return did, did2, fp
+        return None, None, 1.0
+
+    loco_vec = ts.get("loco_con", {}).get("loco_vec", []) or []
+    p_sub_total = [0.0] * n_steps
+    for loco in loco_vec:
+        dml = loco.get("loco_type", {}).get("DualModeLoco")
+        if dml is None:
+            continue
+        ch = dml.get("cat_int", {}).get("history", {})
+        pll = ch.get("pwr_line_loss_watts")
+        pin = ch.get("pwr_elec_in_watts")
+        for t in range(n_steps):
+            if pin is not None and t < len(pin):
+                p_sub_total[t] += float(pin[t])
+            if pll is not None and t < len(pll):
+                p_sub_total[t] += float(pll[t])
+
+    # Collect the set of substations that appear.
+    subs: List[str] = []
+    seen = set()
+    for _s, _e, did, did2, _f in cpl_bounds:
+        for d in (did, did2):
+            if d is not None and d not in seen:
+                seen.add(d)
+                subs.append(d)
+
+    series: Dict[str, List[float]] = {d: [0.0] * n_steps for d in subs}
+    total_series = [0.0] * n_steps
+    for t in range(n_steps):
+        primary, secondary, fp = _feed_at(float(offsets[t]))
+        total_series[t] = p_sub_total[t]
+        if primary is not None:
+            series.setdefault(primary, [0.0] * n_steps)[t] += p_sub_total[t] * fp
+        if secondary is not None and fp < 1.0:
+            series.setdefault(secondary, [0.0] * n_steps)[t] += p_sub_total[t] * (1.0 - fp)
+
+    data = {"time_seconds": [float(x) for x in times[:n_steps]]}
+    for d in sorted(series):
+        data[f"load_watts__{d}"] = series[d]
+    data["load_watts__total"] = total_series
+    return pl.DataFrame(data)
+
+
+def __getattr__(name: str):
+    """Lazily re-export :class:`Substation` (source-independent) without eagerly
+    importing the optimizer's heavy dependencies (pyomo, etc.)."""
+    if name == "Substation":
+        from altrios.optimization.energization_placement import Substation
+
+        return Substation
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+

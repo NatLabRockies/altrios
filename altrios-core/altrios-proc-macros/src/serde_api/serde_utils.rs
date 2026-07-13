@@ -173,6 +173,12 @@ pub(crate) fn serde_attrs_for_si_fields(field: &mut syn::Field) -> Option<()> {
                 uom::si::available_energy::megajoule_per_kilogram
             ),
             "Energy" => extract_units!(uom::si::energy::joule),
+            "ElectricCurrent" => extract_units!(uom::si::electric_current::ampere),
+            "ElectricPotential" => extract_units!(
+                uom::si::electric_potential::volt,
+                uom::si::electric_potential::kilovolt
+            ),
+            "ElectricalResistance" => extract_units!(uom::si::electrical_resistance::ohm),
             "Force" => extract_units!(uom::si::force::newton),
             "InverseVelocity" => extract_units!(uom::si::inverse_velocity::second_per_meter),
             "Length" => extract_units!(uom::si::length::meter, uom::si::length::mile),

@@ -263,23 +263,32 @@ impl Consist {
         path_tpc: &crate::track::PathTpc,
         offset: si::Length,
     ) -> anyhow::Result<()> {
-        let pwr_cat_lim = {
+        let (pwr_cat_lim, loss_factor) = {
             let mut limit = si::Power::ZERO;
+            let mut loss_factor = 0.0_f64;
             for cpl in path_tpc.cat_power_limits() {
                 if offset < cpl.offset_start {
                     break;
                 } else if offset <= cpl.offset_end {
                     limit = cpl.power_limit;
+                    // Resistive line-loss factor k = resistance_to_source / voltage^2
+                    // (units of 1/W); loss = k * pwr_elec_in^2. A non-positive
+                    // voltage disables loss.
+                    let voltage = cpl.voltage.get::<si::volt>();
+                    if voltage > 0.0 {
+                        loss_factor =
+                            cpl.resistance_to_source.get::<si::ohm>() / (voltage * voltage);
+                    }
                     break;
                 }
             }
             self.state.pwr_cat_lim.update(limit, || format_dbg!())?;
-            limit
+            (limit, loss_factor)
         };
-        
+
         // Propagate catenary power limit to individual locomotives
         for loco in self.loco_vec.iter_mut() {
-            loco.set_cat_power_limit(Some(pwr_cat_lim))?;
+            loco.set_cat_power_limit(Some(pwr_cat_lim), Some(loss_factor))?;
         }
         
         Ok(())

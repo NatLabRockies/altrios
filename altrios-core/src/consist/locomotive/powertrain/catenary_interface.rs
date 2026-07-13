@@ -15,6 +15,11 @@ pub struct CatenaryInterface {
     pub pwr_out_max: si::Power,
     /// Time step interval between saves. 1 is a good option. If None, no saving occurs.
     pub save_interval: Option<usize>,
+    /// Resistive line-loss factor `k = resistance_to_source / voltage^2` (units
+    /// of 1/W) for the currently occupied energized zone, set each time step via
+    /// [Self::set_cat_power_limit]. Line loss is `k * pwr_elec_in^2`.
+    #[serde(default, skip)]
+    pub loss_factor: f64,
     /// Custom vector of [Self::state] haha
     #[serde(default)]
     pub history: CatenaryInterfaceStateHistoryVec,
@@ -57,6 +62,7 @@ impl CatenaryInterface {
             state,
             pwr_out_max: pwr_out_max_watts,
             save_interval,
+            loss_factor: 0.0,
             history,
         };
         Ok(ci)
@@ -64,11 +70,13 @@ impl CatenaryInterface {
     pub fn set_cat_power_limit(
         &mut self,
         new_limit: Option<si::Power>,
+        loss_factor: Option<f64>,
     ) -> anyhow::Result<()> {
         self.state.pwr_elec_in_max.update(
             new_limit.unwrap_or(si::Power::ZERO),
             || format_dbg!(),
         )?;
+        self.loss_factor = loss_factor.unwrap_or(0.0);
         Ok(())
     }
     /// TODO mbruchon not really a required amount, more like a max amount that could be needed
@@ -97,6 +105,16 @@ impl CatenaryInterface {
             (*self.state.pwr_elec_out.get_fresh(|| format_dbg!())?
                 - *self.state.pwr_elec_in.get_fresh(|| format_dbg!())?)
             .abs(),
+            || format_dbg!(),
+        )?;
+
+        // Resistive line loss in the catenary between the feeding substation and
+        // the pantograph: `loss = k * pwr_elec_in^2`. This is additional power
+        // the substation must supply; it does not change the train energy
+        // balance and is recorded purely for accounting.
+        let p_watts = self.state.pwr_elec_in.get_fresh(|| format_dbg!())?.get::<si::watt>();
+        self.state.pwr_line_loss.update(
+            uc::W * (self.loss_factor * p_watts * p_watts),
             || format_dbg!(),
         )?;
 
@@ -177,6 +195,10 @@ pub struct CatenaryInterfaceState {
     pub pwr_elec_out: TrackedState<si::Power>,
     /// Power lost in conversion steps, etc.
     pub pwr_loss: TrackedState<si::Power>,
+    /// Resistive line loss in the catenary between the feeding substation and
+    /// the pantograph (additional power the substation must supply).
+    #[serde(default)]
+    pub pwr_line_loss: TrackedState<si::Power>,
 
     // Cumulative energy values
     /// cumulative electrical energy in from catenary
@@ -187,6 +209,9 @@ pub struct CatenaryInterfaceState {
     pub energy_elec_out: TrackedState<si::Energy>,
     /// Cumulative energy lost in power conversion.
     pub energy_loss: TrackedState<si::Energy>,
+    /// Cumulative resistive line-loss energy in the catenary.
+    #[serde(default)]
+    pub energy_line_loss: TrackedState<si::Energy>,
 }
 
 #[pyo3_api]

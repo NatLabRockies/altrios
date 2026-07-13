@@ -24,7 +24,11 @@ pub trait LocoTrait {
 
     /// Set catenary power limit for locomotives that can use catenary power
     /// Default implementation does nothing (for non-catenary locomotives)
-    fn set_cat_power_limit(&mut self, _pwr_cat_lim: Option<si::Power>) -> anyhow::Result<()> {
+    fn set_cat_power_limit(
+        &mut self,
+        _pwr_cat_lim: Option<si::Power>,
+        _loss_factor: Option<f64>,
+    ) -> anyhow::Result<()> {
         Ok(())
     }
 }

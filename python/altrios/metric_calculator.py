@@ -734,6 +734,95 @@ def calculate_ghg(info: ScenarioInfo, units: str) -> MetricType:
     )
 
 
+def calculate_line_loss_ghg(
+    line_loss_df: pl.DataFrame,
+    emissions_factors: pl.DataFrame,
+    scenario_year: int = defaults.BASE_ANALYSIS_YEAR,
+    units: str = "tonne CO2-eq",
+) -> MetricType:
+    """Compute GHG emissions from catenary line losses, resolved by grid region.
+
+    Line losses occur in the catenary between a substation and the train, so the
+    associated grid draw (and its emissions) belongs to the *substation's*
+    grid-emissions region, which may differ from where the train is operating.
+
+    Arguments
+    ---------
+    line_loss_df : polars.DataFrame
+        Output of :func:`altrios.energization.compute_line_losses`, with columns
+        ``district_id``, ``grid_emissions_region``, and ``line_loss_energy_joules``.
+        The ``"__total__"`` summary row is ignored.
+    emissions_factors : polars.DataFrame
+        Grid emissions factors with unit ``CO2eq_kg_per_MWh`` defined for each
+        ``Node`` (and ``Year``).
+    scenario_year : int
+        Year used to select the emissions factor for each region.
+    units : str
+        Requested units (only ``"tonne CO2-eq"`` is supported).
+
+    Returns
+    -------
+    MetricType
+        A metric DataFrame (``GHG_Line_Loss``) with one ``Subset`` row per grid
+        region plus an ``"All"`` total. Regions without an emissions factor
+        contribute ``None`` (and are surfaced via a printed warning).
+    """
+    if units != "tonne CO2-eq":
+        return metric("GHG_Line_Loss", units, None)
+
+    per_region = (
+        line_loss_df.lazy()
+        .filter(
+            (pl.col("district_id") != pl.lit("__total__"))
+            & pl.col("grid_emissions_region").is_not_null()
+        )
+        .group_by("grid_emissions_region")
+        .agg(
+            (pl.col("line_loss_energy_joules").sum() / 3.6e9).alias("MWh")
+        )
+        .collect()
+    )
+    if per_region.height == 0:
+        return metric("GHG_Line_Loss", units, None)
+
+    ef = emissions_factors
+    if "Year" in ef.columns:
+        ef = ef.filter(pl.col("Year") == scenario_year)
+    joined = per_region.join(
+        ef.select(["Node", "CO2eq_kg_per_MWh"]),
+        left_on="grid_emissions_region",
+        right_on="Node",
+        how="left",
+    )
+    missing = joined.filter(pl.col("CO2eq_kg_per_MWh").is_null())
+    if missing.height > 0:
+        print(
+            "No emissions factor for line-loss grid region(s): "
+            f"{missing.get_column('grid_emissions_region').to_list()}; "
+            "their line-loss GHGs were not calculated."
+        )
+
+    rows: List[MetricType] = []
+    total = 0.0
+    have_any = False
+    for region, mwh, factor in zip(
+        joined.get_column("grid_emissions_region"),
+        joined.get_column("MWh"),
+        joined.get_column("CO2eq_kg_per_MWh"),
+    ):
+        if factor is None:
+            rows.append(metric("GHG_Line_Loss", units, None, subset=region))
+            continue
+        tonnes = mwh * factor / 1000.0
+        total += tonnes
+        have_any = True
+        rows.append(metric("GHG_Line_Loss", units, tonnes, subset=region))
+    rows.append(
+        metric("GHG_Line_Loss", units, total if have_any else None, subset="All")
+    )
+    return metrics_from_list(rows)
+
+
 def calculate_locomotive_counts(info: ScenarioInfo, _) -> MetricType:
     """
     Given a single scenario year's locomotive consist plan, computes the year's locomotive fleet composition

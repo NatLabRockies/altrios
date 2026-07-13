@@ -88,6 +88,17 @@ class Substation:
     #: zero cost, so it provides feeding coverage for free and is not a decision
     #: variable. Use this for termini/yards that are already electrified.
     existing: bool = False
+    #: Maximum real power (W) this substation can deliver to the catenary. Used by
+    #: the line-loss model to derate deliverable pantograph power. ``None`` falls
+    #: back to a global default.
+    max_power_watts: Optional[float] = None
+    #: Cambium (or other) grid-emissions region this substation draws from, used
+    #: in postprocessing to attribute catenary energy and line losses to the
+    #: correct grid. ``None`` leaves attribution unresolved.
+    grid_emissions_region: Optional[str] = None
+    #: Optional per-substation nominal catenary voltage (V) override. ``None``
+    #: uses the global system voltage passed to the line-loss model.
+    voltage_volts: Optional[float] = None
 
 
 @dataclass

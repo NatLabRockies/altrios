@@ -152,8 +152,12 @@ impl Init for DualModeLoco {
 impl SerdeAPI for DualModeLoco {}
 
 impl LocoTrait for DualModeLoco {
-    fn set_cat_power_limit(&mut self, pwr_cat_lim: Option<si::Power>) -> anyhow::Result<()> {
-        self.cat_int.set_cat_power_limit(pwr_cat_lim)?;
+    fn set_cat_power_limit(
+        &mut self,
+        pwr_cat_lim: Option<si::Power>,
+        loss_factor: Option<f64>,
+    ) -> anyhow::Result<()> {
+        self.cat_int.set_cat_power_limit(pwr_cat_lim, loss_factor)?;
         Ok(())
     }
     /// returns current max power
@@ -223,7 +227,7 @@ mod tests {
 
         // Set catenary power limit well above total demand (10 MW >> 1.2 MW).
         dml.cat_int
-            .set_cat_power_limit(Some(10_000e3 * uc::W))
+            .set_cat_power_limit(Some(10_000e3 * uc::W), None)
             .unwrap();
         dml.set_curr_pwr_max_out(Some(pwr_aux), None, None, None, dt)
             .unwrap();

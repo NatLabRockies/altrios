@@ -57,6 +57,11 @@ unit_const!(KW, Power, 1.0E3);
 unit_const!(MW, Power, 1.0E6);
 unit_const!(J, Energy, 1.0);
 
+unit_const!(V, ElectricPotential, 1.0);
+unit_const!(KV, ElectricPotential, 1.0E3);
+unit_const!(OHM, ElectricalResistance, 1.0);
+unit_const!(A, ElectricCurrent, 1.0);
+
 unit_const!(KGPM3, MassDensity, 1.0);
 
 unit_const!(MPS, Velocity, 1.0);

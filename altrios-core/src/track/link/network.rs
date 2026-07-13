@@ -401,6 +401,11 @@ pub struct NetworkErrTol {
     /// Maximum allowed step change in elevation for coincident nodes in
     /// adjacent links, should be very small
     pub max_elev_step: Option<si::Length>,
+
+    /// Global nominal catenary system voltage used together with each
+    /// [CatPowerLimit::resistance_to_source] to compute resistive line loss.
+    /// Defaults to 25 kV.
+    pub system_voltage: Option<si::ElectricPotential>,
 }
 
 #[pyo3_api]
@@ -413,6 +418,7 @@ impl Init for NetworkErrTol {
         self.max_curv = self.max_curv.or(def.max_curv);
         self.max_heading_step = self.max_heading_step.or(def.max_heading_step);
         self.max_elev_step = self.max_elev_step.or(def.max_elev_step);
+        self.system_voltage = self.system_voltage.or(def.system_voltage);
         Ok(())
     }
 }
@@ -424,6 +430,7 @@ impl Default for NetworkErrTol {
             max_curv: Some((15.0 * uc::DEG / (100.0 * uc::FT)).into()),
             max_heading_step: Some(7.0 * uc::DEG),
             max_elev_step: Some(0.0 * uc::M),
+            system_voltage: Some(25.0 * uc::KV),
         }
     }
 }

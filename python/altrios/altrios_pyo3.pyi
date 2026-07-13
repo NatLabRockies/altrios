@@ -185,10 +185,12 @@ class CatenaryInterface(SerdeAPI):
 class CatenaryInterfaceState(SerdeAPI):
     energy_elec_in_joules: float
     energy_loss_joules: float
+    energy_line_loss_joules: float
     i: int
     pwr_elec_in_watts: float
     pwr_elec_in_max_watts: float
     pwr_loss_watts: float
+    pwr_line_loss_watts: float
     pwr_elec_out_max_watts: float
     @classmethod
     def __init__(cls) -> None: ...
@@ -200,10 +202,12 @@ class CatenaryInterfaceState(SerdeAPI):
 class CatenaryInterfaceStateHistoryVec(SerdeAPI):
     energy_elec_in_joules: list[float]
     energy_loss_joules: list[float]
+    energy_line_loss_joules: list[float]
     i: list[int]
     pwr_elec_in_watts: list[float]
     pwr_elec_in_max_watts: list[float]
     pwr_loss_watts: list[float]
+    pwr_line_loss_watts: list[float]
     pwr_elec_out_max_watts: list[float]
     @classmethod
     def __init__(cls) -> None: ...
@@ -707,7 +711,12 @@ class CatPowerLimit(SerdeAPI):
     offset_start: float
     offset_end: float
     power_limit: float
+    resistance_to_source: float
+    reactance_to_source: float
+    voltage: float
     district_id: Optional[str]
+    district_id_secondary: Optional[str]
+    feed_fraction: Optional[float]
 
 class TrainParams(SerdeAPI):
     length: float

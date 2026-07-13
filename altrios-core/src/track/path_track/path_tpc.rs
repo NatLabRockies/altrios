@@ -248,7 +248,12 @@ impl PathTpc {
                     offset_start: offset_base + cpl.offset_start,
                     offset_end: offset_base + cpl.offset_end,
                     power_limit: cpl.power_limit,
+                    resistance_to_source: cpl.resistance_to_source,
+                    reactance_to_source: cpl.reactance_to_source,
+                    voltage: cpl.voltage,
                     district_id: cpl.district_id.clone(),
+                    district_id_secondary: cpl.district_id_secondary.clone(),
+                    feed_fraction: cpl.feed_fraction,
                 });
             }
         }
