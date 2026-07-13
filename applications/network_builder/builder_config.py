@@ -9,7 +9,9 @@ touching any of the workflow modules.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass, field, fields
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 
@@ -81,6 +83,32 @@ class BuilderConfig:
         ("Fort Macleod", 49.725, -113.397),
         ("Lethbridge", 49.724, -112.919),
     ])
+
+    @classmethod
+    def from_file(cls, filepath: str | Path) -> "BuilderConfig":
+        """Load a corridor config from a JSON file.
+
+        The file holds any subset of the BuilderConfig fields (missing fields
+        keep their defaults); unknown keys are an error. ``waypoints`` entries
+        are ``[name, lat, lon]`` lists. Example:
+
+            {
+              "output_name": "winnipeg_chicago",
+              "waypoints": [["Winnipeg", 49.899, -97.139],
+                            ["Chicago", 41.879, -87.638]]
+            }
+        """
+        data = json.loads(Path(filepath).read_text())
+        valid = {f.name for f in fields(cls)}
+        unknown = set(data) - valid
+        if unknown:
+            raise ValueError(
+                f"Unknown BuilderConfig key(s) in {filepath}: {sorted(unknown)}; "
+                f"valid keys: {sorted(valid)}"
+            )
+        if "waypoints" in data:
+            data["waypoints"] = [tuple(w) for w in data["waypoints"]]
+        return cls(**data)
 
     @property
     def start_pt(self) -> Tuple[float, float]:

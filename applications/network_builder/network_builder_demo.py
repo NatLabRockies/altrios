@@ -54,12 +54,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# CORRIDOR CONFIG -- override BuilderConfig fields here for a different corridor.
-# Defaults build the bundled Spokane -> Lethbridge demo corridor; the workflow
-# modules read these values, so they never need editing or copying.
-# ============================================================================
-CONFIG = BuilderConfig()
-# For a different corridor, override only the fields you need, e.g.:
+# CORRIDOR CONFIG -- the default builds the bundled Spokane -> Lethbridge demo
+# corridor. For a different corridor, pass --config <corridor.json> (see
+# corridors/ for examples and BuilderConfig.from_file for the format), or
+# override BuilderConfig fields here in code, e.g.:
 #   CONFIG = BuilderConfig(
 #       output_name="vancouver_kamloops",
 #       max_grade=0.03,
@@ -69,13 +67,19 @@ CONFIG = BuilderConfig()
 #                  ("Kamloops", 50.67, -120.33)],
 #   )
 # ============================================================================
+CONFIG = BuilderConfig()
+# ============================================================================
 
-# Bundled demo extract + default (gitignored) results location.
-DEFAULT_INPUT = REPO_ROOT / "networks" / f"{CONFIG.output_name}_local.osm.xml"
+# Default (gitignored) results location.
 DEFAULT_OUTPUT_DIR = THIS_DIR / "results"
 
 
 def main(args: argparse.Namespace) -> None:
+    global CONFIG
+    if args.config:
+        logger.info(f"Loading corridor config from {args.config}")
+        CONFIG = BuilderConfig.from_file(args.config)
+
     # 1. Obtain the OSM rail extract -- download fresh, or use the bundled one.
     if args.download:
         # Lazy import: only --download needs shapely + the osmium CLI.
@@ -92,7 +96,9 @@ def main(args: argparse.Namespace) -> None:
             )
         )
     else:
-        input_xml = args.input.resolve()
+        input_xml = (
+            args.input or REPO_ROOT / "networks" / f"{CONFIG.output_name}_local.osm.xml"
+        ).resolve()
         if not input_xml.exists():
             logger.error(f"Input OSM extract not found: {input_xml}")
             logger.error("Generate it with --download, or pass --input.")
@@ -148,10 +154,18 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Corridor config JSON (any subset of BuilderConfig fields; see corridors/). "
+        "Default: the in-code CONFIG (bundled Spokane -> Lethbridge corridor).",
+    )
+    parser.add_argument(
         "--input",
         type=Path,
-        default=DEFAULT_INPUT,
-        help=f"OSM XML rail extract to build from (default: {DEFAULT_INPUT.relative_to(REPO_ROOT)}).",
+        default=None,
+        help="OSM XML rail extract to build from "
+        "(default: networks/<output_name>_local.osm.xml for the active config).",
     )
     parser.add_argument(
         "--output-dir",
