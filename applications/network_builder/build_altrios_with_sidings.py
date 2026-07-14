@@ -514,9 +514,18 @@ def export_path_with_sidings(
     include_lat_lons=True,
     mapzen_fallback=True,
     endpoint_buffer_meters=3000.0,
+    origin_name="Spokane",
+    destination_name="Lethbridge",
+    origin_regions=("WECC", "WA", "WA"),
+    destination_regions=("WECC", "ab", "ab"),
 ):
     """Build an ALTRIOS network YAML that includes the mainline plus
     siding branches with proper idx_next_alt / idx_prev_alt wiring.
+
+    ``origin_name`` / ``destination_name`` label the corridor endpoints in the
+    locations CSV; ``*_regions`` are their (grid emissions, electricity price,
+    liquid fuel price) region codes. Each location gets a forward- and a
+    reverse-direction row so trains can be dispatched either way.
 
     ``endpoint_buffer_meters`` sets the length of the start/end buffer links.
     ALTRIOS puts the train's TAIL at offset 0 of the origin link, so this must
@@ -1061,14 +1070,26 @@ def export_path_with_sidings(
         json.dump(geometry, f)
 
     logger.info(f"Saving {loc_path}")
+    # Two rows per location (forward-direction link + reverse-direction link),
+    # mirroring altrios' default_locations.csv convention, so trips can be
+    # dispatched in either direction:
+    #   origin fwd trip:       tail at offset 0 of the start-buffer fwd link
+    #   origin as rev dest:    first mainline rev link (front stops at origin node)
+    #   dest of fwd trip:      last mainline fwd link (front stops at dest node)
+    #   dest as rev origin:    tail at offset 0 of the end-buffer rev link
+    o_name, o_reg = origin_name, ",".join(origin_regions)
+    d_name, d_reg = destination_name, ",".join(destination_regions)
+    first_main_rev = mainline_indices[0][1]
     with open(loc_path, "w") as f:
         f.write(
             "Location ID,Link Index,Offset (m),Is Front End,"
             "Grid Emissions Region,Electricity Price Region,"
             "Liquid Fuel Price Region\n"
         )
-        f.write(f"Spokane,{buf_fwd},0,FALSE,WECC,WA,WA\n")
-        f.write(f"Lethbridge,{last_main_fwd},0,FALSE,WECC,ab,ab\n")
+        f.write(f"{o_name},{buf_fwd},0,FALSE,{o_reg}\n")
+        f.write(f"{o_name},{first_main_rev},0,FALSE,{o_reg}\n")
+        f.write(f"{d_name},{last_main_fwd},0,FALSE,{d_reg}\n")
+        f.write(f"{d_name},{endbuf_rev},0,FALSE,{d_reg}\n")
 
     # Summary
     n_siding_links = sum(len(si) * 2 for si in siding_indices)
@@ -1093,6 +1114,10 @@ def build_network(
     include_lat_lons=True,
     mapzen_fallback=True,
     endpoint_buffer_meters=3000.0,
+    origin_name="Spokane",
+    destination_name="Lethbridge",
+    origin_regions=("WECC", "WA", "WA"),
+    destination_regions=("WECC", "ab", "ab"),
 ):
     """Build an ALTRIOS network (mainline + sidings) from a local OSM XML extract.
 
@@ -1156,6 +1181,10 @@ def build_network(
         include_lat_lons=include_lat_lons,
         mapzen_fallback=mapzen_fallback,
         endpoint_buffer_meters=endpoint_buffer_meters,
+        origin_name=origin_name,
+        destination_name=destination_name,
+        origin_regions=origin_regions,
+        destination_regions=destination_regions,
     )
     return output_prefix + ".yaml"
 

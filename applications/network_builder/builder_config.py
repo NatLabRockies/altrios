@@ -46,7 +46,8 @@ class BuilderConfig:
       USGS 3DEP coverage. Set False to force USGS-only elevations; points 3DEP cannot
       resolve are then interpolated along the path instead.
     - `regions`: List of `{"name", "url"}` Geofabrik regional PBF entries covering the route (used only when downloading the OSM extract).
-    - `waypoints`: Route waypoints `(name, lat, lon)`, ordered start -> end. Defines both the OSM clip area and the mainline route through the network.
+    - `waypoints`: Route waypoints `(name, lat, lon)`, ordered start -> end. Defines both the OSM clip area and the mainline route through the network. The first/last waypoint names label the corridor endpoints in the exported locations CSV.
+    - `origin_regions` / `destination_regions`: (grid emissions, electricity price, liquid fuel price) region codes for the locations CSV rows of the first/last waypoint.
     """
     output_name: str = "spokane_lethbridge"
     max_grade: float = 0.04
@@ -54,6 +55,8 @@ class BuilderConfig:
     endpoint_buffer_meters: float = 3000.0
     include_lat_lons: bool = True
     mapzen_fallback: bool = True
+    origin_regions: Tuple[str, str, str] = ("WECC", "WA", "WA")
+    destination_regions: Tuple[str, str, str] = ("WECC", "ab", "ab")
     regions: List[Dict[str, str]] = field(default_factory=lambda: [
         {
             "name": "washington",
@@ -108,6 +111,9 @@ class BuilderConfig:
             )
         if "waypoints" in data:
             data["waypoints"] = [tuple(w) for w in data["waypoints"]]
+        for key in ("origin_regions", "destination_regions"):
+            if key in data:
+                data[key] = tuple(data[key])
         return cls(**data)
 
     @property

@@ -1,5 +1,7 @@
 {
   "output_name": "winnipeg_chicago",
+  "origin_regions": ["MRO", "mb", "mb"],
+  "destination_regions": ["RFC", "IL", "IL"],
   "regions": [
     {"name": "manitoba", "url": "https://download.geofabrik.de/north-america/canada/manitoba-latest.osm.pbf"},
     {"name": "north-dakota", "url": "https://download.geofabrik.de/north-america/us/north-dakota-latest.osm.pbf"},

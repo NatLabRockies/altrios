@@ -132,6 +132,10 @@ def main(args: argparse.Namespace) -> None:
             include_lat_lons=CONFIG.include_lat_lons,
             mapzen_fallback=CONFIG.mapzen_fallback,
             endpoint_buffer_meters=CONFIG.endpoint_buffer_meters,
+            origin_name=CONFIG.waypoints[0][0],
+            destination_name=CONFIG.waypoints[-1][0],
+            origin_regions=CONFIG.origin_regions,
+            destination_regions=CONFIG.destination_regions,
         )
     )
     logger.info(f"Built network : {yaml_path}")
