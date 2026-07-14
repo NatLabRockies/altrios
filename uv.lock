@@ -67,6 +67,12 @@ dev = [
     { name = "scipy" },
     { name = "shapely" },
 ]
+networkbuilder = [
+    { name = "networkx", version = "3.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "networkx", version = "3.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "scipy" },
+    { name = "shapely" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -75,6 +81,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "altrios", extras = ["networkbuilder"], marker = "extra == 'dev'" },
     { name = "executing", specifier = "~=2.0" },
     { name = "ipykernel", specifier = "~=6.29" },
     { name = "matplotlib", specifier = "~=3.3" },
@@ -82,7 +89,7 @@ requires-dist = [
     { name = "memory-profiler", marker = "extra == 'dev'", specifier = "~=0.61.0" },
     { name = "msgpack", specifier = "==1.1.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.15.0" },
-    { name = "networkx", marker = "extra == 'dev'", specifier = ">=3.0" },
+    { name = "networkx", marker = "extra == 'networkbuilder'", specifier = ">=3.0" },
     { name = "numpy", specifier = "~=1.24" },
     { name = "openpyxl" },
     { name = "pandas", specifier = ">=2" },
@@ -97,14 +104,14 @@ requires-dist = [
     { name = "pyyaml", specifier = "==6.0.2" },
     { name = "requests" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "~=0.9" },
-    { name = "scipy", marker = "extra == 'dev'", specifier = ">=1.10" },
+    { name = "scipy", marker = "extra == 'networkbuilder'", specifier = ">=1.10" },
     { name = "seaborn" },
-    { name = "shapely", marker = "extra == 'dev'", specifier = ">=2.0" },
+    { name = "shapely", marker = "extra == 'networkbuilder'", specifier = ">=2.0" },
     { name = "simpy" },
     { name = "typing-extensions" },
     { name = "xlrd" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["networkbuilder", "dev"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "altrios", extras = ["dev"] }]
