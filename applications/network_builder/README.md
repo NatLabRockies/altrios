@@ -118,4 +118,12 @@ location_map = alt.import_locations("results/spokane_lethbridge_locations.csv")
 Practical checks after building a new corridor: open the HTML plot and verify
 the route follows the intended railroad (add waypoints where it shortcuts);
 confirm the log line `Siding wiring OK`; and confirm the mainline length and
-elevation profile look plausible before running simulations.
+elevation profile look plausible before running simulations. Then run
+
+```bash
+uv run python applications/network_builder/run_corridor_sim.py --prefix <results/prefix>
+```
+
+which dispatches and walks a `SpeedLimitTrainSim` between the corridor
+endpoints in both directions — the fastest end-to-end proof that the network,
+buffers, and location rows all work.
