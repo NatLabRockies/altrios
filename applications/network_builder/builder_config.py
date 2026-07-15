@@ -9,10 +9,11 @@ touching any of the workflow modules.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+import yaml
 
 
 @dataclass
@@ -89,19 +90,19 @@ class BuilderConfig:
 
     @classmethod
     def from_file(cls, filepath: str | Path) -> "BuilderConfig":
-        """Load a corridor config from a JSON file.
+        """Load a corridor config from a YAML file (matching the .yaml format
+        of the other ALTRIOS inputs; JSON also parses, being a YAML subset).
 
         The file holds any subset of the BuilderConfig fields (missing fields
         keep their defaults); unknown keys are an error. ``waypoints`` entries
         are ``[name, lat, lon]`` lists. Example:
 
-            {
-              "output_name": "winnipeg_chicago",
-              "waypoints": [["Winnipeg", 49.899, -97.139],
-                            ["Chicago", 41.879, -87.638]]
-            }
+            output_name: winnipeg_chicago
+            waypoints:
+              - [Winnipeg, 49.899, -97.139]
+              - [Chicago, 41.879, -87.638]
         """
-        data = json.loads(Path(filepath).read_text())
+        data = yaml.safe_load(Path(filepath).read_text())
         valid = {f.name for f in fields(cls)}
         unknown = set(data) - valid
         if unknown:

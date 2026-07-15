@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 # ============================================================================
 # CORRIDOR CONFIG -- the default builds the bundled Spokane -> Lethbridge demo
-# corridor. For a different corridor, pass --config <corridor.json> (see
+# corridor. For a different corridor, pass --config <corridor.yaml> (see
 # corridors/ for examples and BuilderConfig.from_file for the format), or
 # override BuilderConfig fields here in code, e.g.:
 #   CONFIG = BuilderConfig(
@@ -161,7 +161,7 @@ if __name__ == "__main__":
         "--config",
         type=Path,
         default=None,
-        help="Corridor config JSON (any subset of BuilderConfig fields; see corridors/). "
+        help="Corridor config YAML (any subset of BuilderConfig fields; see corridors/). "
         "Default: the in-code CONFIG (bundled Spokane -> Lethbridge corridor).",
     )
     parser.add_argument(

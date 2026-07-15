@@ -23,7 +23,7 @@ uv run python applications/network_builder/network_builder_demo.py --with-elevat
 
 # A different corridor, defined purely as data:
 uv run python applications/network_builder/network_builder_demo.py \
-    --config applications/network_builder/corridors/winnipeg_chicago.json \
+    --config applications/network_builder/corridors/winnipeg_chicago.yaml \
     --download --with-elevation
 ```
 
@@ -38,8 +38,9 @@ Outputs land in `applications/network_builder/results/` (gitignored):
 
 ## Defining a corridor
 
-Corridors are pure data — a JSON file passed via `--config` (see
-`corridors/winnipeg_chicago.json`), or a `BuilderConfig` instance in code.
+Corridors are pure data — a YAML file passed via `--config` (see
+`corridors/winnipeg_chicago.yaml`), matching the .yaml format of the other
+ALTRIOS inputs, or a `BuilderConfig` instance in code.
 Any subset of fields may be given; the rest keep their defaults
 (see `builder_config.py` for the full reference):
 
