@@ -46,6 +46,11 @@ except ImportError:
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# Point REQUESTS_CA_BUNDLE at a CA bundle (e.g. an exported corporate root) to
+# verify TLS on elevation requests; unset, verification is skipped as for the
+# other requests in this module (corporate-proxy environments).
+SSL_VERIFY = os.environ.get("REQUESTS_CA_BUNDLE") or False
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
@@ -173,14 +178,66 @@ def filter_grade_spikes(elevations, distances, max_grade=MAX_GRADE, edge_buffer_
     return list(elevations)
 
 
-def fetch_elevations_3dep_bulk(locations):
-    """Fetch elevations for [(lat, lon), …] via OpenTopoData."""
+def fetch_elevations_usgs_epqs(locations, max_workers=8):
+    """Fetch elevations for [(lat, lon), …] from the USGS 3DEP Elevation Point
+    Query Service (EPQS), one request per point.
+
+    Returns a list the same length as ``locations`` with ``None`` wherever
+    EPQS has no coverage (it reports a large negative sentinel outside the
+    3DEP footprint).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    session = requests.Session()
+
+    def _one(pt):
+        lat, lon = pt
+        for attempt in range(4):
+            try:
+                r = session.get(
+                    "https://epqs.nationalmap.gov/v1/json",
+                    params={"x": lon, "y": lat, "wkid": 4326, "units": "Meters"},
+                    verify=SSL_VERIFY,
+                    timeout=30,
+                )
+                if r.status_code == 200:
+                    try:
+                        v = float(r.json().get("value"))
+                    except (TypeError, ValueError):
+                        return None
+                    # Sentinel / garbage outside 3DEP coverage
+                    if v < -11000 or v > 9000:
+                        return None
+                    return v
+            except Exception as e:
+                logger.debug(f"EPQS request failed ({lat}, {lon}): {e}")
+            time.sleep(1.5 * (attempt + 1))
+        return None
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        return list(ex.map(_one, locations))
+
+
+def fetch_elevations_3dep_bulk(locations, mapzen_fallback=True):
+    """Fetch elevations for [(lat, lon), …].
+
+    US points (lat < 49.001) are fetched in bulk from OpenTopoData's ned10m
+    (USGS NED 10 m). Points at/above the border are fetched directly from the
+    USGS 3DEP EPQS service, whose coverage extends past the border and shares
+    the US-side vertical datum — this avoids a dataset seam (and artificial
+    grade step) at border crossings. Mapzen via OpenTopoData is the fallback
+    for points beyond 3DEP coverage; pass ``mapzen_fallback=False`` for
+    USGS-only elevations (uncovered points are interpolated along the path).
+    """
     elevations = [None] * len(locations)
 
     us_indices = [i for i, (lat, _) in enumerate(locations) if lat < 49.001]
     ca_indices = [i for i, (lat, _) in enumerate(locations) if lat >= 49.001]
 
-    logger.info(f"Elevation: {len(us_indices)} US, {len(ca_indices)} CA")
+    logger.info(
+        f"Elevation: {len(us_indices)} US (ned10m), "
+        f"{len(ca_indices)} CA (USGS 3DEP EPQS, mapzen fallback)"
+    )
 
     def _fetch(indices, dataset="mapzen"):
         if not indices:
@@ -216,11 +273,46 @@ def fetch_elevations_3dep_bulk(locations):
             time.sleep(1.5)
 
     _fetch(us_indices, "ned10m")
-    _fetch(ca_indices, "mapzen")
 
-    valid = [e for e in elevations if e is not None]
-    avg = sum(valid) / len(valid) if valid else 0.0
-    elevations = [e if e is not None else avg for e in elevations]
+    if ca_indices:
+        epqs = fetch_elevations_usgs_epqs([locations[i] for i in ca_indices])
+        uncovered = []
+        for k, i in enumerate(ca_indices):
+            if epqs[k] is not None:
+                elevations[i] = epqs[k]
+            else:
+                uncovered.append(i)
+        if uncovered:
+            if mapzen_fallback:
+                logger.info(
+                    f"USGS 3DEP has no coverage for {len(uncovered)} points; "
+                    "falling back to mapzen"
+                )
+                _fetch(uncovered, "mapzen")
+            else:
+                logger.info(
+                    f"USGS 3DEP has no coverage for {len(uncovered)} points; "
+                    "mapzen fallback disabled, will interpolate along the path"
+                )
+
+    # Fill any still-missing points by interpolating along the point sequence
+    # (a global-average fill would paint long flat plateaus with steps at
+    # each end wherever a whole region's requests failed).
+    missing = [i for i, e in enumerate(elevations) if e is None]
+    if missing:
+        logger.warning(
+            f"{len(missing)} points have no elevation from any source; "
+            "interpolating along the path"
+        )
+        valid_idx = [i for i, e in enumerate(elevations) if e is not None]
+        if valid_idx:
+            filled = np.interp(
+                missing, valid_idx, [elevations[i] for i in valid_idx]
+            )
+            for i, v in zip(missing, filled):
+                elevations[i] = float(v)
+        else:
+            elevations = [0.0] * len(elevations)
     return elevations
 
 
@@ -377,11 +469,73 @@ def _identify_sidings(G, mainline_nodes):
 # ── ALTRIOS export ───────────────────────────────────────────────────────────
 
 
+def validate_siding_wiring(links):
+    """Check the alternate-index reciprocity invariants ALTRIOS requires:
+
+        A.idx_next_alt = B  =>  B.idx_prev == A or B.idx_prev_alt == A
+        A.idx_prev_alt = B  =>  B.idx_next == A or B.idx_next_alt == A
+
+    Returns a list of violation strings (empty when the wiring is consistent).
+    """
+    by_idx = {l["idx_curr"]: l for l in links}
+    violations = []
+    for l in links:
+        a = l["idx_curr"]
+        na = l["idx_next_alt"]
+        if na:
+            b = by_idx.get(na)
+            if b is None:
+                violations.append(f"link {a}: idx_next_alt {na} does not exist")
+            elif b["idx_prev"] != a and b["idx_prev_alt"] != a:
+                violations.append(
+                    f"link {a}: idx_next_alt {na}, but link {na} has "
+                    f"idx_prev={b['idx_prev']} / idx_prev_alt={b['idx_prev_alt']}"
+                )
+        pa = l["idx_prev_alt"]
+        if pa:
+            b = by_idx.get(pa)
+            if b is None:
+                violations.append(f"link {a}: idx_prev_alt {pa} does not exist")
+            elif b["idx_next"] != a and b["idx_next_alt"] != a:
+                violations.append(
+                    f"link {a}: idx_prev_alt {pa}, but link {pa} has "
+                    f"idx_next={b['idx_next']} / idx_next_alt={b['idx_next_alt']}"
+                )
+    return violations
+
+
 def export_path_with_sidings(
-    G, mainline_nodes, sidings, output_prefix, fast_mode=False, max_grade=MAX_GRADE
+    G,
+    mainline_nodes,
+    sidings,
+    output_prefix,
+    fast_mode=False,
+    max_grade=MAX_GRADE,
+    include_lat_lons=True,
+    mapzen_fallback=True,
+    endpoint_buffer_meters=3000.0,
+    origin_name="Spokane",
+    destination_name="Lethbridge",
+    origin_regions=("WECC", "WA", "WA"),
+    destination_regions=("WECC", "ab", "ab"),
 ):
     """Build an ALTRIOS network YAML that includes the mainline plus
-    siding branches with proper idx_next_alt / idx_prev_alt wiring."""
+    siding branches with proper idx_next_alt / idx_prev_alt wiring.
+
+    ``origin_name`` / ``destination_name`` label the corridor endpoints in the
+    locations CSV; ``*_regions`` are their (grid emissions, electricity price,
+    liquid fuel price) region codes. Each location gets a forward- and a
+    reverse-direction row so trains can be dispatched either way.
+
+    ``endpoint_buffer_meters`` sets the length of the start/end buffer links.
+    ALTRIOS puts the train's TAIL at offset 0 of the origin link, so this must
+    exceed the train length by at least the friction-braking distance from the
+    buffer's speed limit; the front-of-train travel surplus over the corridor
+    length is (buffer - train length).
+
+    With ``include_lat_lons`` (default), each link's ``headings`` entries also
+    carry the optional ``lat`` / ``lon`` fields from the ALTRIOS ``Heading``
+    schema — ignored by the simulation but available to downstream tools."""
 
     # ────── Elevations ──────
     # Collect unique nodes we need elevations for
@@ -408,7 +562,9 @@ def export_path_with_sidings(
     if fast_mode:
         elevations = [0.0] * len(coords)
     else:
-        elevations = fetch_elevations_3dep_bulk(coords)
+        elevations = fetch_elevations_3dep_bulk(
+            coords, mapzen_fallback=mapzen_fallback
+        )
 
     # Apply Savitzky-Golay smoothing to mainline elevations (more sophisticated than rolling mean)
     mainline_elevs = elevations[: len(mainline_nodes)]
@@ -479,6 +635,13 @@ def export_path_with_sidings(
         )
         u_e, v_e = elev_of(u), elev_of(v)
 
+        def heading_point(offset, heading, node_data):
+            pt = {"offset_meters": offset, "heading_radians": heading}
+            if include_lat_lons:
+                pt["lat"] = node_data["lat"]
+                pt["lon"] = node_data["lon"]
+            return pt
+
         fwd = {
             "idx_curr": fwd_idx,
             "idx_flip": rev_idx,
@@ -494,8 +657,8 @@ def export_path_with_sidings(
                 {"offset_meters": length, "elev_meters": v_e},
             ],
             "headings": [
-                {"offset_meters": 0.0, "heading_radians": heading_rad},
-                {"offset_meters": length, "heading_radians": heading_rad},
+                heading_point(0.0, heading_rad, u_d),
+                heading_point(length, heading_rad, v_d),
             ],
             "speed_set": [],
             "cat_power_limits": [],
@@ -517,8 +680,8 @@ def export_path_with_sidings(
                 {"offset_meters": length, "elev_meters": u_e},
             ],
             "headings": [
-                {"offset_meters": 0.0, "heading_radians": rev_heading},
-                {"offset_meters": length, "heading_radians": rev_heading},
+                heading_point(0.0, rev_heading, v_d),
+                heading_point(length, rev_heading, u_d),
             ],
             "speed_set": [],
             "cat_power_limits": [],
@@ -564,7 +727,7 @@ def export_path_with_sidings(
 
     # ── Start buffer ──
     start_elev = elev_of(mainline_nodes[0])
-    sbl = 3000.0
+    sbl = endpoint_buffer_meters
     links.append(
         {
             "idx_curr": buf_fwd,
@@ -622,6 +785,12 @@ def export_path_with_sidings(
     geometry.append(
         {"link_idx": buf_fwd, "coordinates": [[p_buf[0], p_buf[1]], [p0[0], p0[1]]]}
     )
+    if include_lat_lons:
+        # links[-2] / links[-1] are the start-buffer fwd (p_buf -> p0) / rev pair
+        for h, (lon, lat) in zip(links[-2]["headings"], (p_buf, p0)):
+            h["lat"], h["lon"] = lat, lon
+        for h, (lon, lat) in zip(links[-1]["headings"], (p0, p_buf)):
+            h["lat"], h["lon"] = lat, lon
 
     # ── Mainline links ──
     for i in range(n_main_edges):
@@ -696,7 +865,7 @@ def export_path_with_sidings(
 
     # ── End buffer ──
     end_elev = elev_of(mainline_nodes[-1])
-    ebl = 3000.0
+    ebl = endpoint_buffer_meters
     last_main_fwd = mainline_indices[-1][0]
     last_main_rev = mainline_indices[-1][1]
 
@@ -761,6 +930,12 @@ def export_path_with_sidings(
             "coordinates": [[p_l[0], p_l[1]], [p_end[0], p_end[1]]],
         }
     )
+    if include_lat_lons:
+        # links[-2] / links[-1] are the end-buffer fwd (p_l -> p_end) / rev pair
+        for h, (lon, lat) in zip(links[-2]["headings"], (p_l, p_end)):
+            h["lat"], h["lon"] = lat, lon
+        for h, (lon, lat) in zip(links[-1]["headings"], (p_end, p_l)):
+            h["lat"], h["lon"] = lat, lon
 
     # ─── Wire siding branches to mainline via idx_next_alt / idx_prev_alt ───
     #
@@ -849,6 +1024,19 @@ def export_path_with_sidings(
                 if srl["idx_prev"] == 0:
                     srl["idx_prev"] = arriving_rev
 
+    # ── Validate siding wiring ──
+    violations = validate_siding_wiring(links)
+    if violations:
+        logger.error(f"Siding alt-wiring has {len(violations)} violations:")
+        for v in violations[:20]:
+            logger.error(f"  {v}")
+        raise ValueError(
+            "Inconsistent idx_next_alt/idx_prev_alt wiring; ALTRIOS would "
+            "reject or mis-route this network."
+        )
+    n_junctions = sum(1 for l in links if l["idx_next_alt"] or l["idx_prev_alt"])
+    logger.info(f"Siding wiring OK ({n_junctions} links carry alt-junction indices)")
+
     # ── Speed limits ──
     logger.info("Setting speed limits (mainline=26.8 m/s, siding=6.7 m/s)…")
     set_speed_limits(links, default_speed_mps=26.8, siding_speed_mps=6.7)
@@ -882,14 +1070,26 @@ def export_path_with_sidings(
         json.dump(geometry, f)
 
     logger.info(f"Saving {loc_path}")
+    # Two rows per location (forward-direction link + reverse-direction link),
+    # mirroring altrios' default_locations.csv convention, so trips can be
+    # dispatched in either direction:
+    #   origin fwd trip:       tail at offset 0 of the start-buffer fwd link
+    #   origin as rev dest:    first mainline rev link (front stops at origin node)
+    #   dest of fwd trip:      last mainline fwd link (front stops at dest node)
+    #   dest as rev origin:    tail at offset 0 of the end-buffer rev link
+    o_name, o_reg = origin_name, ",".join(origin_regions)
+    d_name, d_reg = destination_name, ",".join(destination_regions)
+    first_main_rev = mainline_indices[0][1]
     with open(loc_path, "w") as f:
         f.write(
             "Location ID,Link Index,Offset (m),Is Front End,"
             "Grid Emissions Region,Electricity Price Region,"
             "Liquid Fuel Price Region\n"
         )
-        f.write(f"Spokane,{buf_fwd},0,FALSE,WECC,WA,WA\n")
-        f.write(f"Lethbridge,{last_main_fwd},0,FALSE,WECC,ab,ab\n")
+        f.write(f"{o_name},{buf_fwd},0,FALSE,{o_reg}\n")
+        f.write(f"{o_name},{first_main_rev},0,FALSE,{o_reg}\n")
+        f.write(f"{d_name},{last_main_fwd},0,FALSE,{d_reg}\n")
+        f.write(f"{d_name},{endbuf_rev},0,FALSE,{d_reg}\n")
 
     # Summary
     n_siding_links = sum(len(si) * 2 for si in siding_indices)
@@ -911,6 +1111,13 @@ def build_network(
     waypoints,
     fast=False,
     max_grade=MAX_GRADE,
+    include_lat_lons=True,
+    mapzen_fallback=True,
+    endpoint_buffer_meters=3000.0,
+    origin_name="Spokane",
+    destination_name="Lethbridge",
+    origin_regions=("WECC", "WA", "WA"),
+    destination_regions=("WECC", "ab", "ab"),
 ):
     """Build an ALTRIOS network (mainline + sidings) from a local OSM XML extract.
 
@@ -939,6 +1146,25 @@ def build_network(
         full_path.extend(seg[1:])
         current = target
 
+    # Prune out-and-back excursions (…, a, b, …, x, …, b, a, …): a waypoint
+    # that snaps to a node just off the through line (e.g. a dead-end border
+    # spur) makes the path double back over the same nodes. Trains cannot
+    # reverse mid-route, and revisited nodes corrupt the node-keyed elevation
+    # lookup (grade spikes). Cancelling any step that immediately retraces the
+    # previous edge removes such excursions entirely.
+    pruned = [full_path[0]]
+    for n in full_path[1:]:
+        if len(pruned) >= 2 and pruned[-2] == n:
+            pruned.pop()
+        else:
+            pruned.append(n)
+    if len(pruned) != len(full_path):
+        logger.info(
+            f"Pruned {len(full_path) - len(pruned)} out-and-back nodes "
+            "from the mainline path (waypoints snapped off the through line)"
+        )
+    full_path = pruned
+
     logger.info(f"Mainline path: {len(full_path)} nodes")
 
     # Detect sidings
@@ -946,7 +1172,19 @@ def build_network(
 
     # Export
     export_path_with_sidings(
-        G, full_path, sidings, output_prefix, fast_mode=fast, max_grade=max_grade
+        G,
+        full_path,
+        sidings,
+        output_prefix,
+        fast_mode=fast,
+        max_grade=max_grade,
+        include_lat_lons=include_lat_lons,
+        mapzen_fallback=mapzen_fallback,
+        endpoint_buffer_meters=endpoint_buffer_meters,
+        origin_name=origin_name,
+        destination_name=destination_name,
+        origin_regions=origin_regions,
+        destination_regions=destination_regions,
     )
     return output_prefix + ".yaml"
 
