@@ -32,8 +32,6 @@ pub use crate::track::{
     TrainParams, TrainType,
 };
 #[cfg(feature = "pyo3")]
-pub use crate::train::run_speed_limit_train_sims;
-#[cfg(feature = "pyo3")]
 pub use crate::train::TrainResWrapper;
 pub use crate::train::{
     InitTrainState, LinkIdxTime, RailVehicle, SetSpeedTrainSim, SpeedLimitTrainSim,
