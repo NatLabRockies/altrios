@@ -370,6 +370,7 @@ class HybridLoco(SerdeAPI):
 class BatteryElectricLoco(SerdeAPI):
     res: ReversibleEnergyStorage
     edrv: ElectricDrivetrain
+    cat_int: Optional[CatenaryInterface]
 
 @dataclass
 class DummyLoco(SerdeAPI): ...
@@ -395,6 +396,10 @@ class Locomotive(SerdeAPI):
     ): ...
     @classmethod
     def default_battery_electric_loco(cls) -> Locomotive: ...
+    @classmethod
+    def default_battery_electric_loco_with_cat(
+        cls, pwr_out_max_watts: float
+    ) -> Locomotive: ...
     @classmethod
     def build_conventional_loco(
         cls,

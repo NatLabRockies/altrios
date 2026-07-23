@@ -1,3 +1,4 @@
+use super::powertrain::catenary_interface::CatenaryInterface;
 use super::powertrain::electric_drivetrain::ElectricDrivetrain;
 use super::powertrain::reversible_energy_storage::ReversibleEnergyStorage;
 use super::powertrain::ElectricMachine;
@@ -18,6 +19,13 @@ pub struct BatteryElectricLoco {
     #[has_state]
     #[serde(default)]
     pub pt_cntrl: BatteryPowertrainControls,
+    /// Optional catenary/pantograph interface. When `Some`, the locomotive can
+    /// draw catenary power -- for traction first, then to charge the battery
+    /// with any leftover capacity. When `None`, this is a conventional
+    /// battery-only locomotive with no pantograph.
+    #[has_state]
+    #[serde(default)]
+    pub cat_int: Option<CatenaryInterface>,
     // /// field for tracking current state
     // #[serde(default)]
     // pub state: BELState,
@@ -41,41 +49,72 @@ impl BatteryElectricLoco {
         pwr_aux: si::Power,
     ) -> anyhow::Result<()> {
         self.edrv.set_pwr_in_req(pwr_out_req, dt)?;
-        if *self
+        let pwr_elec_prop_in = *self
             .edrv
             .state
             .pwr_elec_prop_in
-            .get_fresh(|| format_dbg!())?
-            > si::Power::ZERO
-        {
-            // positive traction
-            self.res.solve_energy_consumption(
-                *self
-                    .edrv
-                    .state
-                    .pwr_elec_prop_in
-                    .get_fresh(|| format_dbg!())?,
-                pwr_aux,
-                dt,
-            )?;
+            .get_fresh(|| format_dbg!())?;
+
+        if let Some(cat_int) = self.cat_int.as_mut() {
+            if pwr_elec_prop_in > si::Power::ZERO {
+                // Positive traction with catenary available: the catenary covers
+                // propulsion first, then aux, and any leftover capacity charges
+                // the battery (bounded by the battery's max charge power, which
+                // already accounts for max SOC via the charge buffer).
+                let pwr_charge_max =
+                    *self.res.state.pwr_charge_max.get_fresh(|| format_dbg!())?;
+                // Ask the catenary for propulsion + aux + whatever the battery can
+                // absorb, so surplus capacity is used to charge the battery.
+                cat_int.set_pwr_in_req(pwr_elec_prop_in + pwr_aux + pwr_charge_max, dt)?;
+                let cat_pwr_out = *cat_int.state.pwr_elec_out.get_fresh(|| format_dbg!())?;
+
+                // Allocate delivered catenary power: propulsion, then aux, then
+                // battery charging.
+                let cat_to_prop = cat_pwr_out.min(pwr_elec_prop_in);
+                let cat_to_aux = (cat_pwr_out - cat_to_prop).min(pwr_aux);
+                let cat_to_charge = (cat_pwr_out - cat_to_prop - cat_to_aux)
+                    .min(pwr_charge_max)
+                    .max(si::Power::ZERO);
+
+                // Battery supplies the propulsion the catenary could not cover,
+                // minus any surplus catenary power charging it (net negative =>
+                // charging).
+                let res_prop_req = pwr_elec_prop_in - cat_to_prop - cat_to_charge;
+                let res_aux_req = (pwr_aux - cat_to_aux).max(si::Power::ZERO);
+                self.res
+                    .solve_energy_consumption(res_prop_req, res_aux_req, dt)?;
+            } else {
+                // Braking/coasting: keep the catenary idle (grid draw zero) so
+                // behavior matches the no-catenary configuration -- the battery
+                // absorbs regen up to its charge limit and the rest is dissipated
+                // by the dynamic brake. (Regen-to-grid is intentionally not
+                // implemented here.)
+                cat_int.set_pwr_in_req(si::Power::ZERO, dt)?;
+                self.res.solve_energy_consumption(
+                    pwr_elec_prop_in,
+                    pwr_aux
+                        .min(
+                            *self.res.state.pwr_prop_max.get_fresh(|| format_dbg!())?
+                                - pwr_elec_prop_in,
+                        )
+                        .max(si::Power::ZERO),
+                    dt,
+                )?;
+            }
+        } else if pwr_elec_prop_in > si::Power::ZERO {
+            // No catenary, positive traction
+            self.res
+                .solve_energy_consumption(pwr_elec_prop_in, pwr_aux, dt)?;
         } else {
-            // negative traction
+            // No catenary, negative traction
             self.res.solve_energy_consumption(
-                *self
-                    .edrv
-                    .state
-                    .pwr_elec_prop_in
-                    .get_fresh(|| format_dbg!())?,
+                pwr_elec_prop_in,
                 // limit aux power to whatever is actually available
                 pwr_aux
                     // whatever power is available from regen plus normal
                     .min(
                         *self.res.state.pwr_prop_max.get_fresh(|| format_dbg!())?
-                            - *self
-                                .edrv
-                                .state
-                                .pwr_elec_prop_in
-                                .get_fresh(|| format_dbg!())?,
+                            - pwr_elec_prop_in,
                     )
                     .max(si::Power::ZERO),
                 dt,
@@ -115,12 +154,26 @@ impl Init for BatteryElectricLoco {
         self.res.init()?;
         self.edrv.init()?;
         self.pt_cntrl.init()?;
+        if let Some(cat_int) = self.cat_int.as_mut() {
+            cat_int.init()?;
+        }
         Ok(())
     }
 }
 impl SerdeAPI for BatteryElectricLoco {}
 
 impl LocoTrait for BatteryElectricLoco {
+    fn set_cat_power_limit(
+        &mut self,
+        pwr_cat_lim: Option<si::Power>,
+        loss_factor: Option<f64>,
+    ) -> anyhow::Result<()> {
+        if let Some(cat_int) = self.cat_int.as_mut() {
+            cat_int.set_cat_power_limit(pwr_cat_lim, loss_factor)?;
+        }
+        Ok(())
+    }
+
     fn set_curr_pwr_max_out(
         &mut self,
         pwr_aux: Option<si::Power>,
@@ -177,8 +230,19 @@ impl LocoTrait for BatteryElectricLoco {
             disch_buffer,
             chrg_buffer,
         )?;
+        // If a catenary interface is present, update its max deliverable power and
+        // add it to the drivetrain's max propulsion input, so the locomotive can
+        // draw traction power from the catenary in addition to the battery.
+        let cat_pwr_out_max = if let Some(cat_int) = self.cat_int.as_mut() {
+            let pwr_elec_in_max =
+                *cat_int.state.pwr_elec_in_max.get_fresh(|| format_dbg!())?;
+            cat_int.set_cur_pwr_max_out(pwr_elec_in_max, None)?;
+            *cat_int.state.pwr_elec_out_max.get_fresh(|| format_dbg!())?
+        } else {
+            si::Power::ZERO
+        };
         self.edrv.set_cur_pwr_max_out(
-            *self.res.state.pwr_prop_max.get_fresh(|| format_dbg!())?,
+            *self.res.state.pwr_prop_max.get_fresh(|| format_dbg!())? + cat_pwr_out_max,
             None,
         )?;
         self.edrv
@@ -203,8 +267,13 @@ impl LocoTrait for BatteryElectricLoco {
     }
 
     fn get_energy_loss(&self) -> anyhow::Result<si::Energy> {
+        let cat_energy_loss = match self.cat_int.as_ref() {
+            Some(cat_int) => *cat_int.state.energy_loss.get_fresh(|| format_dbg!())?,
+            None => si::Energy::ZERO,
+        };
         Ok(*self.res.state.energy_loss.get_fresh(|| format_dbg!())?
-            + *self.edrv.state.energy_loss.get_fresh(|| format_dbg!())?)
+            + *self.edrv.state.energy_loss.get_fresh(|| format_dbg!())?
+            + cat_energy_loss)
     }
 }
 
@@ -339,3 +408,91 @@ impl RGWDBStateBEL {}
 
 impl Init for RGWDBStateBEL {}
 impl SerdeAPI for RGWDBStateBEL {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Drive one time step of a BEL through the standard per-step call sequence.
+    fn step_bel(
+        bel: &mut BatteryElectricLoco,
+        cat_power_limit: Option<si::Power>,
+        pwr_out_req: si::Power,
+        pwr_aux: si::Power,
+        dt: si::Time,
+    ) {
+        let train_mass = Some(1_000e3 * uc::KG);
+        let train_speed = Some(20.0 * uc::MPS);
+        bel.check_and_reset(|| format_dbg!()).unwrap();
+        bel.step(|| format_dbg!()).unwrap();
+        bel.set_cat_power_limit(cat_power_limit, None).unwrap();
+        bel.set_curr_pwr_max_out(Some(pwr_aux), None, train_mass, train_speed, dt)
+            .unwrap();
+        bel.solve_energy_consumption(pwr_out_req, dt, pwr_aux).unwrap();
+    }
+
+    #[test]
+    fn test_bel_catenary_covers_traction_and_charges_battery() {
+        let mut bel = BatteryElectricLoco::default();
+        bel.cat_int = Some(CatenaryInterface::new(10_000e3, Some(1)).unwrap());
+        bel.init().unwrap();
+        let dt = 1.0 * uc::S;
+        let pwr_aux = 100e3 * uc::W;
+        let pwr_out_req = 1_000e3 * uc::W;
+
+        // Catenary limit well above total demand: catenary should cover all
+        // propulsion (battery not discharging for traction).
+        step_bel(&mut bel, Some(10_000e3 * uc::W), pwr_out_req, pwr_aux, dt);
+
+        let cat = bel.cat_int.as_ref().unwrap();
+        let cat_out = *cat.state.pwr_elec_out.get_fresh(|| format_dbg!()).unwrap();
+        assert!(
+            cat_out > si::Power::ZERO,
+            "catenary should deliver power when a limit is available"
+        );
+        let res_prop = *bel
+            .res
+            .state
+            .pwr_out_propulsion
+            .get_fresh(|| format_dbg!())
+            .unwrap();
+        assert!(
+            res_prop <= 1e-3 * uc::W,
+            "battery should not discharge for propulsion when catenary covers it (got {} W)",
+            res_prop.get::<si::watt>()
+        );
+    }
+
+    #[test]
+    fn test_bel_no_catenary_power_uses_battery() {
+        let mut bel = BatteryElectricLoco::default();
+        bel.cat_int = Some(CatenaryInterface::new(10_000e3, Some(1)).unwrap());
+        bel.init().unwrap();
+        let dt = 1.0 * uc::S;
+        let pwr_aux = 100e3 * uc::W;
+        let pwr_out_req = 1_000e3 * uc::W;
+
+        // Catenary present but power limit is zero (e.g. unelectrified section):
+        // the battery must supply the full propulsion, matching the no-catenary
+        // configuration.
+        step_bel(&mut bel, Some(si::Power::ZERO), pwr_out_req, pwr_aux, dt);
+
+        let cat = bel.cat_int.as_ref().unwrap();
+        let cat_out = *cat.state.pwr_elec_out.get_fresh(|| format_dbg!()).unwrap();
+        assert_eq!(
+            cat_out.get::<si::watt>(),
+            0.0,
+            "catenary should deliver no power when the limit is zero"
+        );
+        let res_prop = *bel
+            .res
+            .state
+            .pwr_out_propulsion
+            .get_fresh(|| format_dbg!())
+            .unwrap();
+        assert!(
+            res_prop > si::Power::ZERO,
+            "battery must supply propulsion when catenary power is unavailable"
+        );
+    }
+}

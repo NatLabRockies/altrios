@@ -18,6 +18,17 @@ where
     }
 }
 
+/// Blanket impl so an optional state-bearing field (`Option<T>`) can carry the
+/// `#[has_state]` attribute; `None` is a no-op.
+impl<T: CheckAndResetState> CheckAndResetState for Option<T> {
+    fn check_and_reset<F: Fn() -> String>(&mut self, loc: F) -> anyhow::Result<()> {
+        if let Some(inner) = self {
+            inner.check_and_reset(loc)?;
+        }
+        Ok(())
+    }
+}
+
 /// Enum for tracking mutation
 #[derive(Clone, Default, Debug, PartialEq, IsVariant, derive_more::From, TryInto)]
 pub enum StateStatus {

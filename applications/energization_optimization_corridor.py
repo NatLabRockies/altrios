@@ -539,6 +539,14 @@ SIM_N_CARS = {"Manifest_Loaded": 75, "Manifest_Empty": 75}
 # (matches milestone_2.3b's working setup); distinct from LOCOS_PER_TRAIN, which
 # is the cost-sweep's demand-accounting figure.
 SIM_N_LOCOS = 10
+# Proof-of-concept: also simulate a battery-electric consist equipped with a
+# pantograph (BEL + catenary). On energized track the BEL draws catenary power
+# for traction first, then charges its battery with any leftover capacity; off
+# catenary it runs on the battery. Single-train PoC (robustify later). Toggle off
+# with RUN_BEL_POC = False. SIM_BEL_CAT_PWR_MAX_WATTS is the per-locomotive
+# maximum deliverable pantograph power.
+RUN_BEL_POC = True
+SIM_BEL_CAT_PWR_MAX_WATTS = 5.0e6
 # Electrical assumptions for line losses (25 kV AC medium; matches RULE_COSTS).
 SIM_SYSTEM_VOLTAGE_VOLTS = 25_000.0
 SIM_ELECTRIFICATION_TYPE = "ac_25kv_1x25"
@@ -561,23 +569,28 @@ def _calibrate_speeds(net):
     return alt.Network.from_pydict(d)
 
 
-def _build_and_walk(sim_network, location_map, label):
+def _build_and_walk(sim_network, location_map, label, loco_factory=None):
     """Build the standard train, dispatch, and walk the timed path over
     ``sim_network``; return the solved SpeedLimitTrainSim.
 
-    The consist is DUAL-MODE (``default_dual_mode_loco``), not a BEL: on
-    catenary it draws from the grid rather than a battery, so per-link catenary
-    energy reflects genuine grid draw (a BEL could hide draw in its battery).
+    ``loco_factory`` is a zero-arg callable returning one ``alt.Locomotive``; the
+    consist is ``SIM_N_LOCOS`` copies of it. It defaults to
+    ``default_dual_mode_loco``: on catenary a dual-mode loco draws from the grid
+    rather than a battery, so per-link catenary energy reflects genuine grid draw
+    (a BEL could hide draw in its battery). Pass a BEL-with-pantograph factory for
+    the battery-electric proof of concept.
     """
+    if loco_factory is None:
+        loco_factory = alt.Locomotive.default_dual_mode_loco
     rvl = alt.RailVehicle.from_file(alt.resources_root() / "rolling_stock/Manifest_Loaded.yaml")
     rve = alt.RailVehicle.from_file(alt.resources_root() / "rolling_stock/Manifest_Empty.yaml")
     train_config = alt.TrainConfig(
         rail_vehicles=[rvl, rve], n_cars_by_type=SIM_N_CARS,
         train_length_meters=None, train_mass_kilograms=None,
     )
-    dml = alt.Locomotive.default_dual_mode_loco()
-    dml.set_save_interval(SIM_SAVE_INTERVAL)
-    loco_con = alt.Consist([dml.copy() for _ in range(SIM_N_LOCOS)], SIM_SAVE_INTERVAL)
+    loco = loco_factory()
+    loco.set_save_interval(SIM_SAVE_INTERVAL)
+    loco_con = alt.Consist([loco.copy() for _ in range(SIM_N_LOCOS)], SIM_SAVE_INTERVAL)
     tsb = alt.TrainSimBuilder(
         train_id="0", origin_id=SIM_ORIGIN, destination_id=SIM_DESTINATION,
         train_config=train_config, loco_con=loco_con,
@@ -591,15 +604,37 @@ def _build_and_walk(sim_network, location_map, label):
     return ts
 
 
-def _simulate_once(sim_network, location_map, label):
+def _bel_with_cat_loco():
+    """Factory for a battery-electric locomotive equipped with a pantograph."""
+    return alt.Locomotive.default_battery_electric_loco_with_cat(
+        SIM_BEL_CAT_PWR_MAX_WATTS
+    )
+
+
+def _loco_cat_int(loco: dict):
+    """Return a locomotive's catenary-interface dict, or ``None``.
+
+    Works for both dual-mode locomotives (always have ``cat_int``) and
+    battery-electric locomotives (``cat_int`` is optional / may be ``None``).
+    """
+    loco_type = loco["loco_type"]
+    for key in ("DualModeLoco", "BatteryElectricLoco"):
+        sub = loco_type.get(key)
+        if sub is not None:
+            return sub.get("cat_int")
+    return None
+
+
+def _simulate_once(sim_network, location_map, label, loco_factory=None):
     """Run one SpeedLimitTrainSim over ``sim_network`` and return actual energy.
 
     Returns a dict with diesel fuel J, grid electricity-in J, catenary line-loss
-    J, and travel time (hr). Diesel is the built-in consist fuel getter; grid and
-    line-loss energy come from each dual-mode locomotive's catenary interface
-    cumulative energy history.
+    J, net battery-discharge J, and travel time (hr). Diesel is the built-in
+    consist fuel getter (zero for a battery-electric consist); grid and line-loss
+    energy come from each locomotive's catenary interface cumulative energy
+    history (dual-mode always, battery-electric when a pantograph is fitted).
     """
-    ts = _build_and_walk(sim_network, location_map, label)
+    ts = _build_and_walk(sim_network, location_map, label, loco_factory)
     d = ts.to_pydict()
     times = d["history"]["time_seconds"]
     dts = [t2 - t1 for t1, t2 in zip(times[:-1], times[1:])]
@@ -608,28 +643,38 @@ def _simulate_once(sim_network, location_map, label):
     # pantograph + line loss). Prefer the exact cumulative energy history; fall
     # back to integrating power if an older build lacks the cumulative fields.
     pantograph_j = line_loss_j = 0.0
+    battery_j = 0.0
     for loco in d["loco_con"]["loco_vec"]:
-        dm = loco["loco_type"].get("DualModeLoco")
-        if dm is None:
-            continue
-        ch = dm["cat_int"]["history"]
-        e_in = ch.get("energy_elec_in_joules")
-        e_ll = ch.get("energy_line_loss_joules")
-        if e_in:
-            pantograph_j += e_in[-1]
-            line_loss_j += e_ll[-1] if e_ll else 0.0
-        else:  # fallback: left-rectangle integration of power over time steps
-            grid = ch.get("pwr_elec_in_watts") or []
-            loss = ch.get("pwr_line_loss_watts") or [0.0] * len(grid)
-            pantograph_j += sum(p * dt for p, dt in zip(grid[:-1], dts))
-            line_loss_j += sum(p * dt for p, dt in zip(loss[:-1], dts))
+        ch = _loco_cat_int(loco)
+        if ch is not None:
+            ch = ch["history"]
+            e_in = ch.get("energy_elec_in_joules")
+            e_ll = ch.get("energy_line_loss_joules")
+            if e_in:
+                pantograph_j += e_in[-1]
+                line_loss_j += e_ll[-1] if e_ll else 0.0
+            else:  # fallback: left-rectangle integration of power over time steps
+                grid = ch.get("pwr_elec_in_watts") or []
+                loss = ch.get("pwr_line_loss_watts") or [0.0] * len(grid)
+                pantograph_j += sum(p * dt for p, dt in zip(grid[:-1], dts))
+                line_loss_j += sum(p * dt for p, dt in zip(loss[:-1], dts))
+        # Net chemical energy discharged from the battery (positive) / charged
+        # (negative); makes the battery's role in the energy balance visible for
+        # the BEL proof of concept.
+        bel = loco["loco_type"].get("BatteryElectricLoco")
+        if bel is not None:
+            res_hist = bel["res"]["history"]
+            e_chem = res_hist.get("energy_out_chemical_joules")
+            if e_chem:
+                battery_j += e_chem[-1]
     grid_j = pantograph_j + line_loss_j  # substation-side (electricity purchased)
     diesel_j = ts.get_energy_fuel_joules(False)
     _log(f"  sim[{label}]: diesel {diesel_j/1e9:.2f} GJ, grid {grid_j/1e9:.2f} GJ "
          f"(pantograph {pantograph_j/1e9:.2f} + line-loss {line_loss_j/1e9:.3f}), "
-         f"{times[-1]/3600:.2f} hr")
+         f"battery {battery_j/1e9:.2f} GJ, {times[-1]/3600:.2f} hr")
     return {"diesel_j": diesel_j, "pantograph_elec_j": pantograph_j,
             "line_loss_j": line_loss_j, "grid_elec_j": grid_j,
+            "battery_j": battery_j, "ts": ts,
             "travel_hr": times[-1] / 3600.0}
 
 
@@ -706,6 +751,80 @@ def first_pass_densities():
     return diesel_gal_per_mi, elec_kwh_per_mi
 
 
+def _write_bel_draw_series(ts, path: Path) -> None:
+    """Emit the BEL catenary draw time series to ``path`` as CSV.
+
+    One row per saved time step with the train position (time, corridor offset,
+    link under the head) and the consist-summed catenary/battery power split:
+
+    - ``grid_draw_w``: total power drawn from the catenary (pantograph, incl. any
+      routed into the battery). Substation-side draw also includes line loss.
+    - ``cat_out_w``: catenary power delivered on-board (after interface losses).
+    - ``traction_w``: electrical propulsion power at the drivetrain input.
+    - ``cat_to_prop_w`` / ``cat_to_aux_w`` / ``cat_to_charge_w``: catenary power
+      split into traction, auxiliaries, then battery charging (same priority
+      order the model uses), reconstructed from existing histories.
+    - ``batt_discharge_w``: traction the catenary did not cover (battery supplied).
+
+    The split is a per-step reconstruction from existing histories (no extra core
+    state); it is exact except at simultaneous power limits.
+    """
+    d = ts.to_pydict()
+    hist = d["history"]
+    times = hist["time_seconds"]
+    offsets = hist.get("offset_back_meters") or hist.get("offset_meters") or []
+    front = hist.get("link_idx_front") or []
+    n = len(times)
+    grid_w = [0.0] * n
+    line_loss_w = [0.0] * n
+    cat_out_w = [0.0] * n
+    trac_w = [0.0] * n
+    aux_w = [0.0] * n
+    for loco in d["loco_con"]["loco_vec"]:
+        ci = _loco_cat_int(loco)
+        if ci is not None:
+            ch = ci["history"]
+            gh = ch.get("pwr_elec_in_watts") or []
+            oh = ch.get("pwr_elec_out_watts") or []
+            lh = ch.get("pwr_line_loss_watts") or []
+            for i in range(min(n, len(gh))):
+                grid_w[i] += gh[i]
+            for i in range(min(n, len(oh))):
+                cat_out_w[i] += oh[i]
+            for i in range(min(n, len(lh))):
+                line_loss_w[i] += lh[i]
+        bel = loco["loco_type"].get("BatteryElectricLoco")
+        if bel is not None:
+            eh = bel["edrv"]["history"].get("pwr_elec_prop_in_watts") or []
+            for i in range(min(n, len(eh))):
+                trac_w[i] += max(eh[i], 0.0)
+            ah = (loco.get("history") or {}).get("pwr_aux_watts") or []
+            for i in range(min(n, len(ah))):
+                aux_w[i] += ah[i]
+    rows = []
+    for i in range(n):
+        # Allocate delivered catenary power in the same order the model does:
+        # traction first, then aux, then the remainder charges the battery.
+        cat_to_prop = min(cat_out_w[i], trac_w[i])
+        cat_to_aux = min(cat_out_w[i] - cat_to_prop, max(aux_w[i], 0.0))
+        cat_to_charge = max(cat_out_w[i] - cat_to_prop - cat_to_aux, 0.0)
+        batt_discharge = max(trac_w[i] - cat_to_prop, 0.0)
+        rows.append({
+            "time_s": times[i],
+            "offset_m": offsets[i] if i < len(offsets) else None,
+            "link_idx_front": front[i] if i < len(front) else None,
+            "grid_draw_w": grid_w[i],
+            "line_loss_w": line_loss_w[i],
+            "cat_out_w": cat_out_w[i],
+            "traction_w": trac_w[i],
+            "cat_to_prop_w": cat_to_prop,
+            "cat_to_aux_w": cat_to_aux,
+            "cat_to_charge_w": cat_to_charge,
+            "batt_discharge_w": batt_discharge,
+        })
+    _write_csv(path, rows)
+
+
 def run_simulation_step(plan_result, plan_label, built_subs):
     """Simulate ``plan_result``'s catenary plan (with AC line losses) plus an
     all-diesel baseline, and write the actual simulated energy to CSV."""
@@ -734,18 +853,49 @@ def run_simulation_step(plan_result, plan_label, built_subs):
          "grid_elec_gj": e_cat["grid_elec_j"] / 1e9,
          "pantograph_elec_gj": e_cat["pantograph_elec_j"] / 1e9,
          "line_loss_gj": e_cat["line_loss_j"] / 1e9,
+         "battery_gj": e_cat["battery_j"] / 1e9,
          "travel_hr": e_cat["travel_hr"]},
         {"scenario": "all_diesel", "plan": plan_label,
          "diesel_gj": e_die["diesel_j"] / 1e9,
          "grid_elec_gj": 0.0, "pantograph_elec_gj": 0.0, "line_loss_gj": 0.0,
+         "battery_gj": e_die["battery_j"] / 1e9,
          "travel_hr": e_die["travel_hr"]},
         {"scenario": "delta_electrification", "plan": plan_label,
          "diesel_gj": (e_cat["diesel_j"] - e_die["diesel_j"]) / 1e9,
          "grid_elec_gj": e_cat["grid_elec_j"] / 1e9,
          "pantograph_elec_gj": e_cat["pantograph_elec_j"] / 1e9,
          "line_loss_gj": e_cat["line_loss_j"] / 1e9,
+         "battery_gj": e_cat["battery_j"] / 1e9,
          "travel_hr": e_cat["travel_hr"] - e_die["travel_hr"]},
     ]
+
+    # Battery-electric + pantograph proof of concept: single-train run of a BEL
+    # consist with pantographs over the same energized network. On catenary it
+    # draws grid power for traction (and charges the battery with surplus); off
+    # catenary it runs on the battery. Emits the when/where catenary-draw time
+    # series so grid draw can be located along the corridor even when some of it
+    # charges the battery.
+    if RUN_BEL_POC:
+        try:
+            e_bel = _simulate_once(
+                net_cat, location_map, f"{plan_label}/with-catenary-bel",
+                loco_factory=_bel_with_cat_loco,
+            )
+            rows.append({
+                "scenario": "with_catenary_bel", "plan": plan_label,
+                "diesel_gj": e_bel["diesel_j"] / 1e9,
+                "grid_elec_gj": e_bel["grid_elec_j"] / 1e9,
+                "pantograph_elec_gj": e_bel["pantograph_elec_j"] / 1e9,
+                "line_loss_gj": e_bel["line_loss_j"] / 1e9,
+                "battery_gj": e_bel["battery_j"] / 1e9,
+                "travel_hr": e_bel["travel_hr"]})
+            _write_bel_draw_series(
+                e_bel["ts"],
+                RESULTS_DIR / "energization_bel_draw_series.csv",
+            )
+        except Exception as exc:  # noqa: BLE001 - PoC must not sink the main outputs
+            _log(f"BEL proof-of-concept FAILED: {exc}")
+
     _write_csv(RESULTS_DIR / "energization_simulation_results.csv", rows)
 
 

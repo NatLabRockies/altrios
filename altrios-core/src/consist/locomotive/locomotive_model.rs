@@ -678,6 +678,13 @@ impl Locomotive {
         Self::default_battery_electric_loco()
     }
     #[staticmethod]
+    #[pyo3(name = "default_battery_electric_loco_with_cat")]
+    fn default_battery_electric_loco_with_cat_py(
+        pwr_out_max_watts: f64,
+    ) -> anyhow::Result<Self> {
+        Self::default_battery_electric_loco_with_cat(pwr_out_max_watts)
+    }
+    #[staticmethod]
     #[pyo3(name = "default_dual_mode_loco")]
     fn default_dual_mode_loco_py() -> Self {
         Self::default_dual_mode_loco()
@@ -887,6 +894,31 @@ impl Locomotive {
         loco
     }
 
+    /// Default battery-electric locomotive equipped with a pantograph/catenary
+    /// interface, so it can draw catenary power for traction and to charge its
+    /// battery. `pwr_out_max_watts` is the maximum deliverable pantograph power.
+    pub fn default_battery_electric_loco_with_cat(pwr_out_max_watts: f64) -> anyhow::Result<Self> {
+        let mut bel = BatteryElectricLoco::default();
+        bel.cat_int = Some(CatenaryInterface::new(pwr_out_max_watts, Some(1))?);
+        let mut loco = Locomotive {
+            loco_type: PowertrainType::BatteryElectricLoco(bel),
+            mass: Some(194.6e3 * uc::KG),
+            ballast_mass: None,
+            baseline_mass: None,
+            force_max: 667.2e3 * uc::N,
+            pwr_aux_offset: 8.55e3 * uc::W,
+            pwr_aux_traction_coeff: 540e-6 * uc::R,
+            mu: None,
+            state: Default::default(),
+            history: Default::default(),
+            save_interval: Some(1),
+            assert_limits: true,
+        };
+        loco.init()?;
+        loco.set_save_interval(Some(1));
+        Ok(loco)
+    }
+
     pub fn default_dual_mode_loco() -> Self {
         let dml_type = PowertrainType::DualModeLoco(Default::default());
         let mut loco = Locomotive {
@@ -949,6 +981,9 @@ impl Locomotive {
             PowertrainType::BatteryElectricLoco(loco) => {
                 loco.res.save_interval = save_interval;
                 loco.edrv.save_interval = save_interval;
+                if let Some(cat_int) = loco.cat_int.as_mut() {
+                    cat_int.save_interval = save_interval;
+                }
             }
             PowertrainType::DummyLoco(_) => { /* maybe return an error for this in the future */ }
         }
@@ -1107,9 +1142,9 @@ impl Locomotive {
     pub fn catenary_interface(&self) -> Option<&CatenaryInterface> {
         match &self.loco_type {
             PowertrainType::DualModeLoco(loco) => Some(&loco.cat_int),
+            PowertrainType::BatteryElectricLoco(loco) => loco.cat_int.as_ref(),
             PowertrainType::ConventionalLoco(_) => None,
             PowertrainType::HybridLoco(_) => None,
-            PowertrainType::BatteryElectricLoco(_) => None,
             PowertrainType::DummyLoco(_) => None,
         }
     }
@@ -1120,14 +1155,15 @@ impl Locomotive {
                 loco.cat_int = cat_int;
                 Ok(())
             }
+            PowertrainType::BatteryElectricLoco(loco) => {
+                loco.cat_int = Some(cat_int);
+                Ok(())
+            }
             PowertrainType::ConventionalLoco(_) => {
                 bail!("ConventionalLoco locomotive has no CatenaryInterface.")
             }
             PowertrainType::HybridLoco(_) => {
                 bail!("HybridLoco locomotive has no CatenaryInterface.")
-            }
-            PowertrainType::BatteryElectricLoco(_) => {
-                bail!("BatteryElectricLoco locomotive has no CatenaryInterface.")
             }
             PowertrainType::DummyLoco(_) => {
                 bail!("DummyLoco locomotive has no CatenaryInterface.")
