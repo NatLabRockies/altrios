@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, Hashable, List, Optional, Tuple
+from typing import Callable, Dict, Hashable, List, Optional, Tuple
 
 import pyomo.environ as pyo
 from pyomo.contrib.appsi.solvers.highs import Highs
@@ -59,11 +59,39 @@ import polars as pl
 
 # local imports
 import altrios as alt
+from altrios.defaults import DISCOUNT_RATE
 
 #: Miles per meter.
 MILES_PER_METER = 0.000621371
 #: Mean Earth radius in miles (for haversine distance).
 _EARTH_RADIUS_MILES = 3958.7613
+
+
+@dataclass
+class EconomicParameters:
+    """Time-value parameters for the lifecycle (min-cost) objective.
+
+    The horizon and discount rate enter the objective only through a single
+    present-value annuity factor (:meth:`pvaf`) multiplying the per-piece annual
+    operating cost, so the program stays linear.
+    """
+
+    #: Project analysis horizon (years).
+    project_lifespan_years: int
+    #: Annual discount rate (fraction). Defaults to the ALTRIOS-wide
+    #: :data:`altrios.defaults.DISCOUNT_RATE`.
+    discount_rate: float = DISCOUNT_RATE
+
+    def pvaf(self) -> float:
+        """Present-value annuity factor ``sum_{t=1}^{N} (1+r)^{-t}``.
+
+        Equals ``N`` when the discount rate is zero.
+        """
+        r = float(self.discount_rate)
+        n = int(self.project_lifespan_years)
+        if r == 0.0:
+            return float(n)
+        return (1.0 - (1.0 + r) ** (-n)) / r
 
 
 @dataclass
@@ -99,6 +127,13 @@ class Substation:
     #: Optional per-substation nominal catenary voltage (V) override. ``None``
     #: uses the global system voltage passed to the line-loss model.
     voltage_volts: Optional[float] = None
+    #: Conversion efficiency (grid -> catenary) of this substation, in ``(0, 1]``.
+    #: For AC this is essentially the step-down transformer efficiency (~0.99);
+    #: for DC it also includes AC->DC rectifier loss (typically ~0.97). Used by
+    #: the line-loss postprocessing to scale grid-side (substation input) energy
+    #: up from the delivered catenary energy. ``None`` falls back to a global
+    #: default.
+    efficiency: Optional[float] = None
 
 
 @dataclass
@@ -131,6 +166,27 @@ class EnergizationOptCosts:
     #: Default lump-sum substation cost ($) when a ``Substation`` does not set
     #: its own ``fixed_cost``.
     substation_fixed_cost: float = 0.0
+
+
+@dataclass(frozen=True)
+class PieceBenefitContext:
+    """Context passed to a custom piece-benefit function (``piece_benefit_fn``).
+
+    A track *piece* is one electrifiable link sub-interval. The fields describe
+    that piece so a benefit model can score it; additional fields may be appended
+    in the future without breaking existing callables.
+    """
+
+    #: Index of the link this piece belongs to.
+    link_idx: int
+    #: Piece start offset along the link (meters).
+    offset_start_meters: float
+    #: Piece end offset along the link (meters).
+    offset_end_meters: float
+    #: Piece length (miles).
+    length_miles: float
+    #: Whether the piece's corridor cell is high-grade (>= ``grade_threshold``).
+    high_grade: bool
 
 
 @dataclass
@@ -180,6 +236,31 @@ class EnergizationPlacementInputs:
     #: Requires structure-site mode (``structure_spacing_miles``). ``None``
     #: (default) disables the constraint.
     min_energized_length_miles: Optional[float] = None
+    #: Optional custom objective-benefit model. When provided, it is called once
+    #: per track piece to return that piece's objective coefficient ``b_p``,
+    #: replacing the built-in grade-priority-weighted mileage. This is the seam
+    #: for future, less grade-specific objectives -- e.g. gallons of diesel
+    #: displaced by a dual-mode locomotive, computed from a first-pass
+    #: simulation and mapped onto pieces. The optimizer itself is agnostic to how
+    #: ``b_p`` is produced (it maximizes ``sum_p b_p * x[p]``), so no constraint
+    #: or solver change is needed to swap objectives. ``None`` (default) uses the
+    #: grade heuristic ``miles * (high_grade_benefit_weight if high_grade else 1)``.
+    piece_benefit_fn: Optional[Callable[["PieceBenefitContext"], float]] = None
+    #: Objective mode. ``"max_benefit"`` (default) maximizes priority-weighted
+    #: benefit subject to the budget (the rule-based/grade formulation).
+    #: ``"min_cost"`` instead minimizes lifecycle cost = capital + discounted
+    #: operating cost, and requires ``economics`` and ``piece_opex_fn``.
+    objective: str = "max_benefit"
+    #: Time-value parameters (horizon + discount rate) for ``"min_cost"`` mode.
+    #: Ignored by ``"max_benefit"``.
+    economics: Optional[EconomicParameters] = None
+    #: Per-piece **annual net operating cost delta** ($/yr) of electrifying a
+    #: piece: electricity purchased (incl. line + conversion loss) minus displaced
+    #: diesel; negative means a saving. Called once per piece (like
+    #: ``piece_benefit_fn``). Populate it from a first-pass dual-mode simulation
+    #: and fuel/electricity prices (see ``energization.make_piece_opex_fn``).
+    #: Required for ``"min_cost"``; ignored otherwise.
+    piece_opex_fn: Optional[Callable[["PieceBenefitContext"], float]] = None
 
 
 @dataclass
@@ -202,8 +283,18 @@ class EnergizationPlacementResult:
     total_cost: Optional[float] = None
     #: Total electrified track length (miles), summed across parallel tracks.
     energized_track_miles: Optional[float] = None
-    #: Objective (total priority-weighted energized miles).
+    #: Objective (priority-weighted energized miles in ``"max_benefit"`` mode, or
+    #: lifecycle cost $ in ``"min_cost"`` mode).
     objective_value: Optional[float] = None
+    #: Annual net operating cost ($/yr) of the chosen plan (sum of energized
+    #: pieces' ``piece_opex_fn``). ``None`` outside ``"min_cost"`` mode.
+    annual_opex_cost: Optional[float] = None
+    #: Discounted lifetime operating cost ($) = ``pvaf * annual_opex_cost``.
+    #: ``None`` outside ``"min_cost"`` mode.
+    discounted_opex_cost: Optional[float] = None
+    #: Total lifecycle cost ($) = ``total_cost + discounted_opex_cost`` (the
+    #: minimized objective). ``None`` outside ``"min_cost"`` mode.
+    lifecycle_cost: Optional[float] = None
     #: Solver termination condition / status string.
     status: Optional[str] = None
 
@@ -231,6 +322,7 @@ class _ProblemData:
     piece_miles: Dict[Hashable, float]
     piece_benefit: Dict[Hashable, float]
     piece_marginal_cost: Dict[Hashable, float]
+    piece_annual_opex: Dict[Hashable, float]
     piece_is_mainline: Dict[Hashable, bool]
     piece_cover: Dict[Hashable, List[Hashable]]
     piece_auto_covered: Dict[Hashable, bool]
@@ -245,6 +337,67 @@ def _first_not_none(*values: Optional[float]) -> float:
         if value is not None:
             return value
     return 0.0
+
+
+def _compute_piece_benefit(
+    inputs: EnergizationPlacementInputs,
+    *,
+    link_idx: int,
+    off0: float,
+    off1: float,
+    miles: float,
+    high_grade: bool,
+) -> float:
+    """Objective coefficient ``b_p`` for one piece.
+
+    Delegates to ``inputs.piece_benefit_fn`` when supplied (the seam for custom,
+    non-grade objectives such as diesel gallons displaced); otherwise applies the
+    default grade heuristic ``miles * (high_grade_benefit_weight if high_grade
+    else 1)``.
+    """
+    if inputs.piece_benefit_fn is not None:
+        return float(
+            inputs.piece_benefit_fn(
+                PieceBenefitContext(
+                    link_idx=int(link_idx),
+                    offset_start_meters=float(off0),
+                    offset_end_meters=float(off1),
+                    length_miles=float(miles),
+                    high_grade=bool(high_grade),
+                )
+            )
+        )
+    weight = inputs.high_grade_benefit_weight if high_grade else 1.0
+    return miles * weight
+
+
+def _compute_piece_annual_opex(
+    inputs: EnergizationPlacementInputs,
+    *,
+    link_idx: int,
+    off0: float,
+    off1: float,
+    miles: float,
+    high_grade: bool,
+) -> float:
+    """Annual net operating cost delta ($/yr) for electrifying one piece.
+
+    Delegates to ``inputs.piece_opex_fn`` (electricity purchased minus displaced
+    diesel; negative = saving). Returns ``0.0`` when no opex model is supplied.
+    """
+    if inputs.piece_opex_fn is None:
+        return 0.0
+    return float(
+        inputs.piece_opex_fn(
+            PieceBenefitContext(
+                link_idx=int(link_idx),
+                offset_start_meters=float(off0),
+                offset_end_meters=float(off1),
+                length_miles=float(miles),
+                high_grade=bool(high_grade),
+            )
+        )
+    )
 
 
 def _haversine_miles(
@@ -445,6 +598,7 @@ def _prepare_per_link(
     piece_miles: Dict[Hashable, float] = {}
     piece_benefit: Dict[Hashable, float] = {}
     piece_marginal_cost: Dict[Hashable, float] = {}
+    piece_annual_opex: Dict[Hashable, float] = {}
     piece_is_mainline: Dict[Hashable, bool] = {}
     piece_cover: Dict[Hashable, List[Hashable]] = {}
     piece_auto_covered: Dict[Hashable, bool] = {}
@@ -454,7 +608,6 @@ def _prepare_per_link(
         length_m = float(link["length_meters"])
         miles = length_m * MILES_PER_METER
         high = _link_max_grade(link) >= inputs.grade_threshold
-        weight = inputs.high_grade_benefit_weight if high else 1.0
 
         cell_ids.append(idx)
         struct_cost[idx] = struct_per_mile * miles
@@ -466,8 +619,13 @@ def _prepare_per_link(
         piece_link[idx] = idx
         piece_offsets[idx] = (0.0, length_m)
         piece_miles[idx] = miles
-        piece_benefit[idx] = miles * weight
+        piece_benefit[idx] = _compute_piece_benefit(
+            inputs, link_idx=idx, off0=0.0, off1=length_m, miles=miles, high_grade=high
+        )
         piece_marginal_cost[idx] = cat_per_mile * miles
+        piece_annual_opex[idx] = _compute_piece_annual_opex(
+            inputs, link_idx=idx, off0=0.0, off1=length_m, miles=miles, high_grade=high
+        )
         piece_is_mainline[idx] = True
 
         cover, auto = _piece_coverage(
@@ -488,6 +646,7 @@ def _prepare_per_link(
         piece_miles=piece_miles,
         piece_benefit=piece_benefit,
         piece_marginal_cost=piece_marginal_cost,
+        piece_annual_opex=piece_annual_opex,
         piece_is_mainline=piece_is_mainline,
         piece_cover=piece_cover,
         piece_auto_covered=piece_auto_covered,
@@ -732,14 +891,29 @@ def _prepare_sites(
     # Benefit, marginal cost, and feeding coverage per piece.
     piece_benefit: Dict[Hashable, float] = {}
     piece_marginal_cost: Dict[Hashable, float] = {}
+    piece_annual_opex: Dict[Hashable, float] = {}
     piece_cover: Dict[Hashable, List[Hashable]] = {}
     piece_auto_covered: Dict[Hashable, bool] = {}
     for i in range(n_pieces):
         c = piece_cell[i]
         miles = piece_miles[i]
-        weight = inputs.high_grade_benefit_weight if cell_high_grade[c] else 1.0
-        piece_benefit[i] = miles * weight
+        piece_benefit[i] = _compute_piece_benefit(
+            inputs,
+            link_idx=piece_link[i],
+            off0=piece_offsets[i][0],
+            off1=piece_offsets[i][1],
+            miles=miles,
+            high_grade=cell_high_grade[c],
+        )
         piece_marginal_cost[i] = cat_per_mile * miles
+        piece_annual_opex[i] = _compute_piece_annual_opex(
+            inputs,
+            link_idx=piece_link[i],
+            off0=piece_offsets[i][0],
+            off1=piece_offsets[i][1],
+            miles=miles,
+            high_grade=cell_high_grade[c],
+        )
         cover, auto = _piece_coverage(
             (p_lat[i], p_lon[i]), existing_positions, sub_positions, feed
         )
@@ -758,6 +932,7 @@ def _prepare_sites(
         piece_miles=piece_miles,
         piece_benefit=piece_benefit,
         piece_marginal_cost=piece_marginal_cost,
+        piece_annual_opex=piece_annual_opex,
         piece_is_mainline=piece_is_mainline,
         piece_cover=piece_cover,
         piece_auto_covered=piece_auto_covered,
@@ -839,6 +1014,10 @@ def build_model(
     # Strong disaggregated feeding/coverage: a piece may be energized only if an
     # in-range substation is built. Pieces fed by a pre-existing substation are
     # unconstrained; pieces with no in-range candidate (and no existing feed)
+    # are forced off.
+    # Feeding/coverage: a piece may be energized only if an in-range substation
+    # is built. Pieces fed by a pre-existing substation are auto-covered
+    # (unconstrained); pieces with no in-range candidate (and no existing feed)
     # are forced off.
     def _coverage_rule(m, p):
         if data.piece_auto_covered[p]:
@@ -966,13 +1145,43 @@ def build_model(
             )
         )
 
-    # Maximize total priority-weighted electrified track miles (each parallel
-    # track contributes, so wiring both directions is rewarded once structure
-    # is paid for). High-grade cells are up-weighted.
-    model.obj = pyo.Objective(
-        expr=sum(data.piece_benefit[p] * model.x[p] for p in model.P),
-        sense=pyo.maximize,
-    )
+    if inputs.objective == "min_cost":
+        # Minimize lifecycle cost = capital + discounted operating cost. The
+        # horizon/discount enter only via the scalar PVAF multiplying the annual
+        # per-piece operating cost, so the program stays linear.
+        if inputs.economics is None:
+            raise ValueError(
+                "objective='min_cost' requires `economics` (an EconomicParameters)."
+            )
+        if inputs.piece_opex_fn is None:
+            raise ValueError(
+                "objective='min_cost' requires `piece_opex_fn` to supply per-piece "
+                "annual operating cost."
+            )
+        pvaf = inputs.economics.pvaf()
+        model.obj = pyo.Objective(
+            expr=(
+                sum(data.struct_cost[c] * model.s[c] for c in model.C)
+                + sum(data.piece_marginal_cost[p] * model.x[p] for p in model.P)
+                + sum(data.sub_cost[j] * model.y[j] for j in model.J)
+                + pvaf
+                * sum(data.piece_annual_opex[p] * model.x[p] for p in model.P)
+            ),
+            sense=pyo.minimize,
+        )
+    elif inputs.objective == "max_benefit":
+        # Maximize total priority-weighted electrified track miles (each parallel
+        # track contributes, so wiring both directions is rewarded once structure
+        # is paid for). High-grade cells are up-weighted.
+        model.obj = pyo.Objective(
+            expr=sum(data.piece_benefit[p] * model.x[p] for p in model.P),
+            sense=pyo.maximize,
+        )
+    else:
+        raise ValueError(
+            f"Unknown objective {inputs.objective!r}; expected 'max_benefit' or "
+            "'min_cost'."
+        )
 
     return model
 
@@ -1024,6 +1233,17 @@ def extract_result(
     energized_track_miles = sum(data.piece_miles[p] for p in energized_pieces)
     objective_value = float(pyo.value(model.obj))
 
+    # Lifecycle economics (only meaningful in min-cost mode).
+    annual_opex_cost: Optional[float] = None
+    discounted_opex_cost: Optional[float] = None
+    lifecycle_cost: Optional[float] = None
+    if inputs.objective == "min_cost" and inputs.economics is not None:
+        annual_opex_cost = sum(
+            data.piece_annual_opex[p] for p in energized_pieces
+        )
+        discounted_opex_cost = inputs.economics.pvaf() * annual_opex_cost
+        lifecycle_cost = total_cost + discounted_opex_cost
+
     # Collect energized sub-intervals per link and merge overlaps.
     raw_intervals: Dict[int, List[Tuple[float, float]]] = {}
     for p in energized_pieces:
@@ -1060,6 +1280,9 @@ def extract_result(
         total_cost=total_cost,
         energized_track_miles=energized_track_miles,
         objective_value=objective_value,
+        annual_opex_cost=annual_opex_cost,
+        discounted_opex_cost=discounted_opex_cost,
+        lifecycle_cost=lifecycle_cost,
         status=status,
     )
 

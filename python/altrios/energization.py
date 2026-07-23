@@ -1,15 +1,19 @@
 """Utilities for placing energization (e.g. catenary or wireless power transfer) power limits on a network."""
 
 from __future__ import annotations
-from typing import TYPE_CHECKING, Optional, Tuple, List, Dict
+import math
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Callable, Optional, Tuple, List, Dict, Union
 
 # local imports
 import altrios as alt
 
 if TYPE_CHECKING:
     from altrios.optimization.energization_placement import (
+        EconomicParameters,
         EnergizationOptCosts,
         EnergizationPlacementResult,
+        PieceBenefitContext,
         Substation,
     )
 
@@ -24,6 +28,13 @@ DEFAULT_SUBSTATION_MAX_POWER_WATTS = 20.0e6
 #: 50163 minimum of 17.5 kV on a 25 kV nominal system.
 DEFAULT_MIN_PANTOGRAPH_VOLTAGE_FRACTION = 0.7
 
+#: Default substation conversion efficiency (grid -> catenary) when a
+#: :class:`Substation` does not set its own ``efficiency``. 0.99 is representative
+#: of an AC traction substation (a step-down transformer, ~1% loss). DC substations
+#: additionally rectify AC to DC and are typically a few percent less efficient
+#: (~0.97); set ``Substation.efficiency`` accordingly for DC feeds.
+DEFAULT_SUBSTATION_EFFICIENCY = 0.99
+
 #: Literature (Route A) loop series impedance defaults per electrification type,
 #: given as ``(resistance_ohms_per_km, reactance_ohms_per_km)`` of the catenary
 #: loop (contact + messenger + return). Resistance drives energy loss; reactance
@@ -32,11 +43,290 @@ DEFAULT_MIN_PANTOGRAPH_VOLTAGE_FRACTION = 0.7
 #: impedance of a 2x25 kV autotransformer feed (current largely runs in the
 #: feeder, roughly halving effective impedance). ``ac_50kv`` shares the 25 kV
 #: single-track geometry; its benefit comes from the ``1/V**2`` loss scaling.
+#: The ``dc_*`` entries are DC systems: reactance is zero (no AC). ``dc_1500v`` and
+#: ``dc_3kv`` are conventional low-voltage DC railways, whose heavier conductors /
+#: conductor rail give low loop resistance. ``dc_9kv`` is a high-voltage DC (HVDC)
+#: railway feed: the higher voltage carries the same power at lower current, so it
+#: shares the lighter, standard-catenary single-track geometry (resistance near the
+#: 25 kV AC value) while its ``1/V**2`` loss scaling and DC (zero-reactance) feed
+#: allow much wider substation spacing. Pair each ``dc_*`` type with a matching DC
+#: ``system_voltage_volts`` (1500, 3000, or 9000) and a lower ``Substation.efficiency``
+#: to account for rectifier conversion loss.
 ELECTRIFICATION_IMPEDANCE_DEFAULTS: Dict[str, Tuple[float, float]] = {
     "ac_25kv_1x25": (0.20, 0.50),
     "ac_2x25_at": (0.075, 0.15),
     "ac_50kv": (0.20, 0.50),
+    "dc_1500v": (0.03, 0.0),
+    "dc_3kv": (0.04, 0.0),
+    "dc_9kv": (0.20, 0.0),
 }
+
+#: Default design per-train peak catenary power draw (W) used to size feed
+#: distance and substation ratings. ~10 MW is a representative peak for a
+#: partially electrified dual-mode freight consist (a handful of ~3.3 MW electric
+#: locomotives); the ALTRIOS catenary demo uses 50 MW as an effectively unlimited
+#: cap. Override per corridor/traffic assumption.
+DEFAULT_DESIGN_TRAIN_POWER_WATTS = 10.0e6
+
+
+@dataclass
+class ElectrificationConfig:
+    """A named electrification configuration (voltage + impedance + limits).
+
+    Bundles the electrical assumptions that distinguish, e.g., 9 kV HVDC from
+    25 kV or 50 kV AC. Impedance is stored per meter (loop series R/X). These are
+    the physical inputs consumed by the line-loss model and by
+    :func:`suggest_optimization_inputs`.
+    """
+
+    #: Human-readable configuration name.
+    name: str
+    #: Nominal catenary voltage (V).
+    system_voltage_volts: float
+    #: Key into :data:`ELECTRIFICATION_IMPEDANCE_DEFAULTS` (also passed straight
+    #: through to :func:`apply_line_losses` as ``electrification_type``).
+    electrification_type: str
+    #: Loop series resistance per meter (ohm/m).
+    resistance_ohms_per_meter: float
+    #: Loop series reactance per meter (ohm/m); ``0.0`` for DC.
+    reactance_ohms_per_meter: float
+    #: Grid -> catenary substation conversion efficiency (transformer, plus
+    #: rectifier for DC).
+    substation_efficiency: float = DEFAULT_SUBSTATION_EFFICIENCY
+    #: On-board FRONT-END (pantograph -> traction DC link) conversion efficiency,
+    #: i.e. the stage UPSTREAM of the traction inverter/motor (which ALTRIOS models
+    #: separately as ``ElectricDrivetrain.eta``, so it must NOT be included here to
+    #: avoid double counting). AC locomotives carry a step-down transformer plus
+    #: rectifier (~1.5% + ~2.0% loss => ~0.965); DC needs only a chopper/filter
+    #: (~1.0% loss => ~0.99). The core sim uses a flat 0.99 regardless of type;
+    #: this field lets the illustrative energy/opex model reflect the AC-vs-DC
+    #: front-end difference.
+    onboard_efficiency: float = 0.99
+    #: Minimum allowed pantograph voltage as a fraction of nominal.
+    min_pantograph_voltage_fraction: float = DEFAULT_MIN_PANTOGRAPH_VOLTAGE_FRACTION
+
+
+def _config_from_defaults(
+    name: str,
+    voltage: float,
+    etype: str,
+    *,
+    efficiency: float,
+    onboard_efficiency: float,
+    min_voltage_fraction: float,
+) -> ElectrificationConfig:
+    """Build an :class:`ElectrificationConfig` using the per-km impedance table."""
+    r_km, x_km = ELECTRIFICATION_IMPEDANCE_DEFAULTS[etype]
+    return ElectrificationConfig(
+        name=name,
+        system_voltage_volts=voltage,
+        electrification_type=etype,
+        resistance_ohms_per_meter=r_km / 1000.0,
+        reactance_ohms_per_meter=x_km / 1000.0,
+        substation_efficiency=efficiency,
+        onboard_efficiency=onboard_efficiency,
+        min_pantograph_voltage_fraction=min_voltage_fraction,
+    )
+
+
+#: Built-in electrification presets keyed by a short name. AC systems use a 0.99
+#: (transformer-only) substation efficiency, a ~0.965 on-board FRONT-END efficiency
+#: (step-down transformer ~1.5% + rectifier ~2.0%), and the EN 50163 0.7
+#: minimum-voltage fraction; DC systems use a lower substation efficiency (AC->DC
+#: rectifier loss), a higher ~0.99 on-board front-end efficiency (chopper/filter,
+#: no on-board transformer), and the ~0.67 DC minimum-voltage fraction. The on-board
+#: values exclude the traction inverter/motor (modeled by ``ElectricDrivetrain``).
+ELECTRIFICATION_CONFIGS: Dict[str, ElectrificationConfig] = {
+    "ac_25kv": _config_from_defaults(
+        "ac_25kv", 25_000.0, "ac_25kv_1x25",
+        efficiency=0.99, onboard_efficiency=0.965, min_voltage_fraction=0.7,
+    ),
+    "ac_2x25": _config_from_defaults(
+        "ac_2x25", 25_000.0, "ac_2x25_at",
+        efficiency=0.99, onboard_efficiency=0.965, min_voltage_fraction=0.7,
+    ),
+    "ac_50kv": _config_from_defaults(
+        "ac_50kv", 50_000.0, "ac_50kv",
+        efficiency=0.99, onboard_efficiency=0.965, min_voltage_fraction=0.7,
+    ),
+    "dc_9kv": _config_from_defaults(
+        "dc_9kv", 9_000.0, "dc_9kv",
+        efficiency=0.97, onboard_efficiency=0.99, min_voltage_fraction=0.67,
+    ),
+    "dc_3kv": _config_from_defaults(
+        "dc_3kv", 3_000.0, "dc_3kv",
+        efficiency=0.975, onboard_efficiency=0.99, min_voltage_fraction=0.67,
+    ),
+    "dc_1500v": _config_from_defaults(
+        "dc_1500v", 1_500.0, "dc_1500v",
+        efficiency=0.975, onboard_efficiency=0.99, min_voltage_fraction=0.67,
+    ),
+}
+
+
+@dataclass
+class SuggestedOptimizationInputs:
+    """Config-derived defaults for the energization optimizer and line-loss model.
+
+    Produced by :func:`suggest_optimization_inputs`. The first block feeds the
+    placement optimizer (:func:`energize_optimized` /
+    ``EnergizationPlacementInputs``); the electrical block feeds
+    :func:`apply_line_losses` and populates each ``Substation``.
+    """
+
+    #: -- Placement-optimizer inputs --
+    #: Per-train power limit (W) to stamp on every energized segment.
+    uniform_power_limit_watts: float
+    #: Suggested substation feeding/spacing radius (miles).
+    substation_feed_distance_miles: float
+    #: -- Substation / line-loss inputs --
+    #: Suggested substation power rating (W).
+    substation_max_power_watts: float
+    #: Suggested substation conversion efficiency.
+    substation_efficiency: float
+    #: On-board (pantograph -> traction) conversion efficiency (AC vs DC).
+    onboard_efficiency: float
+    #: Nominal catenary voltage (V).
+    system_voltage_volts: float
+    #: Electrification-type key for ``apply_line_losses``.
+    electrification_type: str
+    #: Loop series resistance per meter (ohm/m).
+    resistance_ohms_per_meter: float
+    #: Loop series reactance per meter (ohm/m).
+    reactance_ohms_per_meter: float
+    #: Minimum pantograph voltage fraction.
+    min_pantograph_voltage_fraction: float
+    #: The design per-train peak power (W) used to derive the values above.
+    design_train_power_watts: float
+
+    def optimizer_kwargs(self) -> Dict[str, float]:
+        """Keyword args for :func:`energize_optimized` (power limit + feed distance)."""
+        return {
+            "uniform_power_limit_watts": self.uniform_power_limit_watts,
+            "substation_feed_distance_miles": self.substation_feed_distance_miles,
+        }
+
+    def line_loss_kwargs(self) -> Dict[str, float]:
+        """Keyword args for :func:`apply_line_losses` (electrical assumptions)."""
+        return {
+            "system_voltage_volts": self.system_voltage_volts,
+            "electrification_type": self.electrification_type,
+            "resistance_ohms_per_meter": self.resistance_ohms_per_meter,
+            "reactance_ohms_per_meter": self.reactance_ohms_per_meter,
+            "default_substation_max_power_watts": self.substation_max_power_watts,
+            "default_substation_efficiency": self.substation_efficiency,
+            "min_pantograph_voltage_fraction": self.min_pantograph_voltage_fraction,
+        }
+
+
+def suggest_optimization_inputs(
+    config: Union[str, ElectrificationConfig],
+    *,
+    design_train_power_watts: float = DEFAULT_DESIGN_TRAIN_POWER_WATTS,
+    concurrent_trains_per_substation: float = 2.0,
+    min_feed_distance_miles: Optional[float] = 1.0,
+    max_feed_distance_miles: Optional[float] = None,
+) -> SuggestedOptimizationInputs:
+    """Derive reasonable optimizer/line-loss inputs from an electrification choice.
+
+    Given a configuration (e.g. ``"dc_9kv"``, ``"ac_25kv"``, ``"ac_50kv"``), this
+    pre-processing step computes a physically motivated substation feeding radius
+    and per-train power limit, plus matching substation rating and electrical
+    assumptions, so the optimizer and the line-loss model can be configured
+    consistently for that voltage class.
+
+    Feed distance is sized from the AC/DC voltage-drop limit (the same model used
+    by :func:`apply_line_losses`). For a train drawing the design power ``P_d`` at
+    the *single-sided* coverage boundary (distance ``d`` from its only feeding
+    substation), the pantograph voltage stays at or above the minimum fraction
+    ``f`` of nominal ``V`` when
+
+    .. math::
+
+        V\\,(1 - f)\\,V \\;\\ge\\; |Z|\\,d\\,\\frac{P_d}{V}
+        \\quad\\Longrightarrow\\quad
+        d \\;\\le\\; \\frac{V^2 (1 - f)}{|Z|\\,P_d},
+
+    where :math:`|Z| = \\sqrt{R^2 + X^2}` is the per-meter loop impedance. The
+    suggested ``substation_feed_distance_miles`` is this ``d`` (interior track fed
+    from two substations gets roughly double the capability, so this is
+    conservative). Because ``d`` scales as ``V**2``, higher voltages permit much
+    wider substation spacing; DC's zero reactance further reduces ``|Z|``.
+
+    Parameters
+    ----------
+    config : str or ElectrificationConfig
+        A key into :data:`ELECTRIFICATION_CONFIGS` (case-insensitive) or an
+        explicit :class:`ElectrificationConfig`.
+    design_train_power_watts : float, default 10 MW
+        Peak per-train catenary power the system must sustain at the coverage
+        boundary. Also used as the per-segment ``uniform_power_limit_watts``.
+    concurrent_trains_per_substation : float, default 2.0
+        Number of design-power trains a substation should feed simultaneously;
+        sets ``substation_max_power_watts = design_power * this``.
+    min_feed_distance_miles, max_feed_distance_miles : float, optional
+        Optional clamps on the derived feed distance. ``min`` defaults to 1 mile
+        (avoids a degenerate near-zero radius); ``max`` is unset by default.
+
+    Returns
+    -------
+    SuggestedOptimizationInputs
+        The derived values, with ``optimizer_kwargs()`` / ``line_loss_kwargs()``
+        helpers for wiring into :func:`energize_optimized` and
+        :func:`apply_line_losses`.
+
+    Raises
+    ------
+    KeyError
+        If ``config`` is an unknown preset name.
+    ValueError
+        If ``design_train_power_watts`` is not positive.
+    """
+    if isinstance(config, str):
+        key = config.lower()
+        if key not in ELECTRIFICATION_CONFIGS:
+            raise KeyError(
+                f"Unknown electrification config {config!r}; choose from "
+                f"{sorted(ELECTRIFICATION_CONFIGS)} or pass an ElectrificationConfig."
+            )
+        cfg = ELECTRIFICATION_CONFIGS[key]
+    else:
+        cfg = config
+
+    if design_train_power_watts <= 0.0:
+        raise ValueError("design_train_power_watts must be positive.")
+
+    v = float(cfg.system_voltage_volts)
+    f = float(cfg.min_pantograph_voltage_fraction)
+    z_mag = math.hypot(
+        float(cfg.resistance_ohms_per_meter), float(cfg.reactance_ohms_per_meter)
+    )
+    p_d = float(design_train_power_watts)
+
+    if z_mag > 0.0:
+        feed_m = v * v * (1.0 - f) / (z_mag * p_d)
+    else:
+        feed_m = float("inf")
+    feed_mi = feed_m * alt.utilities.MI_PER_M
+    if max_feed_distance_miles is not None:
+        feed_mi = min(feed_mi, float(max_feed_distance_miles))
+    if min_feed_distance_miles is not None:
+        feed_mi = max(feed_mi, float(min_feed_distance_miles))
+
+    return SuggestedOptimizationInputs(
+        uniform_power_limit_watts=p_d,
+        substation_feed_distance_miles=feed_mi,
+        substation_max_power_watts=p_d * float(concurrent_trains_per_substation),
+        substation_efficiency=float(cfg.substation_efficiency),
+        onboard_efficiency=float(cfg.onboard_efficiency),
+        system_voltage_volts=v,
+        electrification_type=cfg.electrification_type,
+        resistance_ohms_per_meter=float(cfg.resistance_ohms_per_meter),
+        reactance_ohms_per_meter=float(cfg.reactance_ohms_per_meter),
+        min_pantograph_voltage_fraction=f,
+        design_train_power_watts=p_d,
+    )
+
 
 
 
@@ -140,6 +430,10 @@ def energize_optimized(
     structure_spacing_miles: Optional[float] = None,
     corridor_width_miles: float = 0.05,
     min_energized_length_miles: Optional[float] = None,
+    objective: str = "max_benefit",
+    economics: Optional["EconomicParameters"] = None,
+    piece_opex_fn: Optional[Callable[["PieceBenefitContext"], float]] = None,
+    piece_benefit_fn: Optional[Callable[["PieceBenefitContext"], float]] = None,
     time_limit_seconds: Optional[float] = None,
     mip_gap: Optional[float] = None,
     tee: bool = False,
@@ -200,6 +494,22 @@ def energize_optimized(
         slivers even when structure/substation costs are zero; the run may start
         at any position. Requires structure-site mode
         (``structure_spacing_miles``); ``None`` (default) disables it.
+    objective : str, default "max_benefit"
+        ``"max_benefit"`` maximizes priority-weighted (grade) benefit subject to
+        ``budget`` -- the rule-based formulation. ``"min_cost"`` instead minimizes
+        lifecycle cost = capital + discounted operating cost, and requires
+        ``economics`` and ``piece_opex_fn``.
+    economics : EconomicParameters, optional
+        Horizon + discount rate for ``"min_cost"`` mode (see
+        :class:`~altrios.optimization.energization_placement.EconomicParameters`).
+    piece_opex_fn : callable, optional
+        ``PieceBenefitContext -> float`` giving each piece's **annual net operating
+        cost** ($/yr, electricity minus displaced diesel; negative = saving).
+        Required for ``"min_cost"``. Build it from a first-pass dual-mode
+        simulation and prices via :func:`make_piece_opex_fn`.
+    piece_benefit_fn : callable, optional
+        ``PieceBenefitContext -> float`` overriding the default grade-priority
+        benefit in ``"max_benefit"`` mode.
     time_limit_seconds : float, optional
         Solver wall-clock time limit (s). ``None`` (default) means no limit.
     mip_gap : float, optional
@@ -231,6 +541,10 @@ def energize_optimized(
         structure_spacing_miles=structure_spacing_miles,
         corridor_width_miles=corridor_width_miles,
         min_energized_length_miles=min_energized_length_miles,
+        objective=objective,
+        economics=economics,
+        piece_opex_fn=piece_opex_fn,
+        piece_benefit_fn=piece_benefit_fn,
     )
     return cp.optimize_energization_placement(
         inputs,
@@ -238,6 +552,68 @@ def energize_optimized(
         mip_gap=mip_gap,
         tee=tee,
     )
+
+
+def make_piece_opex_fn(
+    *,
+    diesel_gallons_per_track_mile_by_link: Dict[int, float],
+    electricity_kwh_per_track_mile_by_link: Dict[int, float],
+    diesel_price_usd_per_gallon: float,
+    electricity_price_usd_per_kwh: float,
+    default_diesel_gallons_per_track_mile: float = 0.0,
+    default_electricity_kwh_per_track_mile: float = 0.0,
+) -> Callable[["PieceBenefitContext"], float]:
+    """Build a per-piece annual operating-cost function for ``objective="min_cost"``.
+
+    Returns a callable suitable for ``energize_optimized(piece_opex_fn=...)`` /
+    ``EnergizationPlacementInputs.piece_opex_fn``. For each piece it computes the
+    **annual net operating cost delta** of electrifying that piece:
+
+    ``opex = electricity_price * kwh - diesel_price * gallons``
+
+    where ``kwh`` and ``gallons`` are the piece's annual electricity purchased and
+    annual diesel displaced (both = per-track-mile density * piece length_miles).
+    A negative result is a saving. Because the optimizer only sees this scalar per
+    piece, all traffic/loading assumptions live here, in the densities:
+
+    The per-link densities encode **all the traffic assumptions** -- trains per
+    day, tonnage/loading, consist makeup (how many locomotives, how many dual-mode)
+    -- because they are meant to be produced by aggregating first-pass dual-mode
+    simulations over an annual train set (e.g. via the ALTRIOS demand /
+    train-planner / sim_manager pipeline and the ``annualize`` convention). The
+    electricity density should already include catenary line loss and substation
+    conversion loss (grid-side energy); the diesel density is the fuel the
+    dual-mode consist would otherwise burn on that segment.
+
+    Parameters
+    ----------
+    diesel_gallons_per_track_mile_by_link : dict[int, float]
+        Annual diesel gallons displaced per track-mile, keyed by link index.
+    electricity_kwh_per_track_mile_by_link : dict[int, float]
+        Annual grid-side electricity (kWh) purchased per track-mile, keyed by link
+        index.
+    diesel_price_usd_per_gallon, electricity_price_usd_per_kwh : float
+        Fuel and electricity prices.
+    default_diesel_gallons_per_track_mile, default_electricity_kwh_per_track_mile : float
+        Fallback densities for links absent from the maps (default 0).
+
+    Returns
+    -------
+    callable
+        ``PieceBenefitContext -> float`` annual net operating cost ($/yr).
+    """
+    def _opex(ctx: "PieceBenefitContext") -> float:
+        gal_per_mi = diesel_gallons_per_track_mile_by_link.get(
+            ctx.link_idx, default_diesel_gallons_per_track_mile
+        )
+        kwh_per_mi = electricity_kwh_per_track_mile_by_link.get(
+            ctx.link_idx, default_electricity_kwh_per_track_mile
+        )
+        gallons = gal_per_mi * ctx.length_miles
+        kwh = kwh_per_mi * ctx.length_miles
+        return electricity_price_usd_per_kwh * kwh - diesel_price_usd_per_gallon * gallons
+
+    return _opex
 
 
 def _compute_energized_intervals(
@@ -604,6 +980,7 @@ def apply_line_losses(
     reactance_ohms_per_meter: Optional[float] = None,
     electrification_type: str = "ac_25kv_1x25",
     default_substation_max_power_watts: float = DEFAULT_SUBSTATION_MAX_POWER_WATTS,
+    default_substation_efficiency: float = DEFAULT_SUBSTATION_EFFICIENCY,
     min_pantograph_voltage_fraction: float = DEFAULT_MIN_PANTOGRAPH_VOLTAGE_FRACTION,
     base_power_limit_watts: Optional[float] = None,
     sample_spacing_meters: float = 200.0,
@@ -649,6 +1026,10 @@ def apply_line_losses(
         Key into :data:`ELECTRIFICATION_IMPEDANCE_DEFAULTS` for default impedance.
     default_substation_max_power_watts : float
         Fallback substation power rating when a substation omits ``max_power_watts``.
+    default_substation_efficiency : float, default 0.99
+        Fallback grid->catenary conversion efficiency when a substation omits
+        ``efficiency``. 0.99 suits AC (transformer only); use a lower value (~0.97)
+        for DC substations to capture AC->DC rectifier loss.
     min_pantograph_voltage_fraction : float, default 0.7
         Minimum allowed pantograph voltage as a fraction of nominal, for the
         voltage-drop-limited capacity.
@@ -666,8 +1047,9 @@ def apply_line_losses(
     tuple of (alt.Network, dict)
         The derated network and a ``substation_meta`` dict keyed by string
         district id, each with ``grid_emissions_region``, ``max_power_watts``,
-        ``voltage_volts``, and corridor ``arc_meters``. Pass the metadata to
-        :func:`compute_line_losses` for grid-region attribution.
+        ``voltage_volts``, ``efficiency``, and corridor ``arc_meters``. Pass the
+        metadata to :func:`compute_line_losses` for grid-region attribution and
+        conversion-loss scaling.
     """
     import math
     from altrios.optimization.energization_placement import _link_midpoint_latlon
@@ -719,11 +1101,17 @@ def apply_line_losses(
             else default_substation_max_power_watts
         )
         volt = sub.voltage_volts if sub.voltage_volts is not None else system_voltage_volts
+        eff = (
+            sub.efficiency
+            if getattr(sub, "efficiency", None) is not None
+            else default_substation_efficiency
+        )
         rec = {
             "id": did,
             "arc": arc,
             "max_power_watts": float(max_p),
             "voltage_volts": float(volt),
+            "efficiency": float(eff),
             "grid_emissions_region": sub.grid_emissions_region,
         }
         sub_records.append(rec)
@@ -731,6 +1119,7 @@ def apply_line_losses(
             "grid_emissions_region": sub.grid_emissions_region,
             "max_power_watts": float(max_p),
             "voltage_volts": float(volt),
+            "efficiency": float(eff),
             "arc_meters": arc,
         }
     sub_records.sort(key=lambda s: s["arc"])
@@ -875,8 +1264,10 @@ def compute_line_losses(
     polars.DataFrame
         One row per district with ``district_id``, ``grid_emissions_region``,
         ``line_loss_energy_joules``, ``catenary_energy_joules`` (pantograph
-        energy drawn), and ``substation_energy_joules`` (pantograph + loss). A
-        final ``"__total__"`` row carries the network-wide totals.
+        energy drawn), and ``substation_energy_joules`` (grid-side substation
+        input = pantograph + line loss, scaled up by ``1/efficiency`` when the
+        substation's conversion ``efficiency`` is known from ``substation_meta``).
+        A final ``"__total__"`` row carries the network-wide totals.
 
     Notes
     -----
@@ -984,22 +1375,31 @@ def compute_line_losses(
 
     districts = sorted(set(loss_w) | set(cat_w), key=lambda d: (d is None, d))
     rows = []
+    total_substation_grid = 0.0
     for did in districts:
         region = None
+        efficiency = 1.0
         if substation_meta is not None and did in substation_meta:
             region = substation_meta[did].get("grid_emissions_region")
+            eff = substation_meta[did].get("efficiency")
+            if eff:
+                efficiency = float(eff)
         # Apportion the exact totals by the sampled-power weights.
         loss_frac = (loss_w.get(did, 0.0) / loss_w_sum) if loss_w_sum > 0 else 0.0
         cat_frac = (cat_w.get(did, 0.0) / cat_w_sum) if cat_w_sum > 0 else 0.0
         loss_j = total_loss * loss_frac
         cat_j = total_cat * cat_frac
+        # Grid-side substation input includes catenary line loss and is scaled up
+        # by the substation's conversion (transformer/rectifier) efficiency.
+        substation_grid_j = (cat_j + loss_j) / efficiency if efficiency > 0 else cat_j + loss_j
+        total_substation_grid += substation_grid_j
         rows.append(
             {
                 "district_id": did,
                 "grid_emissions_region": region,
                 "line_loss_energy_joules": loss_j,
                 "catenary_energy_joules": cat_j,
-                "substation_energy_joules": cat_j + loss_j,
+                "substation_energy_joules": substation_grid_j,
             }
         )
     rows.append(
@@ -1008,7 +1408,7 @@ def compute_line_losses(
             "grid_emissions_region": None,
             "line_loss_energy_joules": total_loss,
             "catenary_energy_joules": total_cat,
-            "substation_energy_joules": total_cat + total_loss,
+            "substation_energy_joules": total_substation_grid,
         }
     )
     return pl.DataFrame(rows)
