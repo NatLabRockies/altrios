@@ -44,7 +44,9 @@ from __future__ import annotations
 import math
 from typing import Optional, Tuple
 
+import numpy as np
 import polars as pl
+from numba import njit
 
 #: Columns (and dtypes) of a refueling-session record.
 REFUEL_SESSION_SCHEMA = {
@@ -79,25 +81,92 @@ def empty_refuel_sessions() -> pl.DataFrame:
     return pl.DataFrame(schema=REFUEL_SESSION_SCHEMA)
 
 
-def _next_departure_map(
-    departures: Optional[pl.DataFrame], current_time: float
-) -> dict:
-    """
-    Map each locomotive to its next scheduled departure strictly after ``current_time``.
+@njit(cache=True)
+def _assign_ports(
+    group_id,
+    is_new,
+    arrival,
+    done,
+    rate,
+    eff,
+    ideal,
+    next_dep,
+    port_count,
+    current_time,
+):
+    """Sequential earliest-freeing-port assignment over contiguous charger groups.
 
-    Returns an empty dict when ``departures`` is ``None`` (planner regime: charging is
-    not capped by a known future departure).
+    Rows are pre-sorted so each charger group is contiguous, with in-progress
+    sessions (``is_new == 0``, sorted by finish time) first and newly queued
+    locomotives (``is_new == 1``, sorted by arrival then ID) after. For each new
+    locomotive the earliest-freeing port is chosen; ``next_dep`` caps the finish
+    time (``inf`` disables the cap). Results are written per row; ``scheduled``
+    flags the rows that received a session.
     """
-    if departures is None:
-        return {}
-    nd = (
-        departures.filter(pl.col("Departure_Time_Hr") > current_time)
-        .group_by("Locomotive_ID")
-        .agg(pl.col("Departure_Time_Hr").min())
-    )
-    return dict(
-        zip(nd.get_column("Locomotive_ID").to_list(), nd.get_column("Departure_Time_Hr").to_list())
-    )
+    n = group_id.shape[0]
+    out_start = np.zeros(n)
+    out_end = np.zeros(n)
+    out_dur = np.zeros(n)
+    out_ebatt = np.zeros(n)
+    out_egrid = np.zeros(n)
+    scheduled = np.zeros(n, dtype=np.int8)
+
+    i = 0
+    while i < n:
+        gid = group_id[i]
+        j = i
+        while j < n and group_id[j] == gid:
+            j += 1
+
+        pc = port_count[i]
+        if pc > 0:
+            # Seed ports with the finish times of still-charging sessions (smallest
+            # first); the remaining ports are free now (-inf).
+            ports = np.full(pc, -np.inf)
+            k = 0
+            idx = i
+            while idx < j and is_new[idx] == 0:
+                if done[idx] > current_time and k < pc:
+                    ports[k] = done[idx]
+                    k += 1
+                idx += 1
+
+            # Assign each newly queued locomotive to the earliest-freeing port.
+            while idx < j:
+                best = 0
+                for p in range(1, pc):
+                    if ports[p] < ports[best]:
+                        best = p
+                start = ports[best]
+                if arrival[idx] > start:
+                    start = arrival[idx]
+                dur_ideal = ideal[idx]
+                if not (dur_ideal > 0.0):
+                    dur_ideal = 0.0
+                end = start + dur_ideal
+                if end > next_dep[idx]:
+                    end = next_dep[idx]
+                if end < start:
+                    end = start
+                ports[best] = end
+
+                dur = end - start
+                ebatt = dur * rate[idx]
+                if eff[idx] != 0.0:
+                    egrid = ebatt / eff[idx]
+                else:
+                    egrid = 0.0
+
+                out_start[idx] = start
+                out_end[idx] = end
+                out_dur[idx] = dur
+                out_ebatt[idx] = ebatt
+                out_egrid[idx] = egrid
+                scheduled[idx] = 1
+                idx += 1
+        i = j
+
+    return out_start, out_end, out_dur, out_ebatt, out_egrid, scheduled
 
 
 def _schedule_refueling(
@@ -113,131 +182,117 @@ def _schedule_refueling(
     (null ``Refueling_Done_Time_Hr``) are assigned to the earliest-freeing port,
     processed in arrival-then-ID order within each charger group.
 
+    The per-group sequential assignment runs in a single Numba kernel over flat
+    arrays, avoiding per-group DataFrame materialization and per-row iteration.
+
     Returns the updated ``loco_pool`` and a DataFrame of the sessions started here.
     """
-    dep_map = _next_departure_map(departures, current_time)
-    cap = departures is not None
-
-    # A charger is defined by node, locomotive type, and fuel type.
-    groups = loco_pool.filter(pl.col("Status") == "Refuel_Queue").partition_by(
-        ["Node", "Locomotive_Type", "Fuel_Type"]
-    )
-
-    updated_ids: list = []
-    updated_start: list = []
-    updated_end: list = []
-    updated_duration: list = []
-    updated_energy_batt: list = []
-    session_rows: list = []
-
-    for group in groups:
-        port_count = int(group.get_column("Port_Count")[0])
-        if port_count <= 0:
-            continue
-
-        # Ports already occupied by in-progress sessions free up at their done times.
-        occupied = sorted(
-            done
-            for done in group.filter(
-                pl.col("Refueling_Done_Time_Hr").is_not_null()
-            )
-            .get_column("Refueling_Done_Time_Hr")
-            .to_list()
-            if done > current_time
-        )
-        # Remaining ports are available now; represent availability with -inf.
-        ports = occupied[:port_count] + [-math.inf] * max(0, port_count - len(occupied))
-
-        newly_queued = group.filter(
-            pl.col("Refueling_Done_Time_Hr").is_null()
-        ).sort(["Arrival_Time_Hr", "Locomotive_ID"])
-
-        for row in newly_queued.iter_rows(named=True):
-            arrival = row["Arrival_Time_Hr"]
-            rate = row["Refueler_J_Per_Hr"]
-            efficiency = row["Refueler_Efficiency"]
-            ideal_duration = max(0.0, row["Refuel_Duration_Hr"])
-            soc_before = row["SOC_J"]
-
-            # Take the earliest-freeing port.
-            earliest = min(ports)
-            port_idx = ports.index(earliest)
-            start = max(earliest, arrival)
-            end = start + ideal_duration
-            if cap:
-                end = min(end, dep_map.get(row["Locomotive_ID"], math.inf))
-            end = max(end, start)
-            duration = end - start
-            ports[port_idx] = end
-
-            energy_batt = duration * rate
-            energy_grid = energy_batt / efficiency if efficiency else 0.0
-
-            updated_ids.append(row["Locomotive_ID"])
-            updated_start.append(start)
-            updated_end.append(end)
-            updated_duration.append(duration)
-            updated_energy_batt.append(energy_batt)
-
-            session_rows.append(
-                {
-                    "Locomotive_ID": row["Locomotive_ID"],
-                    "Node": row["Node"],
-                    "Locomotive_Type": row["Locomotive_Type"],
-                    "Fuel_Type": row["Fuel_Type"],
-                    "Refueler_J_Per_Hr": rate,
-                    "Refueler_Efficiency": efficiency,
-                    "Trip_Energy_J": row["Trip_Energy_J"],
-                    "SOC_J": soc_before,
-                    "Refuel_Energy_J": energy_grid,
-                    "Refuel_Duration_Hr": duration,
-                    "Refuel_Start_Time_Hr": start,
-                    "Refuel_End_Time_Hr": end,
-                }
-            )
-
-    if not updated_ids:
+    queue = loco_pool.filter(pl.col("Status") == "Refuel_Queue")
+    if queue.height == 0:
         return loco_pool, empty_refuel_sessions()
 
-    updates = pl.DataFrame(
-        {
-            "Locomotive_ID": pl.Series(updated_ids, dtype=pl.UInt32),
-            "__start": updated_start,
-            "__end": updated_end,
-            "__duration": updated_duration,
-            "__energy_batt": updated_energy_batt,
-        }
+    # Next departure per locomotive (for the departure cap); inf disables the cap.
+    if departures is None:
+        queue = queue.with_columns(pl.lit(math.inf).alias("__next_dep"))
+    else:
+        next_dep = (
+            departures.filter(pl.col("Departure_Time_Hr") > current_time)
+            .group_by("Locomotive_ID")
+            .agg(pl.col("Departure_Time_Hr").min().alias("__next_dep"))
+        )
+        queue = queue.join(next_dep, on="Locomotive_ID", how="left").with_columns(
+            pl.col("__next_dep").fill_null(math.inf)
+        )
+
+    # Order rows so each charger group is contiguous, with in-progress sessions
+    # first (by finish time) and newly queued locomotives after (by arrival, ID).
+    queue = (
+        queue.with_columns(
+            pl.col("Refueling_Done_Time_Hr").is_null().alias("__is_new"),
+        )
+        .with_columns(
+            pl.when(pl.col("__is_new"))
+                .then(pl.col("Arrival_Time_Hr"))
+                .otherwise(pl.col("Refueling_Done_Time_Hr"))
+                .alias("__sort_val"),
+        )
+        .sort(
+            ["Node", "Locomotive_Type", "Fuel_Type", "__is_new", "__sort_val", "Locomotive_ID"]
+        )
+        .with_columns(
+            (
+                (pl.col("Node") != pl.col("Node").shift(1))
+                | (pl.col("Locomotive_Type") != pl.col("Locomotive_Type").shift(1))
+                | (pl.col("Fuel_Type") != pl.col("Fuel_Type").shift(1))
+            )
+            .fill_null(True)
+            .cum_sum()
+            .alias("__group_id"),
+        )
+    )
+
+    out_start, out_end, out_dur, out_ebatt, out_egrid, scheduled = _assign_ports(
+        queue.get_column("__group_id").to_numpy().astype(np.int64),
+        queue.get_column("__is_new").to_numpy().astype(np.int8),
+        queue.get_column("Arrival_Time_Hr").to_numpy().astype(np.float64),
+        queue.get_column("Refueling_Done_Time_Hr").to_numpy().astype(np.float64),
+        queue.get_column("Refueler_J_Per_Hr").to_numpy().astype(np.float64),
+        queue.get_column("Refueler_Efficiency").to_numpy().astype(np.float64),
+        queue.get_column("Refuel_Duration_Hr").to_numpy().astype(np.float64),
+        queue.get_column("__next_dep").to_numpy().astype(np.float64),
+        queue.get_column("Port_Count").fill_null(0).to_numpy().astype(np.int64),
+        float(current_time),
+    )
+
+    scheduled_rows = queue.with_columns(
+        pl.Series("__start", out_start),
+        pl.Series("__end", out_end),
+        pl.Series("__duration", out_dur),
+        pl.Series("__energy_batt", out_ebatt),
+        pl.Series("__energy_grid", out_egrid),
+        pl.Series("__scheduled", scheduled),
+    ).filter(pl.col("__scheduled") == 1)
+
+    if scheduled_rows.height == 0:
+        return loco_pool, empty_refuel_sessions()
+
+    # SOC recorded on the session is the pre-charge (arrival) value.
+    new_sessions = scheduled_rows.select(
+        "Locomotive_ID",
+        "Node",
+        "Locomotive_Type",
+        "Fuel_Type",
+        "Refueler_J_Per_Hr",
+        "Refueler_Efficiency",
+        "Trip_Energy_J",
+        "SOC_J",
+        pl.col("__energy_grid").alias("Refuel_Energy_J"),
+        pl.col("__duration").alias("Refuel_Duration_Hr"),
+        pl.col("__start").alias("Refuel_Start_Time_Hr"),
+        pl.col("__end").alias("Refuel_End_Time_Hr"),
+    ).cast(REFUEL_SESSION_SCHEMA)
+
+    updates = scheduled_rows.select(
+        "Locomotive_ID", "__start", "__end", "__duration", "__energy_batt"
     )
     loco_pool = (
         loco_pool.join(updates, on="Locomotive_ID", how="left")
         .with_columns(
             # SOC is raised at charging start so a locomotive's departing SOC is
             # known as soon as the session is scheduled.
-            pl.when(pl.col("__energy_batt").is_not_null())
-            .then(pl.col("SOC_J") + pl.col("__energy_batt"))
-            .otherwise(pl.col("SOC_J"))
-            .alias("SOC_J"),
-            pl.when(pl.col("__start").is_not_null())
-            .then(pl.col("__start"))
-            .otherwise(pl.col("Refuel_Start_Time_Hr"))
-            .alias("Refuel_Start_Time_Hr"),
-            pl.when(pl.col("__end").is_not_null())
-            .then(pl.col("__end"))
-            .otherwise(pl.col("Refueling_Done_Time_Hr"))
-            .alias("Refueling_Done_Time_Hr"),
-            pl.when(pl.col("__duration").is_not_null())
-            .then(pl.col("__duration"))
-            .otherwise(pl.col("Refuel_Duration_Hr"))
-            .alias("Refuel_Duration_Hr"),
-            pl.when(pl.col("__energy_batt").is_not_null())
-            .then(pl.col("__energy_batt") / pl.col("Refueler_Efficiency"))
-            .otherwise(pl.col("Refuel_Energy_J"))
-            .alias("Refuel_Energy_J"),
+            pl.coalesce(pl.col("SOC_J") + pl.col("__energy_batt"), pl.col("SOC_J"))
+                .alias("SOC_J"),
+            pl.coalesce("__start", "Refuel_Start_Time_Hr").alias("Refuel_Start_Time_Hr"),
+            pl.coalesce("__end", "Refueling_Done_Time_Hr").alias("Refueling_Done_Time_Hr"),
+            pl.coalesce("__duration", "Refuel_Duration_Hr").alias("Refuel_Duration_Hr"),
+            pl.coalesce(
+                pl.col("__energy_batt") / pl.col("Refueler_Efficiency"),
+                pl.col("Refuel_Energy_J"),
+            ).alias("Refuel_Energy_J"),
         )
         .drop(["__start", "__end", "__duration", "__energy_batt"])
     )
 
-    new_sessions = pl.DataFrame(session_rows, schema=REFUEL_SESSION_SCHEMA)
     return loco_pool, new_sessions
 
 
@@ -283,11 +338,15 @@ def update_refuel_queue(
     Tuple[pl.DataFrame, pl.DataFrame]
         Updated ``loco_pool`` and the (appended) ``refuel_sessions``.
     """
-    arrived = loco_pool.select(
-        (pl.col("Status") == "Dispatched") & (pl.col("Arrival_Time_Hr") <= current_time)
-    ).to_series()
+    arrived = (pl.col("Status") == "Dispatched") & (
+        pl.col("Arrival_Time_Hr") <= current_time
+    )
+    # Charging complete -> servicing (if still needed) or ready.
+    charging_done = (pl.col("Status") == "Refuel_Queue") & (
+        pl.col("Refueling_Done_Time_Hr") <= current_time
+    )
 
-    if arrived.sum() > 0:
+    if loco_pool.select(arrived.any()).item():
         loco_pool = (
             loco_pool.drop(
                 ["Refueler_J_Per_Hr", "Refueler_Efficiency", "Port_Count", "Battery_Headroom_J"]
@@ -297,36 +356,40 @@ def update_refuel_queue(
                 on=["Node", "Locomotive_Type", "Fuel_Type"],
                 how="left",
             )
+            # Materialize the arrival mask before mutating Status, so the later
+            # stages don't re-evaluate it against the updated Status.
+            .with_columns(arrived.alias("__arrived"))
             .with_columns(
-                pl.when(arrived)
-                .then(pl.lit("Refuel_Queue"))
-                .otherwise(pl.col("Status"))
-                .alias("Status"),
+                pl.when(pl.col("__arrived"))
+                    .then(pl.lit("Refuel_Queue"))
+                    .otherwise(pl.col("Status"))
+                    .alias("Status"),
                 # Charge target respects battery headroom but never falls below the
                 # current SOC (no discharging; no charging if already above threshold).
-                pl.when(arrived)
-                .then(
-                    pl.max_horizontal(
-                        pl.col("SOC_Max_J") - pl.col("Battery_Headroom_J"),
-                        pl.col("SOC_J"),
+                pl.when(pl.col("__arrived"))
+                    .then(
+                        pl.max_horizontal(
+                            pl.col("SOC_Max_J") - pl.col("Battery_Headroom_J"),
+                            pl.col("SOC_J"),
+                        )
                     )
-                )
-                .otherwise(pl.col("SOC_Target_J"))
-                .alias("SOC_Target_J"),
+                    .otherwise(pl.col("SOC_Target_J"))
+                    .alias("SOC_Target_J"),
             )
             .with_columns(
-                pl.when(arrived)
-                .then(
-                    (pl.col("SOC_Target_J") - pl.col("SOC_J")) / pl.col("Refueler_J_Per_Hr")
-                )
-                .otherwise(pl.col("Refuel_Duration_Hr"))
-                .alias("Refuel_Duration_Hr"),
+                pl.when(pl.col("__arrived"))
+                    .then(
+                        (pl.col("SOC_Target_J") - pl.col("SOC_J")) / pl.col("Refueler_J_Per_Hr")
+                    )
+                    .otherwise(pl.col("Refuel_Duration_Hr"))
+                    .alias("Refuel_Duration_Hr"),
                 # Newly arrived locomotives have not been assigned a port yet.
-                pl.when(arrived)
-                .then(None)
-                .otherwise(pl.col("Refueling_Done_Time_Hr"))
-                .alias("Refueling_Done_Time_Hr"),
+                pl.when(pl.col("__arrived"))
+                    .then(None)
+                    .otherwise(pl.col("Refueling_Done_Time_Hr"))
+                    .alias("Refueling_Done_Time_Hr"),
             )
+            .drop("__arrived")
             .sort(
                 ["Node", "Locomotive_Type", "Fuel_Type", "Arrival_Time_Hr", "Locomotive_ID"],
                 nulls_last=True,
@@ -337,46 +400,32 @@ def update_refuel_queue(
         if new_sessions.height > 0:
             refuel_sessions = pl.concat([refuel_sessions, new_sessions])
 
-    # Charging complete -> servicing or ready.
-    refueling_finished = loco_pool.select(
-        (pl.col("Status") == "Refuel_Queue")
-        & (pl.col("Refueling_Done_Time_Hr") <= current_time)
-    ).to_series()
-    if refueling_finished.sum() > 0:
-        loco_pool = loco_pool.with_columns(
-            pl.when(
-                pl.lit(refueling_finished)
-                & (pl.col("Servicing_Done_Time_Hr") <= current_time)
-            )
+    loco_pool = loco_pool.with_columns(
+        pl.when(charging_done & (pl.col("Servicing_Done_Time_Hr") <= current_time))
             .then(pl.lit("Ready"))
-            .when(
-                pl.lit(refueling_finished)
-                & (pl.col("Servicing_Done_Time_Hr") > current_time)
-            )
+            .when(charging_done)
             .then(pl.lit("Servicing"))
             .otherwise(pl.col("Status"))
             .alias("Status"),
-            pl.when(refueling_finished)
+        pl.when(charging_done)
             .then(None)
             .otherwise(pl.col("Refueling_Done_Time_Hr"))
             .alias("Refueling_Done_Time_Hr"),
-        )
+    )
 
     # Servicing complete -> ready.
-    servicing_finished = loco_pool.select(
-        (pl.col("Status") == "Servicing")
-        & (pl.col("Servicing_Done_Time_Hr") <= current_time)
-    ).to_series()
-    if servicing_finished.sum() > 0:
-        loco_pool = loco_pool.with_columns(
-            pl.when(servicing_finished)
+    servicing_done = (pl.col("Status") == "Servicing") & (
+        pl.col("Servicing_Done_Time_Hr") <= current_time
+    )
+    loco_pool = loco_pool.with_columns(
+        pl.when(servicing_done)
             .then(pl.lit("Ready"))
             .otherwise(pl.col("Status"))
             .alias("Status"),
-            pl.when(servicing_finished)
+        pl.when(servicing_done)
             .then(None)
             .otherwise(pl.col("Servicing_Done_Time_Hr"))
             .alias("Servicing_Done_Time_Hr"),
-        )
+    )
 
     return loco_pool.sort("Locomotive_ID"), refuel_sessions
