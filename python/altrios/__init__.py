@@ -1,6 +1,9 @@
-from importlib.metadata import version
+from importlib.metadata import version, PackageNotFoundError
 
-__version__ = version("altrios")
+try:
+    __version__ = version("altrios")
+except PackageNotFoundError:
+    __version__ = "0.0.0-dev"
 
 import numpy as np
 from pathlib import Path
@@ -241,3 +244,7 @@ for item in ACCEPTED_RUST_STRUCTS:
     setattr(getattr(altrios_pyo3, item), "to_dataframe", to_dataframe)  # noqa: F405
 
 setattr(ReversibleEnergyStorage, "from_excel", classmethod(_res_from_excel))  # noqa: F405
+
+# Python implementation of `run_speed_limit_train_sims` (replaces the former Rust
+# function); imported last so the dynamically attached serde helpers above are ready.
+from altrios.speed_limit_train_sim import run_speed_limit_train_sims  # noqa: E402,F401

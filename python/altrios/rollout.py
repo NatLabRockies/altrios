@@ -122,9 +122,9 @@ def simulate_prescribed_rollout(
         (sims, refuel_sessions) = alt.run_speed_limit_train_sims(
             speed_limit_train_sims=speed_limit_train_sims,
             network=network,
-            train_consist_plan_py=train_consist_plan,
-            loco_pool_py=used_loco_pool,
-            refuel_facilities_py=refuel_facilities,
+            train_consist_plan=train_consist_plan,
+            loco_pool=used_loco_pool,
+            refuelers=refuel_facilities,
             timed_paths=[alt.TimedLinkPath.from_pydict(tp) for tp in timed_paths],
         )
         # gallons = (sims.get_energy_fuel_joules(annualize=True) / 1e3 / 45.6e3) * 1e3 / 3206

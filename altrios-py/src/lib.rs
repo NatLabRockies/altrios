@@ -81,6 +81,5 @@ fn altrios_pyo3(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(make_est_times_py, m)?)?;
     m.add_function(wrap_pyfunction!(run_dispatch_py, m)?)?;
     m.add_function(wrap_pyfunction!(check_od_pair_valid, m)?)?;
-    m.add_function(wrap_pyfunction!(run_speed_limit_train_sims, m)?)?;
     Ok(())
 }

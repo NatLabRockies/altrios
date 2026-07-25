@@ -5,6 +5,7 @@ from altrios.train_planner import (
     schedulers,
     planner_config,
     train_demand_generators,
+    refueling,
 )
 import numpy as np
 import polars as pl
@@ -244,217 +245,6 @@ def dispatch(
         selected[diesel_to_require] = True
 
     return selected
-
-
-def update_refuel_queue(
-    loco_pool: pl.DataFrame,
-    refuelers: pl.DataFrame,
-    current_time: float,
-) -> Tuple[pl.DataFrame, pl.DataFrame]:
-    """
-    Update locomotive refueling status, manage service queues, and track events.
-
-    This function processes arrived locomotives, updates refueling and servicing status, and
-    manages the refueling queue across all locations. It tracks when locomotives finish refueling
-    or servicing, updates their status appropriately, and records these events.
-
-    Parameters
-    ----------
-    loco_pool : pl.DataFrame
-        DataFrame containing all locomotives in the network with their current status
-    refuelers : pl.DataFrame
-        DataFrame containing all refueling ports in the network with capacity information
-    current_time : float
-        Current simulation time in hours
-
-    Returns
-    -------
-    Tuple[pl.DataFrame, pl.DataFrame]
-        loco_pool : Updated locomotive pool DataFrame with new statuses
-        refuels : New refueling events
-    """
-
-    # Identify locomotives that have arrived at their destination
-    arrived = loco_pool.select(
-        (pl.col("Status") == "Dispatched") & (pl.col("Arrival_Time").is_not_null()) & (pl.col("Arrival_Time") <= current_time)
-    ).to_series()
-
-    # Process newly arrived locomotives
-    if arrived.sum() > 0:
-        # Update loco_pool with refueling information and new status
-        loco_pool = (loco_pool
-            # Remove old refueler info columns to avoid duplication
-            .drop(["Refueler_J_Per_Hr", "Port_Count", "Battery_Headroom_J"], strict=False)
-            # Join with refuelers data to get updated refueling information at current location
-            .join(
-                refuelers.select(
-                    [
-                        "Node",
-                        "Locomotive_Type",
-                        "Fuel_Type",
-                        "Refueler_J_Per_Hr",
-                        "Port_Count",
-                        "Battery_Headroom_J",
-                    ]
-                ),
-                on=["Node", "Locomotive_Type", "Fuel_Type"],
-                how="left",
-            )
-            # Update status and target SOC for arrived locomotives
-            .with_columns(
-                # Change status to Refuel_Queue for arrived locomotives
-                pl.when(arrived)
-                .then(pl.lit("Refuel_Queue"))
-                .otherwise(pl.col("Status"))
-                .alias("Status"),
-                # Set target SOC, respecting battery headroom constraints
-                pl.when(arrived)
-                .then(
-                    pl.max_horizontal(
-                        [
-                            pl.col("SOC_Max_J") - pl.col("Battery_Headroom_J"),
-                            pl.col("SOC_J"),
-                        ]
-                    )
-                )
-                .otherwise(pl.col("SOC_Target_J"))
-                .alias("SOC_Target_J"),
-            )
-            # Calculate refueling duration based on energy needed and refueling rate
-            .with_columns(
-                pl.when(arrived)
-                .then(
-                    (pl.col("SOC_Target_J") - pl.col("SOC_J"))
-                    / pl.col("Refueler_J_Per_Hr")
-                )
-                .otherwise(pl.col("Refuel_Duration"))
-                .alias("Refuel_Duration")
-            )
-            # Sort locomotives by various criteria for processing
-            .sort(
-                "Node",
-                "Locomotive_Type",
-                "Fuel_Type",
-                "Refueling_Done_Time",
-                "Arrival_Time",
-                "Locomotive_ID",
-                descending=False,
-                nulls_last=True,
-            )
-        )
-
-        # Organize locomotives by charger type and node for queue processing
-        charger_type_breakouts = (
-            loco_pool.filter(
-                # Only consider locomotives in refuel queue
-                pl.col("Status") == "Refuel_Queue",
-                (pl.col("Refueling_Done_Time") >= current_time) | pl.col("Refueling_Done_Time").is_null()
-            )
-            # Partition by node and locomotive type to process each charger separately
-            .partition_by(["Node", "Locomotive_Type"])
-        )
-
-        # Initialize list to store processed charger data
-        charger_type_list = []
-
-        # Process each charger type group
-        for charger_type in charger_type_breakouts:
-            # Extract relevant columns for processing
-            loco_ids = charger_type.get_column("Locomotive_ID")
-            arrival_times = charger_type.get_column("Arrival_Time")
-            refueling_done_times = charger_type.get_column("Refueling_Done_Time")
-            refueling_durations = charger_type.get_column("Refuel_Duration")
-            port_counts = charger_type.get_column("Port_Count")
-
-            # Process each locomotive in this charger group
-            for i in range(0, refueling_done_times.len()):
-                # Skip locomotives that already have a completion time
-                if refueling_done_times[i] is not None:
-                    continue
-
-                # Find the next available charging port based on when current locomotives will finish
-                next_done = refueling_done_times.filter(
-                    (refueling_done_times.is_not_null())
-                    & (
-                        refueling_done_times.rank(method="ordinal", descending=True).eq(
-                            port_counts[i]
-                        )
-                    )
-                )
-
-                # Determine when this locomotive can start charging
-                if next_done.len() == 0:
-                    next_done = arrival_times[i]  # No wait if ports available
-                else:
-                    next_done = max(
-                        next_done[0], arrival_times[i]
-                    )  # Either wait for port or arrival
-
-                # Calculate when refueling will be complete
-                refueling_done_times[i] = next_done + refueling_durations[i]
-
-            # Add processed data to our list
-            charger_type_list.append(pl.DataFrame([loco_ids, refueling_done_times]))
-
-        # Combine all charger data
-        all_queues = pl.concat(charger_type_list, how="diagonal")
-
-        # Update the locomotive pool with new refueling completion times
-        loco_pool = (
-            loco_pool
-            # Join the calculated refueling times with the locomotive pool
-            .join(all_queues, on="Locomotive_ID", how="left", suffix="_right")
-            # Update refueling done times with newly calculated values
-            .with_columns(
-                pl.when(pl.col("Refueling_Done_Time_right").is_not_null())
-                .then(pl.col("Refueling_Done_Time_right"))
-                .otherwise(pl.col("Refueling_Done_Time"))
-                .alias("Refueling_Done_Time")
-            )
-            # Drop temporary column
-            .drop("Refueling_Done_Time_right")
-        )
-    
-    refuel_finished_conditions = [(pl.col("Refueling_Done_Time").is_null() | (pl.col("Refueling_Done_Time") <= current_time))]
-    servicing_finished_conditions = [(pl.col("Servicing_Done_Time").is_null() | (pl.col("Servicing_Done_Time") <= current_time))]
-    new_refuel_finished_conditions = refuel_finished_conditions + [pl.col("Refueling_Done_Time").is_not_null()]
-    refuels = (loco_pool
-        .filter(new_refuel_finished_conditions)
-        .select(
-            pl.col("Locomotive_ID", "Arrival_Time"),
-            (pl.col("Refueling_Done_Time") - pl.col("Refuel_Duration")).alias("Refuel_Start_Time_Planned_Hr"),
-            pl.col("Refueling_Done_Time").alias("Refuel_End_Time_Planned_Hr")
-        )
-    ).unique()
-
-    # Update locomotive pool with post-refueling states
-    loco_pool = (loco_pool
-        .with_columns(
-            # Update SOC to target value for refueled locomotives
-            pl.when(new_refuel_finished_conditions)
-                .then(pl.col("SOC_Target_J"))
-                .otherwise(pl.col("SOC_J"))
-                .alias("SOC_J"),
-            # Clear refueling done time for finished locomotives
-            pl.when(new_refuel_finished_conditions)
-                .then(pl.lit(None))
-                .otherwise(pl.col("Refueling_Done_Time"))
-                .alias("Refueling_Done_Time"),
-            pl.when(servicing_finished_conditions)
-                .then(pl.lit(None))
-                .otherwise(pl.col("Servicing_Done_Time"))
-                .alias("Servicing_Done_Time"),
-            pl.when(refuel_finished_conditions + servicing_finished_conditions)
-                .then(pl.lit("Ready"))
-                .when(refuel_finished_conditions)
-                .then(pl.lit("Servicing"))
-                .otherwise(pl.col("Status"))
-                .alias("Status"),
-        )
-    )
-
-    # Return sorted locomotive pool and updated event tracker
-    return loco_pool.sort("Locomotive_ID"), refuels
 
 
 def run_train_planner(
@@ -709,8 +499,8 @@ def run_train_planner(
         }
     )
 
-    # Initialize dataframe to track locomotive events
-    refuel_events = []
+    # Accumulator for charging/refueling sessions produced during planning.
+    refuel_sessions = refueling.empty_refuel_sessions()
 
     # Initialize train ID counter and result lists
     train_id_counter = 1
@@ -731,8 +521,8 @@ def run_train_planner(
         # If there are trains to dispatch at this time
         if current_dispatches.height > 0:
             # Update refueling status for all locomotives
-            loco_pool, refuels = update_refuel_queue(
-                loco_pool, refuelers, current_time
+            loco_pool, refuel_sessions = refueling.update_refuel_queue(
+                loco_pool, refuelers, current_time, refuel_sessions
             )
             refuel_events.append(refuels)
 
@@ -934,21 +724,21 @@ def run_train_planner(
                         # Set arrival time for dispatched locomotives
                         pl.when(selected)
                         .then(pl.lit(current_time + travel_time))
-                        .otherwise(pl.col("Arrival_Time"))
-                        .alias("Arrival_Time"),
+                        .otherwise(pl.col("Arrival_Time_Hr"))
+                        .alias("Arrival_Time_Hr"),
                         # Set servicing completion time for dispatched locomotives
                         pl.when(selected)
                         .then(
                             pl.lit(current_time + travel_time)
                             + pl.col("Min_Servicing_Time_Hr")
                         )
-                        .otherwise(pl.col("Servicing_Done_Time"))
-                        .alias("Servicing_Done_Time"),
+                        .otherwise(pl.col("Servicing_Done_Time_Hr"))
+                        .alias("Servicing_Done_Time_Hr"),
                         # Clear refueling time for dispatched locomotives
                         pl.when(selected)
                         .then(None)
-                        .otherwise(pl.col("Refueling_Done_Time"))
-                        .alias("Refueling_Done_Time"),
+                        .otherwise(pl.col("Refueling_Done_Time_Hr"))
+                        .alias("Refueling_Done_Time_Hr"),
                         # Set status to dispatched for selected locomotives
                         pl.when(selected)
                         .then(pl.lit("Dispatched"))
@@ -997,8 +787,8 @@ def run_train_planner(
             # Set current time to infinity to finish processing any remaining refueling
             current_time = float("inf")
             # Final update of refueling queues
-            loco_pool, refuels = update_refuel_queue(
-                loco_pool, refuelers, current_time
+            loco_pool, refuel_sessions = refueling.update_refuel_queue(
+                loco_pool, refuelers, current_time, refuel_sessions
             )
             refuel_events.append(refuels)
             # Mark simulation as complete
@@ -1026,17 +816,6 @@ def run_train_planner(
     # Convert categorical columns in loco_pool and refuelers to strings
     loco_pool = loco_pool.with_columns(cs.categorical().cast(str))
     refuelers = refuelers.with_columns(cs.categorical().cast(str))
-
-    refuel_events= pl.concat(refuel_events, how="diagonal_relaxed")
-    # Add refueling start and end times to the train consist plan
-    if (consist_plan_in is None) and (refuel_events.height != train_consist_plan.height):
-        raise Exception(
-            f"Some refuel events were not accounted for."
-        )
-
-    train_consist_plan = (train_consist_plan
-        .join(refuel_events, how="left", left_on=["Locomotive_ID", "Arrival_Time_Planned_Hr"], right_on=["Locomotive_ID", "Arrival_Time"])
-    )
 
     # Return results
     return (

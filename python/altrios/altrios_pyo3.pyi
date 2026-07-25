@@ -944,14 +944,6 @@ def build_speed_limit_train_sims(
     simulation_days: Optional[int],
     scenario_year: Optional[int],
 ) -> SpeedLimitTrainSimVec: ...
-def run_speed_limit_train_sims(
-    speed_limit_train_sim_vec: SpeedLimitTrainSimVec,
-    network: List[Link],
-    train_consist_plan: pl.DataFrame,
-    loco_pool: pl.DataFrame,
-    refuel_facilities: pl.DataFrame,
-    timed_paths: List[List[LinkIdxTime]],
-) -> Tuple[SpeedLimitTrainSimVec, pl.DataFrame]: ...
 def run_dispatch(
     network: List[Link],
     speed_limit_train_sims: SpeedLimitTrainSimVec,

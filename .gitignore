@@ -1227,3 +1227,16 @@ hostler_work_log.txt
 python/altrios/resources/demo_data/*.csv
 /python/altrios/resources/demo_data
 /python/altrios/resources/networks/v4
+# Network builder results + local OSM/network outputs (regenerated)
+applications/network_builder/results/
+applications/network_builder/networks/
+
+# Corridor app is not part of this repo; never commit local RailState
+# data/outputs (proprietary parquet/csv/json) left in the working tree.
+applications/corridor/
+
+# OSM download cache + regenerated extracts (keep only the bundled demo extract)
+/osmium_cache
+/networks/*
+!/networks/spokane_lethbridge_local.osm.xml
+/.venv311

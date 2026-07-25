@@ -404,6 +404,18 @@ def build_locopool(
             "Locomotive_ID": pl.Series(engine_numbers, dtype=pl.UInt32),
             "Locomotive_Type": pl.Series(types, dtype=pl.Categorical),
             "Node": pl.Series(sorted_nodes, dtype=pl.Categorical),
+            "Arrival_Time_Hr": pl.Series(np.zeros(rows), dtype=pl.Float64),
+            "Servicing_Done_Time_Hr": pl.Series(np.zeros(rows), dtype=pl.Float64),
+            "Refueling_Done_Time_Hr": pl.Series([None] * rows, dtype=pl.Float64),
+            "Refuel_Start_Time_Hr": pl.Series([None] * rows, dtype=pl.Float64),
+            "Status": pl.Series(np.tile("Ready", rows), dtype=pl.Categorical),
+            "SOC_Target_J": pl.Series(np.zeros(rows), dtype=pl.Float64),
+            "Refuel_Duration_Hr": pl.Series(np.zeros(rows), dtype=pl.Float64),
+            "Refuel_Energy_J": pl.Series(np.zeros(rows), dtype=pl.Float64),
+            "Trip_Energy_J": pl.Series(np.zeros(rows), dtype=pl.Float64),
+            "Refueler_J_Per_Hr": pl.Series(np.zeros(rows), dtype=pl.Float64),
+            "Refueler_Efficiency": pl.Series(np.zeros(rows), dtype=pl.Float64),
+            "Port_Count": pl.Series(np.zeros(rows), dtype=pl.UInt32),
         }
     ).with_columns(
         pl.lit("Ready").alias("Status")
