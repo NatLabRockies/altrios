@@ -742,7 +742,8 @@ impl SpeedLimitTrainSim {
                         soc_vec.push(
                             res.state
                                 .soc
-                                .get_fresh(|| format_dbg!())?
+                                // diagnostic only: soc is updated later in the step
+                                .get_unchecked(|| format_dbg!())?
                                 .get::<si::ratio>()
                                 .format_eng(Some(5)),
                         );
@@ -793,7 +794,8 @@ impl SpeedLimitTrainSim {
                     "grade_front: {}",
                     self.state
                         .grade_front
-                        .get_fresh(|| format_dbg!())?
+                        // diagnostic only: freshness depends on resistance method
+                        .get_unchecked(|| format_dbg!())?
                         .get::<si::ratio>()
                         .format_eng(Some(5))
                 ),
@@ -802,7 +804,8 @@ impl SpeedLimitTrainSim {
                     "grade_back: {}",
                     self.state
                         .grade_back
-                        .get_fresh(|| format_dbg!())?
+                        // diagnostic only: not updated by the point resistance method
+                        .get_unchecked(|| format_dbg!())?
                         .get::<si::ratio>()
                         .format_eng(Some(5))
                 ),

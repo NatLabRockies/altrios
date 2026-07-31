@@ -22,9 +22,9 @@ rail_vehicles = [
     for rv_file in Path(rs_dir).glob("*.yaml")
 ]
 
-network = alt.Network.from_file(network_dir / "spokane_lethbridge_with_sidings.yaml")
-location_map = alt.import_locations(network_dir / "spokane_lethbridge_with_sidings_locations.csv")
-consist_plan_in = pl.read_csv(corridor_data_dir / "train_consist_plan_spokane_lethbridge_clean.csv")
+network = alt.Network.from_file(network_dir / "Spokane_Lethbridge" / "spokane_lethbridge.yaml")
+location_map = alt.import_locations(network_dir / "Spokane_Lethbridge" / "spokane_lethbridge_locations.csv")
+consist_plan_in = pl.read_csv(Path(__file__).parent / "catenary_optimization" / "train_consist_plan_spokane_lethbridge_clean.csv")
  
 network_dict_for_waypoints = network.to_pydict()[1]
 waypoint_indices = pl.concat([

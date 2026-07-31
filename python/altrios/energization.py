@@ -219,6 +219,61 @@ class SuggestedOptimizationInputs:
         }
 
 
+def max_gap_miles_from_battery(
+    usable_energy_kwh: float,
+    avg_consumption_kwh_per_mile: float,
+    *,
+    reserve_fraction: float = 0.0,
+) -> float:
+    """Convert a battery-electric locomotive's battery size into a maximum
+    unelectrified-gap distance (miles) for ``energize_optimized(max_energized_gap_miles=...)``.
+
+    Under the optimizer's simplifying assumptions -- any electrified segment
+    recharges the battery, and traction energy is drawn at a constant average
+    rate per mile -- a battery that can usefully deliver ``E`` kWh bridges a gap
+    of ``E / e`` miles, where ``e`` is the average consumption in kWh per mile.
+    Holding back a ``reserve_fraction`` of the pack (e.g. to protect state of
+    charge or cover accessory/HVAC loads) reduces the usable energy accordingly,
+    so the "kWh of energy lost between segments" is
+    ``usable_energy_kwh * (1 - reserve_fraction)`` and
+
+    .. math::
+
+        \\text{max gap (mi)} = \\frac{E_\\text{usable}\\,(1 - \\text{reserve})}{e}.
+
+    Parameters
+    ----------
+    usable_energy_kwh : float
+        Battery energy (kWh) available for traction between charges (i.e. the
+        usable, not nameplate, capacity).
+    avg_consumption_kwh_per_mile : float
+        Average traction energy drawn per corridor-mile (kWh/mi). A convenient
+        source is the mean of the per-link ``electricity_kwh_per_track_mile``
+        densities used to build :func:`make_piece_opex_fn` from a first-pass
+        simulation.
+    reserve_fraction : float, default 0.0
+        Fraction of ``usable_energy_kwh`` withheld as a reserve (0 <= f < 1).
+
+    Returns
+    -------
+    float
+        Maximum contiguous unelectrified gap (miles).
+
+    Raises
+    ------
+    ValueError
+        If ``avg_consumption_kwh_per_mile`` is not positive, ``usable_energy_kwh``
+        is negative, or ``reserve_fraction`` is outside ``[0, 1)``.
+    """
+    if avg_consumption_kwh_per_mile <= 0.0:
+        raise ValueError("avg_consumption_kwh_per_mile must be positive.")
+    if usable_energy_kwh < 0.0:
+        raise ValueError("usable_energy_kwh must be non-negative.")
+    if not (0.0 <= reserve_fraction < 1.0):
+        raise ValueError("reserve_fraction must be in [0, 1).")
+    return usable_energy_kwh * (1.0 - reserve_fraction) / avg_consumption_kwh_per_mile
+
+
 def suggest_optimization_inputs(
     config: Union[str, ElectrificationConfig],
     *,
@@ -430,6 +485,7 @@ def energize_optimized(
     structure_spacing_miles: Optional[float] = None,
     corridor_width_miles: float = 0.05,
     min_energized_length_miles: Optional[float] = None,
+    max_energized_gap_miles: Optional[float] = None,
     objective: str = "max_benefit",
     economics: Optional["EconomicParameters"] = None,
     piece_opex_fn: Optional[Callable[["PieceBenefitContext"], float]] = None,
@@ -437,6 +493,7 @@ def energize_optimized(
     time_limit_seconds: Optional[float] = None,
     mip_gap: Optional[float] = None,
     tee: bool = False,
+    solver_threads: Optional[int] = None,
 ) -> "EnergizationPlacementResult":
     """
     Optimize energization placement with a MILP, prioritizing high-grade track.
@@ -494,6 +551,14 @@ def energize_optimized(
         slivers even when structure/substation costs are zero; the run may start
         at any position. Requires structure-site mode
         (``structure_spacing_miles``); ``None`` (default) disables it.
+    max_energized_gap_miles : float, optional
+        Maximum contiguous UNelectrified gap (CORRIDOR miles) along the mainline
+        -- the range limit for a battery-electric locomotive, which must reach
+        the next electrified segment before its battery depletes. Derive it from
+        battery size with :func:`max_gap_miles_from_battery`. Can FORCE
+        electrification (a feasibility pre-check raises ``ValueError`` if a gap
+        cannot be closed by any reachable substation). Requires structure-site
+        mode with a contiguous mainline path; ``None`` (default) disables it.
     objective : str, default "max_benefit"
         ``"max_benefit"`` maximizes priority-weighted (grade) benefit subject to
         ``budget`` -- the rule-based formulation. ``"min_cost"`` instead minimizes
@@ -517,6 +582,9 @@ def energize_optimized(
         default.
     tee : bool, default False
         If True, stream solver output.
+    solver_threads : int, optional
+        Cap the HiGHS solver's parallelism to this many threads. ``None``
+        (default) uses the solver default (all available cores).
 
     Returns
     -------
@@ -541,6 +609,7 @@ def energize_optimized(
         structure_spacing_miles=structure_spacing_miles,
         corridor_width_miles=corridor_width_miles,
         min_energized_length_miles=min_energized_length_miles,
+        max_energized_gap_miles=max_energized_gap_miles,
         objective=objective,
         economics=economics,
         piece_opex_fn=piece_opex_fn,
@@ -551,6 +620,7 @@ def energize_optimized(
         time_limit_seconds=time_limit_seconds,
         mip_gap=mip_gap,
         tee=tee,
+        solver_threads=solver_threads,
     )
 
 
@@ -1476,10 +1546,15 @@ def substation_load_curves(
     loco_vec = ts.get("loco_con", {}).get("loco_vec", []) or []
     p_sub_total = [0.0] * n_steps
     for loco in loco_vec:
-        dml = loco.get("loco_type", {}).get("DualModeLoco")
-        if dml is None:
+        lt = loco.get("loco_type", {})
+        # Dual-mode locomotives always draw catenary; battery-electric ones do so
+        # only when fitted with a pantograph (``cat_int`` present).
+        cat_int = (lt.get("DualModeLoco") or lt.get("BatteryElectricLoco") or {}).get(
+            "cat_int"
+        )
+        if cat_int is None:
             continue
-        ch = dml.get("cat_int", {}).get("history", {})
+        ch = cat_int.get("history", {})
         pll = ch.get("pwr_line_loss_watts")
         pin = ch.get("pwr_elec_in_watts")
         for t in range(n_steps):

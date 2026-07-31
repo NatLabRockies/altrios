@@ -236,6 +236,21 @@ class EnergizationPlacementInputs:
     #: Requires structure-site mode (``structure_spacing_miles``). ``None``
     #: (default) disables the constraint.
     min_energized_length_miles: Optional[float] = None
+    #: Maximum contiguous UNelectrified run ("gap") length in CORRIDOR miles along
+    #: the mainline. No stretch of un-energized corridor may exceed this, which is
+    #: the range constraint for a battery-electric locomotive that must recharge
+    #: from the wire before its battery depletes. Physically it is the distance a
+    #: full battery can bridge; derive it from battery size with
+    #: :func:`altrios.energization.max_gap_miles_from_battery`
+    #: (``usable_kWh * (1 - reserve) / avg_kWh_per_mile``). Simplifying
+    #: assumptions: any electrified segment recharges the battery, consumption is a
+    #: constant average per mile, and the battery is full at each corridor end
+    #: (yard charging), so gaps at the ends obey the same limit (no exemption).
+    #: Unlike the minimum-run constraint this can FORCE electrification, so a
+    #: feasibility pre-check runs and raises ``ValueError`` if a gap cannot be
+    #: closed by any reachable substation. Requires structure-site mode with a
+    #: contiguous mainline path. ``None`` (default) disables the constraint.
+    max_energized_gap_miles: Optional[float] = None
     #: Optional custom objective-benefit model. When provided, it is called once
     #: per track piece to return that piece's objective coefficient ``b_p``,
     #: replacing the built-in grade-priority-weighted mileage. This is the seam
@@ -329,6 +344,14 @@ class _ProblemData:
     substation_ids: List[Hashable]
     sub_cost: Dict[Hashable, float]
     network_dict: tuple
+    #: Structure-cell ids in contiguous corridor order along the mainline path,
+    #: used to order sites for the minimum-run-length constraint (robust to
+    #: sidings/junctions, unlike link-chain ordering). ``None`` -> fall back to
+    #: link chains.
+    mainline_site_seq: Optional[List[Hashable]] = None
+    #: Along-corridor arc position (meters) of each cell in ``mainline_site_seq``
+    #: (aligned), used to bucket the corridor for the min-run-length constraint.
+    mainline_site_arcs: Optional[List[float]] = None
 
 
 def _first_not_none(*values: Optional[float]) -> float:
@@ -469,6 +492,35 @@ def _ordered_path_link_idxs(est_time_net: alt.EstTimeNet) -> List[int]:
     return deduped
 
 
+def _candidate_link_idxs(
+    inputs: EnergizationPlacementInputs, link_by_idx: Dict[int, dict]
+) -> List[int]:
+    """Link indices eligible for electrification.
+
+    With ``est_time_nets``, restrict candidates to links the trains actually
+    traverse, and include the opposite-direction link (``idx_flip``) of each so a
+    physical track carrying traffic *in either direction* is eligible (a train
+    running one way generates traffic on one directional link; its flip is the
+    same rail). Links no train ever uses in either direction are dropped, so the
+    optimizer cannot electrify trafficless spurs/branches purely for their grade.
+    Without ``est_time_nets`` every link is a candidate (unchanged behavior).
+    """
+    if not inputs.est_time_nets:
+        return list(link_by_idx.keys())
+    seen: set = set()
+    ordered: List[int] = []
+    for etn in inputs.est_time_nets:
+        for idx in _ordered_path_link_idxs(etn):
+            if idx not in link_by_idx:
+                continue
+            flip = link_by_idx[idx].get("idx_flip", 0)
+            for j in (idx, flip):
+                if j and j in link_by_idx and j not in seen:
+                    seen.add(j)
+                    ordered.append(j)
+    return ordered
+
+
 def _merge_intervals(
     intervals: List[Tuple[float, float]]
 ) -> List[Tuple[float, float]]:
@@ -545,6 +597,136 @@ def _piece_coverage(
     return covering, False
 
 
+class _ArcCoverage:
+    """Feeding coverage by along-corridor TRACK distance (matches line-loss model).
+
+    Projects every substation and query point onto the mainline corridor arc via
+    the same ``_build_corridor_arc`` machinery :func:`altrios.energization.apply_line_losses`
+    uses, so a point is "within range" of a substation when their arc-length
+    separation -- i.e. distance travelled along the track -- is ``<=`` the feed
+    distance, NOT the great-circle ("crow-flies") distance. Falls back to
+    great-circle distance only if a corridor arc cannot be built (e.g. a network
+    with no discernible mainline).
+    """
+
+    def __init__(
+        self,
+        network_dict: tuple,
+        existing_positions: List[Tuple[float, float]],
+        sub_positions: Dict[Hashable, Tuple[float, float]],
+        feed_dist_miles: float,
+        sample_spacing_meters: float = 200.0,
+    ) -> None:
+        self._existing = list(existing_positions)
+        self._subs = dict(sub_positions)
+        self._feed_miles = float(feed_dist_miles)
+        self._feed_m = self._feed_miles / MILES_PER_METER
+        self._project = None
+        self._arc_start: Dict[int, float] = {}
+        try:
+            from altrios.energization import _build_corridor_arc
+
+            _arc_start, _main_set, project = _build_corridor_arc(
+                network_dict, sample_spacing_meters
+            )
+            self._project = project
+            self._arc_start = _arc_start
+            self._ex_arcs = [project(p[0], p[1]) for p in self._existing if p]
+            self._sub_arcs = {
+                sid: project(pos[0], pos[1]) for sid, pos in self._subs.items()
+            }
+        except Exception:  # noqa: BLE001 - no mainline -> crow-flies fallback
+            self._project = None
+
+    def ordered_mainline_links(self) -> List[int]:
+        """Mainline link indices in corridor order (by cumulative arc length).
+
+        This is the exact, contiguous corridor ordering of the mainline path --
+        unlike per-cell mean arc positions, it never leaves spurious gaps -- so it
+        gives the minimum-run-length constraint a single unbroken site sequence.
+        """
+        return sorted(self._arc_start, key=lambda k: self._arc_start[k])
+
+    def arc(self, lat: Optional[float], lon: Optional[float]) -> Optional[float]:
+        """Along-corridor arc position (meters) of ``(lat, lon)``, or ``None``."""
+        if self._project is None or lat is None or lon is None:
+            return None
+        return self._project(lat, lon)
+
+    def coverage(
+        self, lat: Optional[float], lon: Optional[float]
+    ) -> Tuple[List[Hashable], bool]:
+        """Return ``(covering candidate ids, auto_covered_by_existing)``."""
+        if lat is None or lon is None:
+            return [], False
+        if self._project is None:  # fallback: great-circle distance
+            return _piece_coverage(
+                (lat, lon), self._existing, self._subs, self._feed_miles
+            )
+        x = self._project(lat, lon)
+        if any(abs(x - ea) <= self._feed_m for ea in self._ex_arcs):
+            return [], True
+        cover = [
+            sid for sid, sa in self._sub_arcs.items() if abs(x - sa) <= self._feed_m
+        ]
+        return cover, False
+
+
+def link_coverage(
+    network,
+    substations,
+    built_substation_ids=None,
+    *,
+    substation_feed_distance_miles: float = 20.0,
+    sample_spacing_meters: float = 200.0,
+) -> Dict[int, bool]:
+    """Per-link feeding coverage (bool) by along-corridor TRACK distance.
+
+    Returns ``{link_idx: covered}`` where ``covered`` is ``True`` iff the link's
+    midpoint is within ``substation_feed_distance_miles`` **track miles** (corridor
+    arc distance -- the same metric the optimizer and ``apply_line_losses`` use) of
+    any EXISTING substation or any substation whose id is in
+    ``built_substation_ids``. This mirrors the optimizer's feeding rule, so a map's
+    "within range" shading matches what actually governed the optimization.
+    """
+    built = set(built_substation_ids or [])
+    network_dict = network.to_pydict()
+    link_by_idx: Dict[int, dict] = {
+        link["idx_curr"]: link for link in network_dict[1][1:]
+    }
+    existing: List[Tuple[float, float]] = []
+    sub_pos: Dict[Hashable, Tuple[float, float]] = {}
+    for sub in substations or []:
+        lat = getattr(sub, "lat", None)
+        lon = getattr(sub, "lon", None)
+        link_idx = getattr(sub, "link_idx", None)
+        if lat is not None and lon is not None:
+            pos: Optional[Tuple[float, float]] = (float(lat), float(lon))
+        elif link_idx is not None and link_idx in link_by_idx:
+            pos = _link_midpoint_latlon(link_by_idx[link_idx])
+        else:
+            pos = None
+        if pos is None:
+            continue
+        if getattr(sub, "existing", False):
+            existing.append(pos)
+        elif getattr(sub, "id", None) in built:
+            sub_pos[getattr(sub, "id")] = pos
+    cov = _ArcCoverage(
+        network_dict, existing, sub_pos, substation_feed_distance_miles,
+        sample_spacing_meters,
+    )
+    out: Dict[int, bool] = {}
+    for idx, link in link_by_idx.items():
+        ll = _link_midpoint_latlon(link)
+        if ll is None:
+            out[idx] = False
+            continue
+        c, a = cov.coverage(ll[0], ll[1])
+        out[idx] = bool(a or c)
+    return out
+
+
 def _prepare(inputs: EnergizationPlacementInputs) -> _ProblemData:
     """Extract problem data; dispatch to per-link or corridor-cell mode."""
     network_dict = inputs.network.to_pydict()
@@ -555,6 +737,13 @@ def _prepare(inputs: EnergizationPlacementInputs) -> _ProblemData:
         _resolve_substations(inputs, link_by_idx)
     )
     common = (substation_ids, sub_cost, sub_positions, existing_positions)
+    # Feeding coverage by along-corridor TRACK distance (same metric as the
+    # line-loss model), replacing the former great-circle (crow-flies) rule.
+    arc_cov = _ArcCoverage(
+        network_dict, existing_positions, sub_positions,
+        inputs.substation_feed_distance_miles,
+    )
+    common = (substation_ids, sub_cost, sub_positions, existing_positions, arc_cov)
     if inputs.structure_spacing_miles is not None:
         return _prepare_sites(inputs, network_dict, link_by_idx, *common)
     return _prepare_per_link(inputs, network_dict, link_by_idx, *common)
@@ -568,24 +757,15 @@ def _prepare_per_link(
     sub_cost: Dict[Hashable, float],
     sub_positions: Dict[Hashable, Tuple[float, float]],
     existing_positions: List[Tuple[float, float]],
+    arc_cov: "_ArcCoverage",
 ) -> _ProblemData:
     """Per-link mode: each link is one cell containing one whole-link piece."""
     cat_per_mile = _first_not_none(
         inputs.costs.energization_cost_per_mile, inputs.costs.cost_per_mile
     )
     struct_per_mile = inputs.costs.structure_cost_per_mile
-    feed = inputs.substation_feed_distance_miles
 
-    if inputs.est_time_nets:
-        candidate_idxs: List[int] = []
-        seen = set()
-        for etn in inputs.est_time_nets:
-            for idx in _ordered_path_link_idxs(etn):
-                if idx in link_by_idx and idx not in seen:
-                    seen.add(idx)
-                    candidate_idxs.append(idx)
-    else:
-        candidate_idxs = list(link_by_idx.keys())
+    candidate_idxs = _candidate_link_idxs(inputs, link_by_idx)
 
     cell_ids: List[Hashable] = []
     struct_cost: Dict[Hashable, float] = {}
@@ -628,8 +808,8 @@ def _prepare_per_link(
         )
         piece_is_mainline[idx] = True
 
-        cover, auto = _piece_coverage(
-            _link_midpoint_latlon(link), existing_positions, sub_positions, feed
+        cover, auto = arc_cov.coverage(
+            *(_link_midpoint_latlon(link) or (None, None))
         )
         piece_cover[idx] = cover
         piece_auto_covered[idx] = auto
@@ -777,6 +957,7 @@ def _prepare_sites(
     sub_cost: Dict[Hashable, float],
     sub_positions: Dict[Hashable, Tuple[float, float]],
     existing_positions: List[Tuple[float, float]],
+    arc_cov: "_ArcCoverage",
 ) -> _ProblemData:
     """Structure-site mode: geometry-only shared-structure clustering.
 
@@ -797,19 +978,9 @@ def _prepare_sites(
         inputs.costs.energization_cost_per_mile, inputs.costs.cost_per_mile
     )
     struct_per_mile = inputs.costs.structure_cost_per_mile
-    feed = inputs.substation_feed_distance_miles
 
     # Candidate links: all links, optionally restricted to traversed links.
-    if inputs.est_time_nets:
-        candidate_idxs: List[int] = []
-        seen = set()
-        for etn in inputs.est_time_nets:
-            for idx in _ordered_path_link_idxs(etn):
-                if idx in link_by_idx and idx not in seen:
-                    seen.add(idx)
-                    candidate_idxs.append(idx)
-    else:
-        candidate_idxs = list(link_by_idx.keys())
+    candidate_idxs = _candidate_link_idxs(inputs, link_by_idx)
 
     grade_high = {
         idx: _link_max_grade(link_by_idx[idx]) >= inputs.grade_threshold
@@ -914,11 +1085,34 @@ def _prepare_sites(
             miles=miles,
             high_grade=cell_high_grade[c],
         )
-        cover, auto = _piece_coverage(
-            (p_lat[i], p_lon[i]), existing_positions, sub_positions, feed
-        )
+        cover, auto = arc_cov.coverage(p_lat[i], p_lon[i])
         piece_cover[i] = cover
         piece_auto_covered[i] = auto
+
+    # Structure-cell sequence in contiguous corridor order (by the mainline
+    # path's cumulative arc), so the minimum-run-length constraint has one
+    # unbroken sequence spanning the corridor -- robust to sidings/junctions and
+    # free of the spurious gaps that per-cell arc means or link chains produce.
+    mainline_site_seq: Optional[List[Hashable]] = None
+    mainline_site_arcs: Optional[List[float]] = None
+    _link_pieces_ord: Dict[int, List[int]] = {}
+    for i in range(n_pieces):
+        _link_pieces_ord.setdefault(p_link[i], []).append(i)
+    for _v in _link_pieces_ord.values():
+        _v.sort(key=lambda i: p_off0[i])
+    _arc_start = getattr(arc_cov, "_arc_start", {}) or {}
+    _seq: List[Hashable] = []
+    _arcs: List[float] = []
+    for link_idx in arc_cov.ordered_mainline_links():
+        base = _arc_start.get(link_idx, 0.0)
+        for i in _link_pieces_ord.get(link_idx, []):
+            c = piece_cell[i]
+            if not _seq or _seq[-1] != c:
+                _seq.append(c)
+                _arcs.append(base + p_off0[i])
+    if len(_seq) >= 2:
+        mainline_site_seq = _seq
+        mainline_site_arcs = _arcs
 
     return _ProblemData(
         cell_ids=cell_ids,
@@ -939,6 +1133,8 @@ def _prepare_sites(
         substation_ids=substation_ids,
         sub_cost=sub_cost,
         network_dict=network_dict,
+        mainline_site_seq=mainline_site_seq,
+        mainline_site_arcs=mainline_site_arcs,
     )
 
 
@@ -986,6 +1182,82 @@ def _build_link_chains(
             cur = succ.get(cur)
         chains.append(chain)
     return chains
+
+
+def _install_corridor_buckets(
+    model: pyo.ConcreteModel, data: "_ProblemData", bucket_mi: float
+) -> Tuple[int, List[float], Dict[Hashable, int]]:
+    """Install the shared corridor bucket layer for the run-length / gap constraints.
+
+    First ties structure to actual electrification (``s[c] <= sum_{p in c} x[p]``)
+    so each ``s[c]`` -- and hence each bucket ``u[b]`` -- is a faithful "corridor
+    site energized" indicator even when structure costs are zero. Then, when a
+    contiguous mainline corridor exists, tiles it into uniform ~``bucket_mi``
+    buckets (accumulating cell length so sequential bucket ids 0,1,2,... leave no
+    gaps) and couples ``s[c] == u[bucket(c)]``. This coarse granularity keeps the
+    MILP small (one binary per bucket instead of one per ~250 ft link) while
+    preserving the run/gap guarantees.
+
+    Both the minimum-run-length and maximum-gap constraints share this single
+    bucket layer; when both are active the caller passes the finer ``bucket_mi``
+    so each is enforced at adequate resolution.
+
+    Returns ``(n_buckets, bucket_len_miles, cell_bucket)``: the bucket count, each
+    bucket's corridor length (miles), and the cell -> bucket map. Returns
+    ``(0, [], {})`` when no mainline corridor exists (only ``structure_used`` is
+    installed); callers needing buckets must then fall back or raise.
+    """
+    pieces_in_cell: Dict[Hashable, List[Hashable]] = {}
+    for p in data.piece_ids:
+        pieces_in_cell.setdefault(data.piece_cell[p], []).append(p)
+
+    # Structure only where at least one track is energized (ties s to x).
+    def _structure_used_rule(m, c):
+        ps = pieces_in_cell.get(c, [])
+        if not ps:
+            return m.s[c] == 0
+        return m.s[c] <= sum(m.x[p] for p in ps)
+
+    model.structure_used = pyo.Constraint(model.C, rule=_structure_used_rule)
+
+    seq = getattr(data, "mainline_site_seq", None)
+    if not seq or len(seq) < 2:
+        return 0, [], {}
+
+    # Tile the CONTIGUOUS mainline cell sequence into ~bucket_mi buckets by
+    # accumulating cell length (assign a cell to the current bucket, then roll
+    # over once the bucket fills). Sequential bucket ids leave NO gaps.
+    cell_bucket: Dict[Hashable, int] = {}
+    b = 0
+    acc = 0.0
+    for c in seq:
+        if c in cell_bucket:
+            continue
+        cell_bucket[c] = b
+        acc += data.cell_len_miles.get(c, 0.0)
+        if acc >= bucket_mi:
+            b += 1
+            acc = 0.0
+    n_buckets = (max(cell_bucket.values()) + 1) if cell_bucket else 0
+    if n_buckets < 2:
+        return 0, [], {}
+
+    bucket_len_miles = [0.0] * n_buckets
+    for c, bkt in cell_bucket.items():
+        bucket_len_miles[bkt] += data.cell_len_miles.get(c, 0.0)
+
+    model.RunBucket = pyo.Set(initialize=range(n_buckets), ordered=True)
+    model.u = pyo.Var(model.RunBucket, domain=pyo.Binary)
+
+    couple = list(cell_bucket.items())
+    model.run_couple_index = pyo.Set(initialize=range(len(couple)), ordered=True)
+
+    def _couple_rule(m, t):
+        c, bkt = couple[t]
+        return m.s[c] == m.u[bkt]
+
+    model.run_couple = pyo.Constraint(model.run_couple_index, rule=_couple_rule)
+    return n_buckets, bucket_len_miles, cell_bucket
 
 
 def build_model(
@@ -1038,69 +1310,179 @@ def build_model(
     # energized -- this keeps the guarantee even when structure costs are zero.
     # The run itself may start at ANY site boundary (nothing is pre-grouped), so
     # the optimizer keeps full freedom over where the >= min-length run begins.
+    # Optional corridor run-shape constraints: minimum contiguous ENERGIZED run
+    # (min_energized_length_miles) and/or maximum contiguous UNelectrified gap
+    # (max_energized_gap_miles). Both are measured in CORRIDOR miles (parallel
+    # tracks/sidings in a structure site count once) and share one coarse bucket
+    # layer along the mainline (u[b], with s[c] == u[bucket(c)]); when both are
+    # active the finer bucket width is used so each is enforced at adequate
+    # resolution.
+    _need_buckets = (
+        inputs.min_energized_length_miles is not None
+        or inputs.max_energized_gap_miles is not None
+    )
+    if _need_buckets:
+        _widths = []
+        if inputs.min_energized_length_miles is not None:
+            _widths.append(min(0.5, max(inputs.min_energized_length_miles / 8.0, 1e-6)))
+        if inputs.max_energized_gap_miles is not None:
+            _widths.append(min(0.5, max(inputs.max_energized_gap_miles / 8.0, 1e-6)))
+        bucket_mi = min(_widths)
+        n_buckets, bucket_len_miles, cell_bucket = _install_corridor_buckets(
+            model, data, bucket_mi
+        )
+    else:
+        n_buckets, bucket_len_miles, cell_bucket = 0, [], {}
+
+    # Minimum contiguous energized run length. Once an interior run of energized
+    # corridor starts it must span >= min_len, which forbids tiny isolated slivers
+    # even when structure/substation costs are zero. Runs may start at any bucket
+    # boundary (nothing is pre-grouped); runs reaching a corridor end/junction are
+    # exempt (they may continue there). Uses the shared bucket layer on the
+    # mainline, or falls back to per-cell link chains when no mainline exists.
     if inputs.min_energized_length_miles is not None:
         min_len = inputs.min_energized_length_miles
+        if n_buckets >= 2:
+            window = max(1, int(round(min_len / bucket_mi)))
+            # One contiguous corridor -> one bucket run [0 .. n_buckets-1]; any
+            # interior energized run must span >= window buckets (>= min_len).
+            triples: set = set()
+            for i in range(1, n_buckets):  # i=0 is a corridor end -> exempt
+                last = i + window - 1
+                if last > n_buckets - 1:
+                    continue  # within min_len of the corridor end -> exempt
+                for k in range(i + 1, last + 1):
+                    triples.add((k, i, i - 1))
+            tl = list(triples)
+            if tl:
+                model.min_run_index = pyo.Set(
+                    initialize=range(len(tl)), ordered=True
+                )
 
-        pieces_in_cell: Dict[Hashable, List[Hashable]] = {}
-        for p in data.piece_ids:
-            pieces_in_cell.setdefault(data.piece_cell[p], []).append(p)
+                def _min_run_rule(m, t):
+                    j, i, i_prev = tl[t]
+                    return m.u[j] >= m.u[i] - m.u[i_prev]
 
-        # Structure only where at least one track is energized (ties s to x).
-        def _structure_used_rule(m, c):
-            ps = pieces_in_cell.get(c, [])
-            if not ps:
-                return m.s[c] == 0
-            return m.s[c] <= sum(m.x[p] for p in ps)
+                model.min_run = pyo.Constraint(
+                    model.min_run_index, rule=_min_run_rule
+                )
+        else:
+            # Fallback: per-cell link chains (breaks at junctions). structure_used
+            # was already installed by _install_corridor_buckets above.
+            link_by_idx = {L["idx_curr"]: L for L in data.network_dict[1][1:]}
+            link_pieces: Dict[int, List[Hashable]] = {}
+            for p in data.piece_ids:
+                link_pieces.setdefault(data.piece_link[p], []).append(p)
+            for lp in link_pieces.values():
+                lp.sort(key=lambda p: data.piece_offsets[p][0])
+            triples = set()
+            for chain in _build_link_chains(link_by_idx, link_pieces):
+                cseq: List[Hashable] = []
+                for p in chain:
+                    c = data.piece_cell[p]
+                    if not cseq or cseq[-1] != c:
+                        cseq.append(c)
+                if len(cseq) < 2:
+                    continue
+                lengths = [data.cell_len_miles.get(c, 0.0) for c in cseq]
+                n_seq = len(cseq)
+                for i in range(1, n_seq):
+                    cum = 0.0
+                    reach = None
+                    for k in range(i, n_seq):
+                        cum += lengths[k]
+                        if cum >= min_len - 1e-9:
+                            reach = k
+                            break
+                    if reach is None:
+                        continue
+                    for k in range(i + 1, reach + 1):
+                        triples.add((cseq[k], cseq[i], cseq[i - 1]))
+            tl = list(triples)
+            if tl:
+                model.min_run_index = pyo.Set(
+                    initialize=range(len(tl)), ordered=True
+                )
 
-        model.structure_used = pyo.Constraint(model.C, rule=_structure_used_rule)
+                def _min_run_rule(m, t):
+                    j, i, i_prev = tl[t]
+                    return m.s[j] >= m.s[i] - m.s[i_prev]
 
-        # Order structure sites along each corridor via the piece chains.
-        link_by_idx = {L["idx_curr"]: L for L in data.network_dict[1][1:]}
-        link_pieces: Dict[int, List[Hashable]] = {}
-        for p in data.piece_ids:
-            link_pieces.setdefault(data.piece_link[p], []).append(p)
-        for lp in link_pieces.values():
-            lp.sort(key=lambda p: data.piece_offsets[p][0])
-        site_seqs: List[List[Hashable]] = []
-        for chain in _build_link_chains(link_by_idx, link_pieces):
-            seq: List[Hashable] = []
-            for p in chain:
-                c = data.piece_cell[p]
-                if not seq or seq[-1] != c:
-                    seq.append(c)
-            if len(seq) >= 2:
-                site_seqs.append(seq)
+                model.min_run = pyo.Constraint(
+                    model.min_run_index, rule=_min_run_rule
+                )
 
-        # (j, i, i_prev) site triples forcing s[j] >= s[i] - s[i_prev]. Dedup,
-        # since parallel tracks yield the same corridor site-sequence.
-        triples: set = set()
-        for seq in site_seqs:
-            lengths = [data.cell_len_miles[c] for c in seq]
-            n_seq = len(seq)
-            for i in range(1, n_seq):  # interior starts only (i=0 = corridor end)
-                cum = 0.0
-                reach = None
-                for k in range(i, n_seq):
-                    cum += lengths[k]
-                    if cum >= min_len - 1e-9:
-                        reach = k
-                        break
-                if reach is None:
-                    continue  # remaining corridor too short -> boundary-exempt
-                for k in range(i + 1, reach + 1):
-                    triples.add((seq[k], seq[i], seq[i - 1]))
-
-        min_run_triples = list(triples)
-        if min_run_triples:
-            model.min_run_index = pyo.Set(
-                initialize=range(len(min_run_triples)), ordered=True
+    # Maximum contiguous UNelectrified gap length (battery-electric range limit).
+    # No stretch of un-energized corridor may exceed max_gap: in every window of
+    # consecutive buckets whose cumulative length EXCEEDS max_gap, at least one
+    # bucket must be energized (sum_{b in window} u[b] >= 1). The minimal such
+    # window per start index suffices (longer windows are implied). Windows that
+    # touch a corridor end are NOT exempt: the battery is assumed full at each end
+    # (yard charging), so end gaps obey the same limit. Because this can FORCE
+    # electrification (unlike the minimum run), a feasibility pre-check first
+    # verifies each binding window contains at least one coverable bucket.
+    if inputs.max_energized_gap_miles is not None:
+        gap_max = inputs.max_energized_gap_miles
+        if n_buckets < 2:
+            raise ValueError(
+                "max_energized_gap_miles requires structure-site (corridor) mode "
+                "with a contiguous mainline path, but none was found. Set "
+                "structure_spacing_miles and ensure the network has lat/lon "
+                "geometry."
             )
 
-            def _min_run_rule(m, t):
-                j, i, i_prev = min_run_triples[t]
-                return m.s[j] >= m.s[i] - m.s[i_prev]
+        # Prefix miles at each bucket boundary, for region reporting.
+        prefix = [0.0]
+        for L in bucket_len_miles:
+            prefix.append(prefix[-1] + L)
 
-            model.min_run = pyo.Constraint(model.min_run_index, rule=_min_run_rule)
+        # A bucket can be energized iff some cell it contains has a piece that is
+        # auto-covered by an existing substation or reachable by a candidate.
+        cell_coverable: Dict[Hashable, bool] = {}
+        for p in data.piece_ids:
+            if data.piece_auto_covered[p] or data.piece_cover[p]:
+                cell_coverable[data.piece_cell[p]] = True
+        bucket_coverable = [False] * n_buckets
+        for c, bkt in cell_bucket.items():
+            if cell_coverable.get(c):
+                bucket_coverable[bkt] = True
+
+        # Minimal window per start i: smallest [i..j] with sum(len) > gap_max.
+        windows: List[Tuple[int, ...]] = []
+        for i in range(n_buckets):
+            cum = 0.0
+            j = i
+            while j < n_buckets and cum + bucket_len_miles[j] <= gap_max:
+                cum += bucket_len_miles[j]
+                j += 1
+            if j < n_buckets:  # else: tail from i to corridor end <= gap_max -> ok
+                windows.append(tuple(range(i, j + 1)))
+
+        # Feasibility pre-check: a binding window with no coverable bucket can
+        # never satisfy sum u >= 1, so the gap is un-closeable -> infeasible.
+        for w in windows:
+            if not any(bucket_coverable[b] for b in w):
+                raise ValueError(
+                    f"max_energized_gap_miles={gap_max} is infeasible: the corridor "
+                    f"from mile {prefix[w[0]]:.1f} to {prefix[w[-1] + 1]:.1f} spans "
+                    f"more than the maximum gap yet contains no track reachable by "
+                    f"any candidate or existing substation, so the gap cannot be "
+                    f"closed. Add a substation in range or increase "
+                    f"substation_feed_distance_miles."
+                )
+
+        wl = list(dict.fromkeys(windows))  # dedup, preserve order
+        if wl:
+            model.max_gap_index = pyo.Set(
+                initialize=range(len(wl)), ordered=True
+            )
+
+            def _max_gap_rule(m, t):
+                return sum(m.u[b] for b in wl[t]) >= 1
+
+            model.max_gap = pyo.Constraint(
+                model.max_gap_index, rule=_max_gap_rule
+            )
 
     # Optional hard requirement: electrify mainline track in every high-grade
     # cell (this pulls in the shared structure via the linking constraint).
@@ -1192,6 +1574,7 @@ def solve_model(
     time_limit_seconds: Optional[float] = None,
     mip_gap: Optional[float] = None,
     tee: bool = False,
+    solver_threads: Optional[int] = None,
 ) -> Tuple[pyo.ConcreteModel, str]:
     """Solve the model with the HiGHS solver via Pyomo APPSI.
 
@@ -1202,6 +1585,9 @@ def solve_model(
         solver.config.time_limit = time_limit_seconds
     if mip_gap is not None:
         solver.config.mip_gap = mip_gap
+    if solver_threads is not None:
+        # Cap HiGHS parallelism; its default (0) uses all available cores.
+        solver.highs_options["threads"] = int(solver_threads)
     solver.config.stream_solver = tee
 
     results = solver.solve(model)
@@ -1293,6 +1679,7 @@ def optimize_energization_placement(
     time_limit_seconds: Optional[float] = None,
     mip_gap: Optional[float] = None,
     tee: bool = False,
+    solver_threads: Optional[int] = None,
 ) -> EnergizationPlacementResult:
     """End-to-end entry point: prepare data, build, solve, and extract."""
     data = _prepare(inputs)
@@ -1302,5 +1689,6 @@ def optimize_energization_placement(
         time_limit_seconds=time_limit_seconds,
         mip_gap=mip_gap,
         tee=tee,
+        solver_threads=solver_threads,
     )
     return extract_result(inputs, data, model, status)

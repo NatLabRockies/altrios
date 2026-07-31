@@ -64,6 +64,7 @@ overrides general" (`_first_not_none`):
 | $D$ — `substation_feed_distance_miles` | Max distance from an energized piece to a built substation | `20.0` |
 | `require_high_grade_coverage` | Force (vs. merely prioritize) high-grade electrification | `False` |
 | $L_{\min}$ — `min_energized_length_miles` | Minimum contiguous energized run (corridor-miles) | `None` |
+| $G_{\max}$ — `max_energized_gap_miles` | Maximum contiguous **un**electrified gap (corridor-miles); battery-electric range limit | `None` |
 | `uniform_power_limit_watts` | Power limit stamped on every energized segment (a constant; not optimized) | `0.0` |
 
 Reasonable values for $D$ and `uniform_power_limit_watts` (and the matching
@@ -301,6 +302,44 @@ not); the constraint then forces every site out to the reach $r(i)$ to be
 energized as well, guaranteeing a run of at least $L_{\min}$. Runs may begin at any
 site boundary, and duplicate triples arising from parallel tracks are removed.
 
+### 5.6 Maximum unelectrified gap length (optional)
+
+When $G_{\max}$ is set (structure-site mode with a contiguous mainline), no
+contiguous **un**electrified stretch of corridor may exceed $G_{\max}$
+corridor-miles. This is the range constraint for a **battery-electric locomotive**
+(BEL): it recharges from the wire over electrified track and depletes its battery
+over gaps, so every gap must be short enough that the pack does not run out. The
+parameter is naturally sized from battery capacity — with the simplifying
+assumptions that any electrified segment recharges the pack and traction energy is
+drawn at a constant average rate $e$ (kWh/mi), a usable pack of $E$ kWh bridges
+$G_{\max} = E/e$ miles (`energization.max_gap_miles_from_battery`).
+
+The constraint reuses the same coarse bucket layer as (C5)–(C6): the mainline is
+tiled into contiguous buckets, $s_c = u_{b(c)}$ couples each cell to its bucket
+$u_b\in\{0,1\}$, and the tie $s_c \le \sum_{p:\,c(p)=c} x_p$ (C5) makes $u_b$ a
+faithful "bucket $b$ is energized" indicator. Let $\ell_b$ be the corridor length
+(miles) of bucket $b$ along the ordered mainline sequence $b = 0,1,\dots,n-1$. For
+each start bucket $i$ let $\rho(i)$ be the smallest index with
+$\sum_{t=i}^{\rho(i)} \ell_t > G_{\max}$ (skip $i$ when the tail to the corridor
+end already fits within $G_{\max}$). The model then requires at least one energized
+bucket in every such minimal over-length window:
+
+$$
+\sum_{b=i}^{\rho(i)} u_b \;\ge\; 1
+\qquad \forall\, i \text{ with } \rho(i) < n. \tag{C7}
+$$
+
+(`model.max_gap`.) Because each row's support is a *contiguous* block of buckets,
+any all-zero (unelectrified) run longer than $G_{\max}$ would violate some row, so
+(C7) forbids exactly the over-length gaps; longer windows are implied by their
+minimal sub-window and are omitted. Windows touching a corridor **end are not**
+exempt — the battery is assumed full at each end (yard charging), so end gaps obey
+the same limit (contrast with (C6), whose boundary runs are exempt). Unlike the
+other optional constraints (C7) can **force** electrification; a feasibility
+pre-check therefore verifies that every binding window contains at least one
+coverable bucket (a piece auto-covered by an existing substation or reachable by a
+candidate) and otherwise raises `ValueError` naming the offending corridor miles.
+
 ---
 
 ## 6. Complete model
@@ -315,6 +354,7 @@ $$
 & x_p = 1 && \forall p \in \mathcal{R} && \text{(C4, optional)}\\
 & s_c \le \textstyle\sum_{p:\,c(p)=c} x_p && \forall c \in \mathcal{C} && \text{(C5, optional)}\\
 & s_{\sigma_k} \ge s_{\sigma_i} - s_{\sigma_{i-1}} && \forall (\sigma_k,\sigma_i,\sigma_{i-1}) && \text{(C6, optional)}\\
+& \textstyle\sum_{b=i}^{\rho(i)} u_b \ge 1 && \forall i:\ \rho(i) < n && \text{(C7, optional)}\\
 & x_p,\, s_c,\, y_j \in \{0,1\}. &&&&
 \end{aligned}
 $$
@@ -326,6 +366,16 @@ $$
 - **Tight relaxation.** Constraints (C1), (C2), (C4)–(C6) have $\pm 1$
   coefficients; the corresponding coefficient matrix is (near) totally unimodular,
   so the LP relaxation is integral in the absence of the budget row.
+- **Gap constraint stays tight.** The maximum-gap rows (C7) are *covering* rows
+  whose support is a **contiguous block** of the ordered bucket variables — a
+  consecutive-ones (interval) matrix, which is totally unimodular. Added over the
+  1-D mainline together with the interval-structured (C1)/(C5) coupling, (C7)
+  introduces **no** fractionality of its own (no big-$M$, no general
+  coefficients), so the LP relaxation remains integral apart from the pre-existing
+  budget row. The practical effect of (C7) is on *feasibility*, not relaxation
+  looseness: because it can force electrification, it can tighten a binding budget
+  (C3) or render the model infeasible (caught by the pre-check) — but it does not
+  loosen the bound or trigger a branching blow-up.
 - **Single non-TU row.** Only the budget knapsack (C3) couples the decisions with
   general coefficients, which is what makes the MILP nontrivial yet fast.
 - **Solver.** HiGHS via Pyomo APPSI (`solve_model`), with optional
@@ -372,3 +422,11 @@ simulation and by the optional line-loss post-processing.
 4. **Uniform power limit.** `uniform_power_limit_watts` is stamped identically on
    all energized intervals; heterogeneous ratings, if required, are introduced in
    post-processing.
+5. **Battery-electric gap as pure geometry.** The maximum-gap constraint (C7)
+   keeps the optimizer electrically neutral: battery physics enters only through
+   the scalar $G_{\max}$, computed upstream from battery capacity and an assumed
+   constant average consumption $e$ (kWh/mi). It assumes any electrified segment
+   recharges the pack, ignores state-of-charge dynamics and grade-dependent draw
+   within a gap, and treats the battery as full at each corridor end (yard
+   charging). Heterogeneous consumption or true SOC tracking, if required, would
+   be introduced by a downstream simulation rather than in placement.

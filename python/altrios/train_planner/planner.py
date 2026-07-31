@@ -1,4 +1,5 @@
 from __future__ import annotations
+import time
 from pathlib import Path
 from altrios.train_planner import (
     data_prep,
@@ -315,7 +316,22 @@ def run_train_planner(
     # Append additional locomotive info to configuration
     config.loco_info = data_prep.append_loco_info(config.loco_info)
     freight_type_to_car_type = data_prep.get_freight_to_car_mapping(rail_vehicles)           
+
+    # Timing accumulators for the heavyweight planning steps. These are reported
+    # in a summary at the end so slow phases can be identified.
+    timings = {
+        "demand_and_train_counts": 0.0,
+        "build_locopool": 0.0,
+        "build_refuelers": 0.0,
+        "update_refuel_queue": 0.0,
+        "make_speed_limit_train_sim": 0.0,
+        "make_est_times": 0.0,
+    }
+    planner_start = time.perf_counter()
+
     if consist_plan_in is None:
+        # Time the full demand-building and train-count / dispatch-scheduling phase.
+        demand_start = time.perf_counter()
         # Load freight demand data and get list of nodes
         demand, node_list = data_prep.load_freight_demand(demand_file, config)
 
@@ -412,11 +428,16 @@ def run_train_planner(
             # Uncomment to add random jitter to departure times
             # dispatch_schedule = dispatch_schedule.with_columns(pl.col("Hour").add(pl.random.rand()))
 
+        # Record time spent building demand levels, train counts, and the dispatch schedule.
+        timings["demand_and_train_counts"] += time.perf_counter() - demand_start
+
         # Create locomotive pool if not provided
         if loco_pool is None:
+            locopool_start = time.perf_counter()
             loco_pool = data_prep.build_locopool(
                 config=config, demand_file=demand, dispatch_schedule=dispatch_schedule
             )
+            timings["build_locopool"] += time.perf_counter() - locopool_start
         active_ods = demand.select(["Origin", "Destination"]).unique()
     else:
         demand = None
@@ -459,12 +480,14 @@ def run_train_planner(
 
     # Create refuelers if not provided
     if refuelers is None:
+        refuelers_start = time.perf_counter()
         refuelers = data_prep.build_refuelers(
             node_list,
             loco_pool,
             config.refueler_info,
             config.refuelers_per_incoming_corridor,
         )
+        timings["build_refuelers"] += time.perf_counter() - refuelers_start
 
     # Load network charging guidelines if not provided
     if network_charging_guidelines is None:
@@ -521,10 +544,11 @@ def run_train_planner(
         # If there are trains to dispatch at this time
         if current_dispatches.height > 0:
             # Update refueling status for all locomotives
+            refuel_queue_start = time.perf_counter()
             loco_pool, refuel_sessions = refueling.update_refuel_queue(
                 loco_pool, refuelers, current_time, refuel_sessions
             )
-            refuel_events.append(refuels)
+            timings["update_refuel_queue"] += time.perf_counter() - refuel_queue_start
 
             # Process each train scheduled to depart at current time
             for this_train in current_dispatches.iter_rows(named=True):
@@ -656,18 +680,22 @@ def run_train_planner(
                     )
 
                     # Create speed-limited train simulation
+                    make_slts_start = time.perf_counter()
                     slts = tsb.make_speed_limit_train_sim(
                         location_map=location_map,
                         save_interval=None,
                         simulation_days=config.simulation_days,
                         scenario_year=scenario_year,
                     )
+                    timings["make_speed_limit_train_sim"] += time.perf_counter() - make_slts_start
 
                     # Generate estimated travel times
 
+                    make_est_times_start = time.perf_counter()
                     (est_time_net, loco_con_out) = alt.make_est_times(
                         slts, network, config.failed_sim_logging_path
                     )
+                    timings["make_est_times"] += time.perf_counter() - make_est_times_start
 
                     # Calculate travel time with scaling factors
                     travel_time = (
@@ -787,10 +815,11 @@ def run_train_planner(
             # Set current time to infinity to finish processing any remaining refueling
             current_time = float("inf")
             # Final update of refueling queues
+            refuel_queue_start = time.perf_counter()
             loco_pool, refuel_sessions = refueling.update_refuel_queue(
                 loco_pool, refuelers, current_time, refuel_sessions
             )
-            refuel_events.append(refuels)
+            timings["update_refuel_queue"] += time.perf_counter() - refuel_queue_start
             # Mark simulation as complete
             done = True
         else:
@@ -816,6 +845,17 @@ def run_train_planner(
     # Convert categorical columns in loco_pool and refuelers to strings
     loco_pool = loco_pool.with_columns(cs.categorical().cast(str))
     refuelers = refuelers.with_columns(cs.categorical().cast(str))
+
+    # Report timing breakdown for the heavyweight planning steps so slow phases
+    # can be identified.
+    total_elapsed = time.perf_counter() - planner_start
+    tracked = sum(timings.values())
+    print("Train planner timing breakdown (seconds):")
+    for label, seconds in timings.items():
+        share = (seconds / total_elapsed * 100) if total_elapsed > 0 else 0.0
+        print(f"    {label:<28} {seconds:9.3f} s ({share:5.1f}%)")
+    print(f"    {'other/overhead':<28} {total_elapsed - tracked:9.3f} s")
+    print(f"    {'total run_train_planner':<28} {total_elapsed:9.3f} s")
 
     # Return results
     return (

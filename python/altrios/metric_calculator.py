@@ -2,7 +2,7 @@ import pandas as pd
 import polars as pl
 import polars.selectors as cs
 import math
-from typing import List, Dict, Tuple, Union
+from typing import List, Dict, Tuple, Union, Optional
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -82,6 +82,7 @@ class ScenarioInfo:
     nodal_energy_prices: pl.DataFrame = None
     count_unused_locomotives: bool = False
     train_planner_config: planner_config = None
+    infrastructure_costs: pl.DataFrame = None
 
 
 def metric(
@@ -129,9 +130,9 @@ def main(
     annual_metrics: Union[Tuple[str, str], List[Tuple[str, str]]] = [
         ("Meet_Pass_Events", "count"),
         ("Freight_Moved", "million tonne-mi"),
+        ("Freight_Moved", "million tonne-km"),
         ("Freight_Moved", "car-miles"),
         ("Freight_Moved", "cars"),
-        ("Freight_Moved", "detailed"),
         ("GHG", "tonne CO2-eq"),
         ("Count_Locomotives", "assets"),
         ("Count_Refuelers", "assets"),
@@ -211,13 +212,13 @@ def calculate_annual_metric(
 
 def calculate_rollout_lcotkm(values: MetricType) -> MetricType:
     """
-    Given a DataFrame of each year's costs and gross freight deliveries, computes the multi-year levelized cost per gross tonne-km of freight delivered.
+    Given a DataFrame of each year's costs and gross freight deliveries, computes the multi-year levelized cost of freight delivered, per gross tonne-km (LCOTKM) and per gross tonne-mile (LCOTMI).
     Arguments:
     ----------
     values: DataFrame containing total costs and gross freight deliveries for each modeled scenario year
     Outputs:
     ----------
-    DataFrame of LCOTKM result (metric name, units, value, and scenario year)
+    DataFrame of LCOTKM and LCOTMI results (metric name, units, value, and scenario year)
     """
 
     cost_timeseries = (
@@ -228,11 +229,27 @@ def calculate_rollout_lcotkm(values: MetricType) -> MetricType:
         .rename({"Value": "Cost_Total"})
     )
     tkm_timeseries = (
-        values.filter(pl.col("Metric") == pl.lit("Mt-km"))
+        values.filter(
+            (pl.col("Metric") == pl.lit("Freight_Moved"))
+            & (pl.col("Units") == pl.lit("million tonne-km"))
+            & (pl.col("Subset") == pl.lit("All"))
+        )
         .select(["Year", "Value"])
         .rename({"Value": "Mt-km"})
     )
-    timeseries = cost_timeseries.join(tkm_timeseries, on="Year", how="outer")
+    tmi_timeseries = (
+        values.filter(
+            (pl.col("Metric") == pl.lit("Freight_Moved"))
+            & (pl.col("Units") == pl.lit("million tonne-mi"))
+            & (pl.col("Subset") == pl.lit("All"))
+        )
+        .select(["Year", "Value"])
+        .rename({"Value": "Mt-mi"})
+    )
+    timeseries = (
+        cost_timeseries.join(tkm_timeseries, on="Year", how="outer", coalesce=True)
+        .join(tmi_timeseries, on="Year", how="outer", coalesce=True)
+    )
     timeseries = (
         timeseries.with_columns(
             (pl.col("Year") - pl.col("Year").min()).alias("Year_Offset")
@@ -247,6 +264,7 @@ def calculate_rollout_lcotkm(values: MetricType) -> MetricType:
                 "Cost_Total_Discounted"
             ),
             (pl.col("Mt-km") / pl.col("Discounting_Factor")).alias("Mt-km_Discounted"),
+            (pl.col("Mt-mi") / pl.col("Discounting_Factor")).alias("Mt-mi_Discounted"),
         )
         .with_columns(pl.col("Year").cast(pl.Utf8))
     )
@@ -261,6 +279,8 @@ def calculate_rollout_lcotkm(values: MetricType) -> MetricType:
     )
     tkm_total = timeseries.get_column("Mt-km_Discounted").sum()
     lcotkm_all = cost_minus_residual_baseline / tkm_total if tkm_total > 0 else math.nan
+    tmi_total = timeseries.get_column("Mt-mi_Discounted").sum()
+    lcotmi_all = cost_minus_residual_baseline / tmi_total if tmi_total > 0 else math.nan
 
     cost_discounted = timeseries.select(
         pl.col("Year"),
@@ -276,12 +296,26 @@ def calculate_rollout_lcotkm(values: MetricType) -> MetricType:
         Subset=pl.lit("All"),
         Units=pl.lit("million tonne-km (discounted)"),
     )
+    tmi_discounted = timeseries.select(
+        pl.col("Year"),
+        Value=pl.col("Mt-mi_Discounted"),
+        Metric=pl.lit("Mt-mi_Discounted"),
+        Subset=pl.lit("All"),
+        Units=pl.lit("million tonne-mi (discounted)"),
+    )
     cotkm_annual = timeseries.select(
         pl.col("Year"),
         Value=pl.col("Cost_Total") / pl.col("Mt-km"),
         Metric=pl.lit("Cost_Per_Mt-km"),
         Subset=pl.lit("All"),
         Units=pl.lit("USD per million tonne-km"),
+    )
+    cotmi_annual = timeseries.select(
+        pl.col("Year"),
+        Value=pl.col("Cost_Total") / pl.col("Mt-mi"),
+        Metric=pl.lit("Cost_Per_Mt-mi"),
+        Subset=pl.lit("All"),
+        Units=pl.lit("USD per million tonne-mi"),
     )
     discount = timeseries.select(
         pl.col("Year"),
@@ -295,9 +329,12 @@ def calculate_rollout_lcotkm(values: MetricType) -> MetricType:
             values.with_columns(pl.col("Year").cast(pl.Utf8)),
             cost_discounted,
             tkm_discounted,
+            tmi_discounted,
             cotkm_annual,
+            cotmi_annual,
             discount,
             metric("LCOTKM", "USD per million tonne-km (levelized)", lcotkm_all),
+            metric("LCOTMI", "USD per million tonne-mi (levelized)", lcotmi_all),
         ]
     )
 
@@ -336,12 +373,15 @@ def calculate_energy_per_freight(info: ScenarioInfo, units: str) -> MetricType:
     elif "per container-mile" in units:
         freight_moved = calculate_freight_moved(info, units="container-miles")
     freight_val = value_from_metrics(freight_moved)
+    # Guard against zero / missing freight (e.g. an unwalked or empty sim), which
+    # would otherwise raise ZeroDivisionError.
+    energy_per_freight = total_energy / freight_val if freight_val else None
     return metrics_from_list(
         [
             diesel_mj,
             electricity_mj,
             metric("Energy_Use", "MJ", total_mj),
-            metric("Energy_Per_Freight_Moved", units, total_energy / freight_val),
+            metric("Energy_Per_Freight_Moved", units, energy_per_freight),
         ]
     )
 
@@ -921,6 +961,46 @@ def calculate_refueler_counts(info: ScenarioInfo, _) -> MetricType:
     return num_ports
 
 
+def calculate_infrastructure_counts(info: ScenarioInfo, _) -> MetricType:
+    """
+    Given a single scenario year's results, counts the fixed electrification infrastructure
+    assets (catenary structure, energization/wiring, traction substations) included in the
+    scenario and reports their unit costs and lifespans, so this capital flows into the
+    multi-year investment / total-cost metrics exactly like locomotive and refueler capital.
+    Arguments:
+    ----------
+    info: A scenario information object representing parameters and results for a single year
+    Outputs:
+    ----------
+    DataFrame of infrastructure asset counts, unit costs, and lifespans (metric name, units,
+    value, and scenario year)
+    """
+    if info.infrastructure_costs is None:
+        return metric("Count_Infrastructure", "assets", None)
+
+    counts = (
+        info.infrastructure_costs.group_by(["Infrastructure_Type"])
+        .agg(
+            pl.col("Cost_USD").mean().alias("Unit_Cost"),
+            pl.len().alias("Count_Infrastructure"),
+            pl.col("Lifespan_Years").mean().alias("Lifespan"),
+        )
+        .melt(id_vars="Infrastructure_Type", variable_name="Metric", value_name="Value")
+        .with_columns(
+            pl.when(pl.col("Metric") == "Unit_Cost")
+            .then(pl.lit("USD"))
+            .when(pl.col("Metric") == "Lifespan")
+            .then(pl.lit("years"))
+            .otherwise(pl.lit("assets"))
+            .alias("Units"),
+            pl.lit("All").alias("Year"),
+        )
+        .rename({"Infrastructure_Type": "Subset"})
+    )
+
+    return counts
+
+
 def calculate_rollout_investments(values: MetricType) -> MetricType:
     """
     Given multiple scenario years' locomotive fleet compositions, computes additional across-year metrics
@@ -1299,6 +1379,65 @@ def calculate_rollout_total_costs(values: MetricType) -> MetricType:
     return metrics_from_list([values, total_costs])
 
 
+def interpolate_emissions_factors_cambium(
+    regions: List[str],
+    years: List[int],
+    cambium_scenario: str = "MidCase",
+    file_path: Path = defaults.GRID_EMISSIONS_FILE,
+) -> pl.DataFrame:
+    """Cambium long-run marginal CO2e (kg/MWh) by grid region and year.
+
+    Reads the Cambium GEA table (``defaults.GRID_EMISSIONS_FILE``), sums the
+    combustion + pre-combustion LRMER CO2e, and linearly interpolates (clamped at
+    the endpoints) between Cambium sample years to each requested ``years`` value.
+    Returns a ``polars.DataFrame`` with ``Node`` (= grid region), ``Year`` (int),
+    and ``CO2eq_kg_per_MWh``. Regions absent from the Cambium table are omitted.
+    """
+    src = (
+        pl.scan_csv(source=file_path, skip_rows=5)
+        .filter(
+            (pl.col("scenario") == pl.lit(cambium_scenario))
+            & pl.col("gea").is_in(list(regions))
+        )
+        .select(
+            pl.col("gea").alias("Node"),
+            pl.col("t").cast(pl.Int64).alias("SampleYear"),
+            (pl.col("lrmer_co2e_c") + pl.col("lrmer_co2e_p")).alias("CO2eq_kg_per_MWh"),
+        )
+        .collect()
+    )
+    rows = []
+    for region in regions:
+        sub = src.filter(pl.col("Node") == region).sort("SampleYear")
+        if sub.height == 0:
+            continue
+        sample_years = sub.get_column("SampleYear").to_list()
+        factors = sub.get_column("CO2eq_kg_per_MWh").to_list()
+        for year in years:
+            rows.append({
+                "Node": region,
+                "Year": int(year),
+                "CO2eq_kg_per_MWh": _interp_clamped(sample_years, factors, int(year)),
+            })
+    return pl.DataFrame(rows)
+
+
+def _interp_clamped(xs: List[float], ys: List[float], x: float) -> Optional[float]:
+    """Linear interpolation of ``ys`` at ``x`` over sorted ``xs``, clamped to the
+    endpoints. Returns ``None`` if ``xs`` is empty."""
+    if not xs:
+        return None
+    if x <= xs[0]:
+        return ys[0]
+    if x >= xs[-1]:
+        return ys[-1]
+    for i in range(1, len(xs)):
+        if x <= xs[i]:
+            x0, x1, y0, y1 = xs[i - 1], xs[i], ys[i - 1], ys[i]
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    return ys[-1]
+
+
 def import_emissions_factors_cambium(
     location_map: Dict[str, List[alt.Location]],
     scenario_year: int,
@@ -1319,64 +1458,17 @@ def import_emissions_factors_cambium(
         {"Node": location_ids, "Region": grid_emissions_regions}
     ).unique()
 
-    emissions_factors = (
-        pl.scan_csv(source=file_path, skip_rows=5, dtypes={"t": pl.Int32})
-        .rename({"t": "Year", "gea": "Region"})
-        .filter(pl.col("scenario") == pl.lit(cambium_scenario))
-        .select(
-            pl.col("Region", "Year"),
-            (pl.col("lrmer_co2e_c") + pl.col("lrmer_co2e_p")).alias("CO2eq_kg_per_MWh"),
-            ((pl.col("Year") - pl.lit(scenario_year)).alias("Year_Diff")),
-        )
-        .join(region_mappings.lazy(), how="inner", on="Region")
-        .drop("Region")
-        .collect()
-    )
-    if emissions_factors.get_column("Year_Diff").abs().min() == 0:
-        emissions_factors = emissions_factors.filter(pl.col("Year_Diff") == 0).drop(
-            "Year_Diff"
-        )
-    else:
-        earlier_year = emissions_factors.filter(pl.col("Year_Diff") < 0).filter(
-            pl.col("Year_Diff") == pl.col("Year_Diff").max()
-        )
-        later_year = emissions_factors.filter(pl.col("Year_Diff") > 0).filter(
-            pl.col("Year_Diff") == pl.col("Year_Diff").min()
-        )
-        if later_year.height == 0:
-            return earlier_year
-        elif earlier_year.height == 0:
-            return later_year
-        else:
-            emissions_factors = earlier_year.join(later_year, on=["Node"], how="left")
-            total_diff = (
-                emissions_factors.get_column("Year_Diff").abs()
-                + emissions_factors.get_column("Year_Diff_right").abs()
-            )
-            emissions_factors = emissions_factors.with_columns(
-                (
-                    pl.col("CO2eq_kg_per_MWh")
-                    * (total_diff - pl.col("Year_Diff").abs())
-                    / total_diff
-                    + pl.col("CO2eq_kg_per_MWh_right")
-                    * (total_diff - pl.col("Year_Diff_right").abs())
-                    / total_diff
-                ).alias("CO2eq_kg_per_MWh"),
-                (
-                    pl.col("Year")
-                    * (total_diff - pl.col("Year_Diff").abs())
-                    / total_diff
-                    + pl.col("Year_right")
-                    * (total_diff - pl.col("Year_Diff_right").abs())
-                    / total_diff
-                )
-                .cast(pl.Int64, strict=False)
-                .alias("Year"),
-            ).drop(
-                ["Year_right", "CO2eq_kg_per_MWh_right", "Year_Diff_right", "Year_Diff"]
-            )
+    emissions_factors = interpolate_emissions_factors_cambium(
+        regions=region_mappings.get_column("Region").unique().to_list(),
+        years=[scenario_year],
+        cambium_scenario=cambium_scenario,
+        file_path=file_path,
+    ).rename({"Node": "Region"})
 
-    return emissions_factors
+    return (
+        region_mappings.join(emissions_factors, how="inner", on="Region")
+        .select("Node", "Year", "CO2eq_kg_per_MWh")
+    )
 
 
 def import_energy_prices_eia(
@@ -1550,9 +1642,9 @@ def add_battery_costs(loco_info: pd.DataFrame, year: int) -> pd.DataFrame:
             )
             loco_info.at[idx, "Cost_USD"] = (
                 defaults.BEL_MINUS_BATTERY_COST_USD
-                + usd_constant
-                + kW * usd_per_kW
-                + kWh * usd_per_kWh
+                # NREL ATB battery prices are 2022 USD; restate in the 2025 base year.
+                + (usd_constant + kW * usd_per_kW + kWh * usd_per_kWh)
+                * utilities.USD_2022_TO_2025
             ) * defaults.RETAIL_PRICE_EQUIVALENT_MULTIPLIER
     return loco_info
 
@@ -1608,12 +1700,133 @@ def calculate_meet_pass_events(info: ScenarioInfo, units: str) -> MetricType:
     return metric("Meet_Pass_Events", units, val)
 
 
+def _mj_to_units(units: str) -> float:
+    """MJ -> ``units`` multiplier (energy). Returns ``None`` if unsupported."""
+    return {
+        "J": 1e6, "MJ": 1.0, "GJ": 1e-3, "TJ": 1e-6,
+        "kWh": utilities.KWH_PER_MJ, "MWh": utilities.KWH_PER_MJ / 1e3,
+    }.get(units)
+
+
+def _sim_catenary_joules(sims) -> Tuple[float, float]:
+    """``(pantograph_delivered_J, line_loss_J)`` summed over a sim vec's catenary
+    interfaces.
+
+    Both are read directly from each locomotive's ``cat_int`` cumulative history
+    on the ``SpeedLimitTrainSim`` object(s) -- the authoritative source for
+    catenary delivery-chain energy -- not inferred or supplied out of band.
+    ``energy_elec_in_joules`` is the on-board (pantograph) energy delivered;
+    ``energy_line_loss_joules`` is the additional resistive loss the substation
+    must supply. Works for dual-mode and pantograph-equipped battery-electric
+    locomotives; locomotives without a catenary interface contribute nothing.
+    """
+    pantograph = 0.0
+    line_loss = 0.0
+    if sims is None:
+        return 0.0, 0.0
+    for slts in sims.to_pydict():
+        loco_con = slts.get("loco_con") or {}
+        for loco in loco_con.get("loco_vec") or []:
+            loco_type = loco.get("loco_type") or {}
+            for key in ("DualModeLoco", "BatteryElectricLoco"):
+                sub = loco_type.get(key)
+                cat_int = sub.get("cat_int") if sub else None
+                if not cat_int:
+                    continue
+                hist = cat_int.get("history") or {}
+                e_in = hist.get("energy_elec_in_joules")
+                e_ll = hist.get("energy_line_loss_joules")
+                if e_in:
+                    pantograph += e_in[-1]
+                if e_ll:
+                    line_loss += e_ll[-1]
+    return pantograph, line_loss
+
+
+def calculate_energized_distance(info: ScenarioInfo, units: str) -> MetricType:
+    """Built energization distance by component (e.g. catenary wire track-miles).
+
+    Reads optional ``Distance_Miles`` / ``Distance_Units`` columns from
+    ``info.infrastructure_costs`` (one row per infrastructure component) and emits
+    a ``Distance_Energized`` row per component that carries a distance, each with
+    its own units (e.g. contact/messenger wire in track-miles). Components without
+    a distance (or when the columns are absent) are skipped, so the metric is a
+    no-op unless the caller populates the distance columns.
+    """
+    infra = info.infrastructure_costs
+    if infra is None or "Distance_Miles" not in infra.columns:
+        return metric("Distance_Energized", units, None)
+    have_units = "Distance_Units" in infra.columns
+    df = infra.filter(pl.col("Distance_Miles").is_not_null())
+    if df.height == 0:
+        return metric("Distance_Energized", units, None)
+    group_cols = ["Infrastructure_Type"] + (["Distance_Units"] if have_units else [])
+    agg = df.group_by(group_cols).agg(pl.col("Distance_Miles").sum())
+    rows = [
+        metric(
+            "Distance_Energized",
+            r["Distance_Units"] if have_units else units,
+            r["Distance_Miles"], subset=r["Infrastructure_Type"],
+        )
+        for r in agg.iter_rows(named=True)
+    ]
+    return metrics_from_list(rows)
+
+
+def calculate_energy(info: ScenarioInfo, units: str) -> MetricType:
+    """Energy consumed by category: diesel fuel and grid electricity.
+
+    Electricity is additionally itemized into the portion lost across the catenary
+    power-delivery chain (``Electricity_Line_Loss``, read from the
+    ``SpeedLimitTrainSim`` catenary interface) and the portion supplied by
+    stationary chargers (``Electricity_Stationary_Charging`` = total grid
+    electricity minus the catenary grid draw). ``units`` may be any energy unit
+    (``MJ``/``J``/``GJ``/``TJ``/``kWh``/``MWh``).
+    """
+    conv = _mj_to_units(units)
+    if conv is None:
+        print(f"Units of {units} not supported for energy calculation.")
+        return metric("Energy", units, None)
+
+    diesel_mj = value_from_metrics(calculate_diesel_use(info, "MJ"), "Diesel_Usage")
+    elec_total_mj = value_from_metrics(
+        calculate_electricity_use(info, "MJ"), subset="All"
+    )
+    # Catenary delivery-chain energy from the SIM: pantograph delivered + line
+    # loss (= substation-side catenary grid draw). Annualize to match the diesel
+    # and electricity totals (same 365.25/simulation_days scaler).
+    scaler = (365.25 / info.simulation_days
+              if info.annualize and info.simulation_days else 1.0)
+    pantograph_j, line_loss_j = _sim_catenary_joules(info.sims)
+    line_loss_mj = line_loss_j * scaler / 1.0e6
+    catenary_grid_mj = (pantograph_j + line_loss_j) * scaler / 1.0e6
+
+    rows: List[MetricType] = []
+    if diesel_mj is not None:
+        rows.append(metric("Energy", units, diesel_mj * conv, subset="Diesel"))
+    if elec_total_mj is not None:
+        # Grid electricity not delivered via the catenary is stationary charging.
+        charging_mj = max(elec_total_mj - catenary_grid_mj, 0.0)
+        rows.append(metric("Energy", units, elec_total_mj * conv, subset="Electricity"))
+        rows.append(metric(
+            "Energy", units, line_loss_mj * conv, subset="Electricity_Line_Loss"))
+        rows.append(metric(
+            "Energy", units, charging_mj * conv,
+            subset="Electricity_Stationary_Charging"))
+    if not rows:
+        return metric("Energy", units, None)
+    return metrics_from_list(rows)
+
+
 function_mappings = {
     "Meet_Pass_Events": calculate_meet_pass_events,
     "Energy_Costs": calculate_energy_cost,
     "Freight_Moved": calculate_freight_moved,
     "Energy_Per_Freight_Moved": calculate_energy_per_freight,
+    "Energy": calculate_energy,
+    "Distance_Energized": calculate_energized_distance,
     "GHG": calculate_ghg,
     "Count_Locomotives": calculate_locomotive_counts,
     "Count_Refuelers": calculate_refueler_counts,
+    "Count_Infrastructure": calculate_infrastructure_counts,
 }

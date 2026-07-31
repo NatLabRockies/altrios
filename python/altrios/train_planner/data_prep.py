@@ -240,13 +240,29 @@ def loco_info_to_pool(
     )
 
 def add_loco_status_columns(loco_pool: pl.DataFrame) -> pl.DataFrame:
+    """Initialize the canonical locomotive-pool status/refueling columns.
+
+    Adds the per-locomotive scheduling and refueling-session bookkeeping columns
+    consumed by :mod:`altrios.train_planner.refueling` and
+    :mod:`altrios.train_planner.planner` (all time columns ``_Hr``-suffixed, energy
+    columns ``_J``-suffixed). Values are the neutral "Ready, unscheduled" defaults,
+    matching the schema :func:`build_locopool` constructs directly; charger columns
+    (``Refueler_J_Per_Hr`` etc.) are refreshed from the refuelers when a locomotive
+    arrives at a node. These defaults are also written by ``build_locopool``'s own
+    constructor, so re-applying them there is a harmless no-op.
+    """
     return loco_pool.with_columns(
-        pl.lit(None).cast(pl.Float64).alias("Arrival_Time"),
-        pl.lit(None).cast(pl.Float64).alias("Refuel_Duration"),
-        pl.lit(None).cast(pl.Float64).alias("Refueler_Efficiency"),
-        pl.lit(None).cast(pl.Float64).alias("Refueling_Done_Time"),
-        pl.lit(None).cast(pl.Float64).alias("Servicing_Done_Time"),
-        pl.lit(None).cast(pl.Float64).alias("SOC_Target_J")
+        pl.lit(0.0).alias("Arrival_Time_Hr"),
+        pl.lit(0.0).alias("Servicing_Done_Time_Hr"),
+        pl.lit(None, dtype=pl.Float64).alias("Refueling_Done_Time_Hr"),
+        pl.lit(None, dtype=pl.Float64).alias("Refuel_Start_Time_Hr"),
+        pl.lit(0.0).alias("Refuel_Duration_Hr"),
+        pl.lit(0.0).alias("Refuel_Energy_J"),
+        pl.lit(0.0).alias("Trip_Energy_J"),
+        pl.lit(0.0).alias("Refueler_J_Per_Hr"),
+        pl.lit(0.0).alias("Refueler_Efficiency"),
+        pl.lit(0, dtype=pl.UInt32).alias("Port_Count"),
+        pl.lit(0.0).alias("SOC_Target_J"),
     )
 
 def build_locopool(

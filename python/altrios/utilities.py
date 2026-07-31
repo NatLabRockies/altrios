@@ -32,6 +32,11 @@ KWH_PER_MJ = 0.277778  # https://www.eia.gov/energyexplained/units-and-calculato
 MWH_PER_J = 2.77778e-10
 MWH_PER_MJ = KWH_PER_MJ / 1.0e3
 
+# GDP chain-type price index deflator to restate 2022 USD in 2025 USD (the AEO2026
+# base year). = AEO2026 Table 20 GDP chain-price index 2025 (1.383637, 2012=1.000)
+# / 2022 actual (1.27224).
+USD_2022_TO_2025 = 1.088
+
 
 def package_root() -> Path:
     """

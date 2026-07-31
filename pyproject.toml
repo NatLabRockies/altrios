@@ -68,6 +68,14 @@ networkbuilder = [
     "networkx>=3.0",
     "scipy>=1.10",
 ]
+# Deps for publication-quality projected maps (applications/catenary_optimization/plot_electrified_network).
+# Cartopy provides a proper projected CRS (e.g. Lambert Conformal Conic) so long
+# corridors are not distorted like Web Mercator, plus Natural Earth basemap features.
+mapping = [
+    "cartopy>=0.24",
+    "geopandas>=1.0",
+    "pyproj>=3.6",
+]
 dev = [
     "pytest~=8.3",
     "maturin~=1.8",
@@ -78,6 +86,8 @@ dev = [
     "mypy>=1.15.0",
     # Network builder workflow deps
     "altrios[networkbuilder]",
+    # Projected mapping workflow deps
+    "altrios[mapping]",
 ]
 [dependency-groups]
 dev = [

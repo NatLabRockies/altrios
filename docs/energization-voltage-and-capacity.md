@@ -338,7 +338,7 @@ same voltage class. Per‑substation `max_power_watts`, `voltage_volts`, and
 ## 6. Illustrative capital & energy cost scenarios (sweep assumptions)
 
 The cost‑based (lifecycle `min_cost`) sweep in
-[applications/energization_optimization_corridor.py](../applications/energization_optimization_corridor.py)
+[applications/catenary_optimization/energization_optimization_corridor.py](../applications/catenary_optimization/energization_optimization_corridor.py)
 evaluates each architecture over a 3 × 3 matrix of **infrastructure‑cost** and
 **diesel‑vs‑electricity‑cost** scenarios (9 scenarios per architecture, 3
 architectures = 27 runs). A single discount rate and horizon are used throughout.
@@ -365,28 +365,37 @@ Per‑architecture medium point estimates (the low/high scenarios scale these).
 Feed distance comes from `suggest_optimization_inputs` and governs how many
 substations get built.
 
-> **Basis and honesty note.** The catenary/structure \$/mi figures sit within the
-> ~\$2–5M per route‑mile range widely reported for mainline overhead
-> electrification (e.g. recent U.S. commuter/HSR electrification programs and
-> international cost reviews); traction/rectifier substations at \$10–30M are
-> likewise consistent with reported project data. Exact allocation between the
-> shared *structure* term and the per‑track *catenary* term, and the precise
-> architecture deltas below, are **illustrative engineering judgment**, not a
-> costing study — replace with project quotes for real analysis.
+> **Basis and honesty note.** These are 2025‑USD engineering syntheses calibrated to
+> the published range for greenfield mainline electrification, not a costing study.
+> OCS (shared structure + one track's contact/messenger wire) totals ~\$2.7–3.1M per
+> single‑track route‑mile, within the ~\$2.5–3.5M/mi band spanned by international
+> figures (IEA 2019), U.S. corridor estimates (Solutionary Rail 2016), and
+> engineering guidance (Network Rail 2015). AC traction substations are anchored near
+> recent feeder‑station contracts (~\$20M; Balfour Beatty/Crossrail 2013) and
+> discounted for open‑country siting. The 2×25 kV autotransformer premium follows
+> INECO (2011) and Courtois (1993). The 9 kV MVDC substation is modeled as a modular,
+> containerized VSC (active‑front‑end) converter station — the form underpinning
+> MVDC's competitive case (Gómez‑Expósito et al. 2014; Simiyu & Davidson 2021;
+> UIC 2019) — priced conservatively for the power‑electronics premium, with the
+> low‑infra case representing a mature, mass‑produced modular deployment. The exact
+> split between the shared *structure* and per‑track *catenary* terms remains
+> engineering judgment — replace with project quotes for a real analysis.
 
 | Architecture | Feed dist | Structure \$/mi | Catenary \$/mi | Substation \$ each | Rationale for the delta |
 |---|---|---|---|---|---|
-| 25 kV AC (`ac_25kv`) | 21.6 mi | 2.5M | 0.50M | 20M | Baseline single‑phase 25 kV catenary and traction substation. |
-| 50 kV AC (`ac_50kv`) | 86.5 mi | 2.7M | 0.55M | 25M | Modestly higher clearance/insulation cost per mile; higher per‑substation cost, but its wide (~86 mi) feed means far fewer are built — the dominant effect. |
-| 9 kV HVDC (`dc_9kv`) | 8.3 mi | 2.6M | 0.70M | 12M | Heavier DC conductor cross‑section raises catenary \$/mi (DC carries more current at lower voltage); rectifier substations are cheaper per unit than AC traction substations but its short (~8 mi) feed forces many more. |
+| 25 kV AC (`ac_25kv`) | 21.6 mi | 2.2M | 0.50M | 15M | Baseline single‑phase 25 kV catenary and traction substation. |
+| 2×25 kV AT (`ac_2x25`) | 69.5 mi | 2.4M | 0.65M | 17M | Autotransformer feed adds a negative feeder + periodic line autotransformers (higher \$/mi) but transmits at an effective 50 kV, so its ~70 mi feed builds fewer, larger substations — the dominant effect — while keeping standard 25 kV rolling stock. |
+| 9 kV MVDC (`dc_9kv`) | 8.3 mi | 2.2M | 0.55M | 10M | Lighter, standard‑catenary conductors (lower current than legacy DC) keep catenary \$/mi near the 25 kV AC value. Substations are modular, containerized VSC (active‑front‑end) converter stations — the competitive future form — priced conservatively for the converter premium; its short (~8 mi) feed still forces many to be built, so DC lifecycle cost is highly leveraged on this figure. |
 
 ### 6.3 Scenario axes
 
 **Infrastructure‑cost level** — multiplier on the architecture's medium capital
-(applied to structure, catenary, and substation alike). The ±2× spread is
-deliberately generous to bracket the wide dispersion actually seen in reported
-electrification unit costs (which vary by more than 2× across projects due to
-terrain, labor market, structures, and scope):
+(applied to structure, catenary, and substation alike). The range brackets the wide
+project‑to‑project dispersion in reported electrification unit costs (>2× across
+projects due to terrain, clearance/double‑stack catenary‑height upgrades, urban
+complexity, labor market, and overrun risk): low ≈ favorable open‑country greenfield
+with economies of scale; high ≈ difficult terrain / complex corridors near the upper
+end of reported OCS costs (Network Rail 2015; IEA 2019):
 
 | Level | Multiplier |
 |---|---|
