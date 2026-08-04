@@ -29,6 +29,7 @@ def main(
     train_type: alt.TrainType = alt.TrainType.Freight,
     demand_file: Union[pl.DataFrame, Path, str] = str(defaults.DEMAND_FILE),
     network_charging_guidelines: Optional[pl.DataFrame] = None,
+    consist_plan_in: Optional[pl.DataFrame] = None,
 ) -> Tuple[
     pl.DataFrame,
     pl.DataFrame,
@@ -72,10 +73,12 @@ def main(
     train_planner_config.loco_info = metrics.add_battery_costs(
         train_planner_config.loco_info, scenario_year
     )
-    train_planner_config.simulation_days = simulation_days + 2 * warm_start_days
+    if consist_plan_in is None:
+        train_planner_config.simulation_days = simulation_days + 2 * warm_start_days
+
     t0_ptc = time.perf_counter()
     (
-        train_consist_plan,
+        consist_plan_out,
         loco_pool,
         refuelers,
         speed_limit_train_sims,
@@ -91,6 +94,7 @@ def main(
         demand_file=demand_file,
         train_type=train_type,
         network_charging_guidelines=network_charging_guidelines,
+        consist_plan_in=consist_plan_in
     )
     t1_ptc = time.perf_counter()
 
@@ -152,21 +156,22 @@ def main(
         }
     )
 
-    train_consist_plan = train_consist_plan.join(
+    consist_plan_out = consist_plan_out.join(
         train_times, on=["Train_ID", "Origin_ID", "Destination_ID"], how="left"
     )
-    train_consist_plan_untrimmed = train_consist_plan.clone()
-    if train_planner_config.single_train_mode is False:
-        train_consist_plan = train_consist_plan.filter(
+    consist_plan_out_untrimmed = consist_plan_out.clone()
+    if (train_planner_config.single_train_mode is False) and (consist_plan_in is None):
+        consist_plan_out = consist_plan_out.filter(
             pl.col("Departure_Time_Planned_Hr") >= pl.lit(24 * warm_start_days),
             pl.col("Departure_Time_Planned_Hr")
             < pl.lit(24 * (simulation_days + warm_start_days)),
         )
-    train_consist_plan = train_consist_plan.with_columns(
+    
+    consist_plan_out = consist_plan_out.with_columns(
         (pl.col("Train_ID").rank("dense") - 1).alias("TrainSimVec_Index")
     )
     # speed_limit_train_sims is 0-indexed but Train_ID starts at 1
-    to_keep = train_consist_plan.unique(subset=["Train_ID"]).to_series().sort()
+    to_keep = consist_plan_out.unique(subset=["Train_ID"]).to_series().sort()
     for i, sim in enumerate(speed_limit_train_sims):
         sim_dict = sim.to_pydict()
         sim_dict["simulation_days"] = simulation_days
@@ -178,12 +183,12 @@ def main(
     timed_paths = [timed_paths[i - 1] for i in to_keep]
 
     return (
-        train_consist_plan,  # NOTE: we generate this and therefore don't need it
+        consist_plan_out,
         loco_pool,
         refuelers,
         grid_emissions_factors,
         nodal_energy_prices,
         train_sims,
         timed_paths,
-        train_consist_plan_untrimmed,
+        consist_plan_out_untrimmed,
     )
