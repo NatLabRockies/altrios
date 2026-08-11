@@ -1,0 +1,5 @@
+Location ID,Link Index,Offset (m),Is Front End,Grid Emissions Region,Electricity Price Region,Liquid Fuel Price Region
+Winnipeg,1,0,FALSE,MROWc,TX,TX
+Chicago,24640,0,FALSE,MROWc,TX,TX
+Chicago,24641,0,FALSE,MROWc,TX,TX
+Winnipeg,49280,0,FALSE,MROWc,TX,TX

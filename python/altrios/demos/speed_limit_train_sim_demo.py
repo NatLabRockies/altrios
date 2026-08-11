@@ -9,7 +9,7 @@ from copy import copy
 import altrios as alt
 from altrios.demos import plot_util
 sns.set_theme()
-
+altrios_local_location = "C:/Users/fdste/OneDrive/Documents/GitHub/altrios-applied/python/altrios/resources/"
 
 SHOW_PLOTS = alt.utils.show_plots()
 
@@ -18,10 +18,10 @@ SAVE_INTERVAL = 1
 # Build the train config
 print("Loading rail vehicles")
 rail_vehicle_loaded = alt.RailVehicle.from_file(
-    alt.resources_root() / "rolling_stock/Manifest_Loaded.yaml"
+    altrios_local_location + "rolling_stock/Manifest_Loaded.yaml"
 )
 rail_vehicle_empty = alt.RailVehicle.from_file(
-    alt.resources_root() / "rolling_stock/Manifest_Empty.yaml"
+    altrios_local_location + "rolling_stock/Manifest_Empty.yaml"
 )
 
 # https://docs.rs/altrios-core/latest/altrios_core/train/struct.TrainConfig.html
@@ -40,8 +40,7 @@ train_config = alt.TrainConfig(
 # instantiate battery model
 # https://docs.rs/altrios-core/latest/altrios_core/consist/locomotive/powertrain/reversible_energy_storage/struct.ReversibleEnergyStorage.html#
 res = alt.ReversibleEnergyStorage.from_file(
-    alt.resources_root()
-    / "powertrains/reversible_energy_storages/Kokam_NMC_75Ah_flx_drive.yaml"
+    altrios_local_location + "powertrains/reversible_energy_storages/Kokam_NMC_75Ah_flx_drive.yaml"
 )
 # instantiate electric drivetrain (motors and any gearboxes)
 # https://docs.rs/altrios-core/latest/altrios_core/consist/locomotive/powertrain/electric_drivetrain/struct.ElectricDrivetrain.html
@@ -129,8 +128,8 @@ loco_con_sans_buffers = alt.Consist(
 # Instantiate the intermediate `TrainSimBuilder`
 tsb = alt.TrainSimBuilder(
     train_id="0",
-    origin_id="Minneapolis",
-    destination_id="Superior",
+    origin_id="Winnipeg",
+    destination_id="Chicago",
     train_config=train_config,
     loco_con=loco_con,
 )
@@ -138,22 +137,27 @@ tsb = alt.TrainSimBuilder(
 # Instantiate the intermediate `TrainSimBuilder`
 tsb_sans_buffers = alt.TrainSimBuilder(
     train_id="0",
-    origin_id="Minneapolis",
-    destination_id="Superior",
+    origin_id="Winnipeg",
+    destination_id="Chicago",
     train_config=train_config,
     loco_con=loco_con_sans_buffers,
 )
 
 # Load the network and construct the timed link path through the network.
 print("Loading `Network`")
+# network = alt.Network.from_file(
+#     altrios_local_location + "networks/Taconite-NoBalloon.yaml"
+# )
 network = alt.Network.from_file(
-    alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
+    altrios_local_location + "networks/Winnipeg_Chicago.yaml"
 )
 
+# location_map = alt.import_locations(
+#     altrios_local_location + "networks/default_locations.csv"
+# )
 location_map = alt.import_locations(
-    alt.resources_root() / "networks/default_locations.csv"
+    altrios_local_location + "networks/Winnipeg_Chicago_locations.csv"
 )
-
 train_sim: alt.SpeedLimitTrainSim = tsb.make_speed_limit_train_sim(
     location_map=location_map,
     save_interval=SAVE_INTERVAL,
