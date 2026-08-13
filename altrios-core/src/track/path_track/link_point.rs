@@ -2,7 +2,8 @@ use super::super::LinkIdx;
 use crate::imports::*;
 
 /// Point along PathTpc representing the start of a link and the number of grade, curve, and cat
-/// power limit points contained within the same link,`link_idx`, in the PathTpc.
+/// power limit points contained within the same link,`link_idx`, in the PathTpc. The final point
+/// represents the path endpoint and repeats the final link index with zero counts.
 ///
 /// Note that for the `*_count` fields, these represent points contained in the link for which grade,
 /// curve, ... information is known, not including the final point in the link.
@@ -10,7 +11,7 @@ use crate::imports::*;
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, PartialOrd)]
 #[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
 pub struct LinkPoint {
-    /// Distance relative to the start of the PathTpc where `link_idx` starts
+    /// Distance where `link_idx` starts, or the final path offset for the endpoint
     pub offset: si::Length,
 
     /// Number of grade points in the current link
@@ -22,7 +23,7 @@ pub struct LinkPoint {
     /// Number of catenary power limit points in the current link
     pub cat_power_count: usize,
 
-    /// [LinkIdx] of current link
+    /// [LinkIdx] of the current link, or the link ending at the final path endpoint
     pub link_idx: LinkIdx,
 }
 
@@ -77,12 +78,17 @@ impl GetOffset for LinkPoint {
 
 impl Valid for Vec<LinkPoint> {
     fn valid() -> Self {
+        let link_idx = LinkIdx::valid();
         vec![
             LinkPoint {
-                link_idx: LinkIdx::valid(),
+                link_idx,
                 ..LinkPoint::default()
             },
-            LinkPoint::valid(),
+            LinkPoint {
+                offset: uc::M * 10000.0,
+                link_idx,
+                ..LinkPoint::default()
+            },
         ]
     }
 }
@@ -100,15 +106,15 @@ impl ObjState for [LinkPoint] {
         }
         early_err!(errors, "Link points");
 
-        for link_point in &self[..(self.len() - 1)] {
+        for link_point in self {
             if link_point.link_idx.is_fake() {
-                errors.push(anyhow!(
-                    "All link point link indices (except for the last one) must be real!"
-                ));
+                errors.push(anyhow!("All link point link indices must be real!"));
             }
         }
-        if self.last().unwrap().link_idx.is_real() {
-            errors.push(anyhow!("Last link point link index must be fake!"));
+        if self.last().unwrap().link_idx != self[self.len() - 2].link_idx {
+            errors.push(anyhow!(
+                "Final link point must repeat the preceding link index!"
+            ));
         }
 
         if !self.windows(2).all(|w| w[0].offset < w[1].offset) {
@@ -173,7 +179,8 @@ mod test_link_points {
                 base.push(*base.last().unwrap());
                 base.last_mut().unwrap().offset += uc::M;
                 let base_len = base.len();
-                base[base_len - 2].link_idx = LinkIdx::valid();
+                base[base_len - 2].link_idx = LinkIdx::new(2);
+                base[base_len - 1].link_idx = LinkIdx::new(2);
                 base
             }]
         }
@@ -191,8 +198,7 @@ mod test_link_points {
                 Self::valid().into_iter().rev().collect::<Self>(),
                 {
                     let mut base = Self::valid();
-                    base.push(*base.last().unwrap());
-                    base.last_mut().unwrap().offset += uc::M;
+                    base.last_mut().unwrap().link_idx = LinkIdx::new(2);
                     base
                 },
                 {
