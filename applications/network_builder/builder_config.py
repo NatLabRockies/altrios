@@ -30,37 +30,36 @@ class BuilderConfig:
     - `regions`: List of `{"name", "url"}` Geofabrik regional PBF entries covering the route (used only when downloading the OSM extract).
     - `waypoints`: Route waypoints `(name, lat, lon)`, ordered start -> end. Defines both the OSM clip area and the mainline route through the network.
     """
-    output_name: str = "spokane_lethbridge"
+    output_name: str = "Toronto_Battle Creek"
     max_grade: float = 0.04
     buffer_deg: float = 0.4
     regions: List[Dict[str, str]] = field(default_factory=lambda: [
+        # {
+        #     "name": "british-columbia",
+        #     "url": "https://download.geofabrik.de/north-america/canada/british-columbia-latest.osm.pbf",
+        # },
+        # {
+        #     "name": "alberta",
+        #     "url": "https://download.geofabrik.de/north-america/canada/alberta-latest.osm.pbf",
+        # },
         {
-            "name": "washington",
-            "url": "https://download.geofabrik.de/north-america/us/washington-latest.osm.pbf",
+            "name": "ontario",
+            "url": "https://download.geofabrik.de/north-america/canada/ontario-latest.osm.pbf",
         },
         {
-            "name": "idaho",
-            "url": "https://download.geofabrik.de/north-america/us/idaho-latest.osm.pbf",
+            "name": "michigan",
+            "url": "https://download.geofabrik.de/north-america/us/michigan-latest.osm.pbf",
         },
-        {
-            "name": "british-columbia",
-            "url": "https://download.geofabrik.de/north-america/canada/british-columbia-latest.osm.pbf",
-        },
-        {
-            "name": "alberta",
-            "url": "https://download.geofabrik.de/north-america/canada/alberta-latest.osm.pbf",
-        },
+
     ])
     waypoints: List[Tuple[str, float, float]] = field(default_factory=lambda: [
-        ("Spokane", 47.666, -117.360),
-        ("Sandpoint", 48.282, -116.561),
-        ("Bonners Ferry", 48.692, -116.319),
-        ("Kingsgate (Border)", 49.000, -116.180),
-        ("Cranbrook", 49.508, -115.747),
-        ("Fernie", 49.504, -115.063),
-        ("Crowsnest", 49.636, -114.682),
-        ("Fort Macleod", 49.725, -113.397),
-        ("Lethbridge", 49.724, -112.919),
+        ("MacMillan Yard", 43.780, -79.519),
+        ("Burlington West", 43.327, -79.822),
+        ("Bayview", 43.2857, -79.8882),
+        ("London West", 42.9819, -81.2464),
+        ("Port Huron", 42.961, -82.444),
+        ("McAllister", 42.340, -85.138),
+        ("Battle Creek Yard", 42.357, -85.127),
     ])
 
     @property
