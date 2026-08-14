@@ -24,7 +24,17 @@ pub struct PathTpc {
 #[pyo3_api]
 impl PathTpc {}
 
-impl Init for PathTpc {}
+impl Init for PathTpc {
+    fn init(&mut self) -> Result<(), Error> {
+        // Older serialized PathTpc values used a fake link index for the endpoint. Preserve
+        // compatibility with those values while normalizing them to the current representation.
+        if self.link_points.len() >= 2 && self.link_points.last().unwrap().link_idx.is_fake() {
+            let link_idx_last = self.link_points[self.link_points.len() - 2].link_idx;
+            self.link_points.last_mut().unwrap().link_idx = link_idx_last;
+        }
+        Ok(())
+    }
+}
 impl SerdeAPI for PathTpc {}
 
 impl PathTpc {
@@ -162,9 +172,12 @@ impl PathTpc {
 
             link_point_sum.add_counts(link_point_add);
 
-            // Add dummy link point
+            // Add path endpoint
             self.link_points.push(LinkPoint {
                 offset: link.length + offset_base,
+                // The endpoint is associated with the link that terminates there. Keeping the
+                // real index also prevents a train at exactly this offset from reporting link 0.
+                link_idx: link.idx_curr,
                 ..Default::default()
             });
         }
@@ -316,7 +329,9 @@ impl PathTpc {
             offset: self.link_points.first().unwrap().offset,
             speed_limit: self.train_params.speed_max,
         });
-        for link_point in &mut self.link_points {
+        // The final point marks the path endpoint and does not begin another link.
+        let idx_end = self.link_points.len() - 1;
+        for link_point in &self.link_points[..idx_end] {
             Self::add_speeds(
                 &mut self.speed_points,
                 &self.train_params,
@@ -332,10 +347,13 @@ impl PathTpc {
     }
 
     pub fn reindex(&mut self, link_idxs: &[LinkIdx]) -> anyhow::Result<()> {
-        let idx_end = self.link_points.len() - 1;
-        for link_point in &mut self.link_points[..idx_end] {
+        let (endpoint, link_points) = self.link_points.split_last_mut().unwrap();
+        for link_point in &mut *link_points {
             link_point.link_idx = link_idxs[link_point.link_idx.idx()];
             ensure!(link_point.link_idx.is_real(), "Error: link idx is not real");
+        }
+        if let Some(link_point_last) = link_points.last() {
+            endpoint.link_idx = link_point_last.link_idx;
         }
         Ok(())
     }
@@ -504,6 +522,49 @@ impl ObjState for PathTpc {
 mod test_path_tpc {
     use super::*;
     use crate::testing::*;
+    use crate::train::{set_link_and_offset, TrainState};
+
+    #[test]
+    fn endpoint_keeps_final_link_idx() {
+        let network = Vec::<Link>::valid();
+        let link_idx = LinkIdx::valid();
+        let mut path_tpc = PathTpc::new(TrainParams::valid());
+
+        path_tpc.extend(&network, [link_idx]).unwrap();
+
+        assert_eq!(path_tpc.link_points().last().unwrap().link_idx, link_idx);
+        assert_eq!(path_tpc.link_idx_last(), Some(&link_idx));
+
+        let mut state = TrainState::valid();
+        state
+            .offset
+            .update_unchecked(path_tpc.offset_end(), || format_dbg!())
+            .unwrap();
+        state.offset.mark_stale();
+        state.link_idx_front.mark_stale();
+        state.link_idx_back.mark_stale();
+        state.offset_in_link.mark_stale();
+
+        set_link_and_offset(&mut state, &path_tpc).unwrap();
+
+        assert_eq!(
+            *state.link_idx_front.get_fresh(|| format_dbg!()).unwrap(),
+            link_idx.idx() as u32
+        );
+    }
+
+    #[test]
+    fn init_updates_legacy_fake_endpoint() {
+        let mut path_tpc = PathTpc::valid();
+        path_tpc.link_points.last_mut().unwrap().link_idx = LinkIdx::default();
+
+        path_tpc.init().unwrap();
+
+        assert_eq!(
+            path_tpc.link_points.last().unwrap().link_idx,
+            path_tpc.link_points[path_tpc.link_points.len() - 2].link_idx
+        );
+    }
 
     impl Cases for PathTpc {
         // TODO: Fix the validation function to allow this state
