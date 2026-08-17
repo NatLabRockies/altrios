@@ -83,8 +83,8 @@ include = [
     { format = "sdist", path = "altrios-core/src/*" },
     { format = "sdist", path = "altrios-py/Cargo.toml" },
     { format = "sdist", path = "altrios-py/src/*" },
-    { format = "sdist", path = "altrios-core/proc-macros/Cargo.toml" },
-    { format = "sdist", path = "altrios-core/proc-macros/src/*" },
+    { format = "sdist", path = "altrios-core/altrios-proc-macros/Cargo.toml" },
+    { format = "sdist", path = "altrios-core/altrios-proc-macros/src/*" },
 ]
 
 [tool.pixi.project]
