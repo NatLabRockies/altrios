@@ -760,7 +760,7 @@ impl SpeedLimitTrainSim {
                         soc_vec.push(
                             res.state
                                 .soc
-                                .get_fresh(|| format_dbg!())?
+                                .get_stale(|| format_dbg!())?
                                 .get::<si::ratio>()
                                 .format_eng(Some(5)),
                         );
