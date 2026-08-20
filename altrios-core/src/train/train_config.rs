@@ -7,7 +7,7 @@ use super::TrainResWrapper;
 use super::{
     friction_brakes::*, rail_vehicle::RailVehicle, train_imports::*, InitTrainState,
     SetSpeedTrainSim, SetSpeedTrainSimBuilder, SpeedLimitTrainSim, SpeedLimitTrainSimBuilder,
-    SpeedTrace, TrainState,
+    SpeedTrace, TimedLinkPath, TrainState,
 };
 use crate::track::link::link_idx::LinkPath;
 use crate::track::link::network::Network;
@@ -15,6 +15,8 @@ use crate::track::LocationMap;
 
 #[allow(unused_imports)]
 use polars_lazy::prelude::*;
+#[allow(unused_imports)]
+use rayon::prelude::*;
 
 #[serde_api]
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -847,11 +849,66 @@ impl SpeedLimitTrainSimVec {
     fn __new__(v: Vec<SpeedLimitTrainSim>) -> Self {
         Self(v)
     }
+
+    #[pyo3(name = "walk_timed_paths")]
+    #[pyo3(signature = (network, timed_paths, parallelize=None))]
+    /// Walk every contained sim over its corresponding timed path, optionally in
+    /// parallel (rayon). `parallelize` defaults to True.
+    fn walk_timed_paths_py(
+        &mut self,
+        network: Network,
+        timed_paths: Vec<TimedLinkPath>,
+        parallelize: Option<bool>,
+    ) -> anyhow::Result<()> {
+        self.walk_timed_paths(&network, &timed_paths, parallelize.unwrap_or(true))
+    }
+
+    #[pyo3(name = "tolist")]
+    /// Return the contained (walked) sims as a Python list of clones.
+    fn tolist_py(&self) -> Vec<SpeedLimitTrainSim> {
+        self.0.clone()
+    }
 }
 
 impl SpeedLimitTrainSimVec {
     pub fn new(value: Vec<SpeedLimitTrainSim>) -> Self {
         Self(value)
+    }
+
+    /// Walk each contained sim over its corresponding timed path. When
+    /// `parallelize`, sims are walked concurrently with rayon; each walk is pure
+    /// Rust, so the worker threads need no GIL.
+    pub fn walk_timed_paths(
+        &mut self,
+        network: &Network,
+        timed_paths: &[TimedLinkPath],
+        parallelize: bool,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.0.len() == timed_paths.len(),
+            "walk_timed_paths: {} sims but {} timed paths",
+            self.0.len(),
+            timed_paths.len()
+        );
+        if parallelize {
+            self.0
+                .par_iter_mut()
+                .zip(timed_paths.par_iter())
+                .enumerate()
+                .try_for_each(|(i, (sim, tp))| {
+                    sim.walk_timed_path(network, tp)
+                        .map_err(|err| err.context(format!("sim idx:{}", i)))
+                })
+        } else {
+            self.0
+                .iter_mut()
+                .zip(timed_paths.iter())
+                .enumerate()
+                .try_for_each(|(i, (sim, tp))| {
+                    sim.walk_timed_path(network, tp)
+                        .map_err(|err| err.context(format!("sim idx:{}", i)))
+                })
+        }
     }
 
     pub fn get_energy_fuel(&self, annualize: bool) -> anyhow::Result<si::Energy> {

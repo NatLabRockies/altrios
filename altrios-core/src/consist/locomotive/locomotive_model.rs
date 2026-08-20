@@ -1149,6 +1149,16 @@ impl Locomotive {
         }
     }
 
+    pub fn catenary_interface_mut(&mut self) -> Option<&mut CatenaryInterface> {
+        match &mut self.loco_type {
+            PowertrainType::DualModeLoco(loco) => Some(&mut loco.cat_int),
+            PowertrainType::BatteryElectricLoco(loco) => loco.cat_int.as_mut(),
+            PowertrainType::ConventionalLoco(_) => None,
+            PowertrainType::HybridLoco(_) => None,
+            PowertrainType::DummyLoco(_) => None,
+        }
+    }
+
     pub fn set_catenary_interface(&mut self, cat_int: CatenaryInterface) -> Result<()> {
         match &mut self.loco_type {
             PowertrainType::DualModeLoco(loco) => {

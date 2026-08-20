@@ -68,6 +68,11 @@ class ScenarioInfo:
     - `count_unused_locomotives`: If `True`, fleet composition is defined using all locomotives in
     `loco_pool`; if `False`, fleet composition is defined using only the locomotives dispatched.
     Not required for single-train sim.
+
+    - `agg_cache`: Optional `SimAggregateCache` shared across scenarios so that
+    sims-derived, year-invariant aggregates are computed once even when the same
+    `sims` object is reused across many scenario years. Populated automatically by
+    `main`; callers normally leave it `None`.
     """
 
     sims: Union[alt.SpeedLimitTrainSim, alt.SpeedLimitTrainSimVec]
@@ -83,6 +88,86 @@ class ScenarioInfo:
     count_unused_locomotives: bool = False
     train_planner_config: planner_config = None
     infrastructure_costs: pl.DataFrame = None
+    agg_cache: Optional["SimAggregateCache"] = None
+
+
+class SimAggregateCache:
+    """Memoizes year-invariant, sims-derived aggregates so a multi-year rollout
+    that reuses the SAME `SpeedLimitTrainSim(Vec)` across scenario years pays each
+    Rust-FFI / full-serialization cost once instead of once per year.
+
+    Keyed by the identity of the sims object plus the `annualize` flag the Rust
+    getters honor; a reference to each sims object is retained so its `id` stays
+    valid while the cache lives. Any caller whose `ScenarioInfo`s share a sims
+    object -- e.g. a demo that tiles one simulated year across a 30-year rollout --
+    benefits automatically once the cache is attached (see `main`).
+    """
+
+    def __init__(self):
+        self._values: Dict[tuple, object] = {}
+        self._keepalive: Dict[int, object] = {}
+
+    def get(self, sims, annualize: bool, name: str, compute):
+        sims_id = id(sims)
+        self._keepalive.setdefault(sims_id, sims)
+        key = (sims_id, bool(annualize), name)
+        if key not in self._values:
+            self._values[key] = compute()
+        return self._values[key]
+
+
+def _cached_sim_aggregate(
+    info: "ScenarioInfo", name: str, compute, *, annualize: Optional[bool] = None
+):
+    """Return sims-derived aggregate `name` for `info`, served from
+    `info.agg_cache` when present so scenarios sharing a sims object compute it
+    once. Falls back to computing directly when no cache is attached, so the metric
+    functions work standalone. `annualize` overrides the cache key's annualize flag
+    for raw-energy quantities that don't depend on it (so they are shared across
+    annualize variants)."""
+    resolved = info.annualize if annualize is None else annualize
+    cache = getattr(info, "agg_cache", None)
+    if cache is None:
+        return compute()
+    return cache.get(info.sims, resolved, name, compute)
+
+
+def _sim_energy_fuel_joules(info: "ScenarioInfo") -> float:
+    return _cached_sim_aggregate(
+        info, "energy_fuel_joules",
+        lambda: info.sims.get_energy_fuel_joules(annualize=info.annualize))
+
+
+def _sim_net_energy_res_joules(info: "ScenarioInfo") -> float:
+    return _cached_sim_aggregate(
+        info, "net_energy_res_joules",
+        lambda: info.sims.get_net_energy_res_joules(annualize=info.annualize))
+
+
+def _sim_megagram_kilometers(info: "ScenarioInfo") -> float:
+    return _cached_sim_aggregate(
+        info, "megagram_kilometers",
+        lambda: info.sims.get_megagram_kilometers(annualize=info.annualize))
+
+
+def _sim_car_kilometers(info: "ScenarioInfo") -> float:
+    return _cached_sim_aggregate(
+        info, "car_kilometers",
+        lambda: info.sims.get_car_kilometers(annualize=info.annualize))
+
+
+def _sim_cars_moved(info: "ScenarioInfo") -> float:
+    return _cached_sim_aggregate(
+        info, "cars_moved",
+        lambda: info.sims.get_cars_moved(annualize=info.annualize))
+
+
+def _sim_catenary_joules_for(info: "ScenarioInfo") -> Tuple[float, float]:
+    # Raw joules (annualize-independent); the heavy `to_pydict()` read runs at most
+    # once per unique sims object rather than once per scenario year.
+    return _cached_sim_aggregate(
+        info, "catenary_joules",
+        lambda: _sim_catenary_joules(info.sims), annualize=False)
 
 
 def metric(
@@ -157,6 +242,13 @@ def main(
 
     if not isinstance(annual_metrics, list):
         annual_metrics = [annual_metrics]
+
+    # Share one aggregate cache across all scenarios so any sims object reused
+    # across scenario years (e.g. a tiled multi-year rollout) has its Rust-FFI /
+    # full-serialization aggregates computed once, not once per year.
+    agg_cache = SimAggregateCache()
+    for scenario_info in scenario_infos:
+        scenario_info.agg_cache = agg_cache
 
     annual_values = []
     for annual_metric in annual_metrics:
@@ -467,7 +559,7 @@ def calculate_diesel_use(info: ScenarioInfo, units: str):
     if units == "gallons":
         val = (
             (
-                info.sims.get_energy_fuel_joules(annualize=info.annualize)
+                _sim_energy_fuel_joules(info)
                 / 1e3
                 / lhv_kj_per_kg
             )
@@ -475,7 +567,7 @@ def calculate_diesel_use(info: ScenarioInfo, units: str):
             / rho_fuel_g_per_gallon
         )
     elif units == "MJ":
-        val = info.sims.get_energy_fuel_joules(annualize=info.annualize) / 1e6
+        val = _sim_energy_fuel_joules(info) / 1e6
     else:
         print(f"Units of {units} not supported for fuel usage calculation.")
         val = None
@@ -516,7 +608,7 @@ def calculate_electricity_use(info: ScenarioInfo, units: str) -> MetricType:
         return metric(
             "Electricity_Usage",
             units,
-            info.sims.get_net_energy_res_joules(annualize=info.annualize)
+            _sim_net_energy_res_joules(info)
             * conversion_from_joule
             / defaults.BEL_CHARGER_EFFICIENCY,
         )
@@ -574,7 +666,7 @@ def calculate_freight_moved(info: ScenarioInfo, units: str) -> MetricType:
         return metric(
             "Freight_Moved",
             units,
-            info.sims.get_megagram_kilometers(annualize=info.annualize)
+            _sim_megagram_kilometers(info)
             * conversion_from_km
             / 1.0e6,
             year=info.scenario_year,
@@ -583,14 +675,14 @@ def calculate_freight_moved(info: ScenarioInfo, units: str) -> MetricType:
         return metric(
             "Freight_Moved",
             units,
-            info.sims.get_car_kilometers(annualize=info.annualize) * conversion_from_km,
+            _sim_car_kilometers(info) * conversion_from_km,
             year=info.scenario_year,
         )
     elif units == "cars":
         return metric(
             "Freight_Moved",
             units,
-            info.sims.get_cars_moved(annualize=info.annualize),
+            _sim_cars_moved(info),
             year=info.scenario_year,
         )
     elif units in ["container-km", "container-miles"]:
@@ -601,7 +693,7 @@ def calculate_freight_moved(info: ScenarioInfo, units: str) -> MetricType:
             == 0
         ), "Can only count containers if the consist plan is all Intermodal"
         car_distance = (
-            info.sims.get_car_kilometers(annualize=info.annualize) * conversion_from_km
+            _sim_car_kilometers(info) * conversion_from_km
         )
         return metric(
             "Freight_Moved",
@@ -1797,7 +1889,7 @@ def calculate_energy(info: ScenarioInfo, units: str) -> MetricType:
     # and electricity totals (same 365.25/simulation_days scaler).
     scaler = (365.25 / info.simulation_days
               if info.annualize and info.simulation_days else 1.0)
-    pantograph_j, line_loss_j = _sim_catenary_joules(info.sims)
+    pantograph_j, line_loss_j = _sim_catenary_joules_for(info)
     line_loss_mj = line_loss_j * scaler / 1.0e6
     catenary_grid_mj = (pantograph_j + line_loss_j) * scaler / 1.0e6
 

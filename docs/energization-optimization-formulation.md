@@ -14,6 +14,14 @@ budget knapsack row, near totally unimodular, so that the linear-programming (LP
 relaxation is tight and the program solves efficiently with the HiGHS solver
 through the Pyomo APPSI interface.
 
+The same core supports **two electric powertrains**, which the corridor study
+optimizes separately (§7): a **dual-mode** locomotive, whose wiring value is
+fully separable per site (draw from the wire wherever it exists), and a
+**battery-electric locomotive (BEL)**, which additionally requires an
+energy-based range limit so its pack never depletes between charges. Both are run
+in the **whole-site** reformulation (energizing a structure site wires all its
+track pieces), which shrinks the model and closes the optimality gap.
+
 The optimizer is *electrically agnostic*: nominal line voltage, substation power
 capacity, and conductor impedance play no role in placement. Those quantities
 enter only in the downstream line-loss post-processing
@@ -64,7 +72,13 @@ overrides general" (`_first_not_none`):
 | $D$ — `substation_feed_distance_miles` | Max distance from an energized piece to a built substation | `20.0` |
 | `require_high_grade_coverage` | Force (vs. merely prioritize) high-grade electrification | `False` |
 | $L_{\min}$ — `min_energized_length_miles` | Minimum contiguous energized run (corridor-miles) | `None` |
-| $G_{\max}$ — `max_energized_gap_miles` | Maximum contiguous **un**electrified gap (corridor-miles); battery-electric range limit | `None` |
+| $G_{\max}$ — `max_energized_gap_miles` | Maximum contiguous **un**electrified gap (corridor-miles); *distance* battery-range limit (legacy) | `None` |
+| $E$ — `max_energized_gap_kwh` | Usable battery **energy** (kWh) a BEL may spend between charges. Supersedes $G_{\max}$: turns the range limit from distance into drain-energy. BEL only | `None` |
+| $\delta$ — `gap_energy_kwh_per_mile_by_link` | Per-link single-locomotive traction **drain** (kWh per corridor-mile). Required whenever $E$ is set | `None` |
+| $\gamma$ — `charge_energy_kwh_per_mile_by_link` | Per-link **net charge** banked per energized corridor-mile (kWh/mi); enables charge-credited (Tier 1) and SOC crediting | `None` |
+| $\rho$ — `regen_energy_kwh_per_mile_by_link` | Per-link **regen** recovery (kWh per corridor-mile); range then uses net drain $\delta-\rho$ | `None` |
+| `battery_soc_state_model` | Use the explicit **SOC recursion** (Tier 2) range model instead of the covering gap rows. BEL only | `False` |
+| `electrify_whole_site` | **Whole-site** reformulation: energizing a site wires all its pieces ($x \equiv s$), collapsing the per-piece binaries onto the site indicators | `False` |
 | `uniform_power_limit_watts` | Power limit stamped on every energized segment (a constant; not optimized) | `0.0` |
 
 Reasonable values for $D$ and `uniform_power_limit_watts` (and the matching
@@ -90,6 +104,12 @@ The model is expressed over corridor **cells** (shared structure sites) and trac
   neither centerline, topology, nor est-time nets.
 - **Per-link mode** — the default (`structure_spacing_miles = None`). Each
   candidate link is simultaneously one cell and one whole-link piece.
+
+Orthogonally, **whole-site mode** (`electrify_whole_site=True`) removes the
+per-piece electrification decision entirely: energizing a structure site wires
+*all* of its pieces, so $x_p$ is eliminated and the site indicator $s_c$ alone
+represents electrification (§7.1). Both corridor-study powertrains run in this
+mode. The per-piece model of §3–§6 is the finer generalization.
 
 ---
 
@@ -123,6 +143,26 @@ $G_j = F_j + c^{\text{su}} \ell_j$ (`sub_cost`).
 
 Distances use the haversine formula on mean Earth radius
 $R_\oplus = 3958.7613$ mi.
+
+### 2.1 Battery-electric range data and variables (BEL variant only)
+
+When a battery range limit is active, the mainline is tiled into contiguous
+corridor **buckets** and the following per-bucket data and variables are derived
+(energies in kWh; per-corridor-mile densities aggregated to buckets via
+`_cell_energy_from_density`). They are inert for the dual-mode variant.
+
+| Symbol | Field / source | Meaning |
+|---|---|---|
+| $\mathcal{B} = \{0,\dots,n_B-1\}$ | `model.RunBucket` | Ordered contiguous mainline buckets (~`bucket_mi` wide, capped by `_BUCKET_MAX_MILES = 2` mi). |
+| $u_b \in \{0,1\}$ | `model.u` | Bucket $b$ energized; coupled to cells by $s_c = u_{b(c)}$ (`run_couple`). |
+| $\ell_b$ | `bucket_len_miles` | Corridor length of bucket $b$ (mi). |
+| $\delta_b$ | $\delta$ `gap_energy_kwh_per_mile_by_link` $\to$ `cell_drain_kwh` | Traction **drain** over bucket $b$ (kWh). |
+| $\gamma_b$ | $\gamma$ `charge_energy_kwh_per_mile_by_link` $\to$ `cell_charge_kwh` | **Net charge** banked if bucket $b$ is energized (kWh). |
+| $\rho_b$ | $\rho$ `regen_energy_kwh_per_mile_by_link` $\to$ `cell_regen_kwh` | **Regen** recovery over bucket $b$ (kWh). |
+| $\delta^{\text{net}}_b = \delta_b - \rho_b$ | derived (`bucket_net`) | Net drain used by every range family. |
+| $E$ | $E$ `max_energized_gap_kwh` | Usable pack energy (kWh) — the range budget. |
+| $\mathrm{soc}_b \in [0,E]$ | `model.soc` | SOC-recursion state of charge (Tier 2). |
+| $\mathrm{curtail}_b \ge 0$ | `model.curtail` | Charge-saturation slack (Tier 2). |
 
 ---
 
@@ -191,11 +231,14 @@ $$
 
 The horizon and discount rate enter **only** as the scalar $\mathrm{PVAF}$
 multiplying the per-piece annual operating cost, so the program remains the same
-linear MILP over the same variables and constraints (C1–C6); no solver change is
+linear MILP over the same variables and constraints (C1–C7); no solver change is
 needed. Each piece is now decided by a genuine net-present-value test — electrify
 iff its lifetime fuel savings outweigh its capital cost — with structure and
 substations pulled in through C1/C2 as usual. The optional budget C3 still applies
-(a financing cap even when electrification is NPV-positive).
+(a financing cap even when electrification is NPV-positive). This is the objective
+used by **both** corridor-study powertrains (§7); it differs only in the operating
+term $\Delta\text{opex}_p$ (dual-mode net fuel cost vs. BEL round-trip-loss
+saving) and, for the BEL, the added range limit C7.
 
 All traffic/loading/consist assumptions (trains per day, tonnage, number and type
 of locomotives) live in $\Delta\text{opex}_p$ — i.e. in how `piece_opex_fn` is
@@ -302,43 +345,80 @@ not); the constraint then forces every site out to the reach $r(i)$ to be
 energized as well, guaranteeing a run of at least $L_{\min}$. Runs may begin at any
 site boundary, and duplicate triples arising from parallel tracks are removed.
 
-### 5.6 Maximum unelectrified gap length (optional)
+### 5.6 Battery-electric range limit (optional; BEL only)
 
-When $G_{\max}$ is set (structure-site mode with a contiguous mainline), no
-contiguous **un**electrified stretch of corridor may exceed $G_{\max}$
-corridor-miles. This is the range constraint for a **battery-electric locomotive**
-(BEL): it recharges from the wire over electrified track and depletes its battery
-over gaps, so every gap must be short enough that the pack does not run out. The
-parameter is naturally sized from battery capacity — with the simplifying
-assumptions that any electrified segment recharges the pack and traction energy is
-drawn at a constant average rate $e$ (kWh/mi), a usable pack of $E$ kWh bridges
-$G_{\max} = E/e$ miles (`energization.max_gap_miles_from_battery`).
+This constraint family applies **only to the battery-electric variant**; the
+dual-mode variant sets none of it (it draws from the wire wherever it exists,
+with no state-of-charge coupling, so its placement is fully separable). A BEL
+recharges from the wire over energized track and drains its pack over gaps, so
+its **usable pack energy** must never be exhausted between charges.
 
-The constraint reuses the same coarse bucket layer as (C5)–(C6): the mainline is
-tiled into contiguous buckets, $s_c = u_{b(c)}$ couples each cell to its bucket
-$u_b\in\{0,1\}$, and the tie $s_c \le \sum_{p:\,c(p)=c} x_p$ (C5) makes $u_b$ a
-faithful "bucket $b$ is energized" indicator. Let $\ell_b$ be the corridor length
-(miles) of bucket $b$ along the ordered mainline sequence $b = 0,1,\dots,n-1$. For
-each start bucket $i$ let $\rho(i)$ be the smallest index with
-$\sum_{t=i}^{\rho(i)} \ell_t > G_{\max}$ (skip $i$ when the tail to the corridor
-end already fits within $G_{\max}$). The model then requires at least one energized
-bucket in every such minimal over-length window:
+The model tiles the mainline into contiguous corridor buckets $b = 0,\dots,n_B-1$
+(§2.1), couples each cell to its bucket $s_c = u_{b(c)}$, and — via the tie
+$s_c \le \sum_{p:\,c(p)=c} x_p$ (C5), or $s_c$ directly in whole-site mode — makes
+$u_b \in \{0,1\}$ a faithful “bucket $b$ energized” indicator. The limit is imposed
+by **one** of four families, in increasing fidelity (`build_model` selects based
+on which inputs are supplied):
 
+**(a) Distance gap (legacy).** With $G_{\max}$ = `max_energized_gap_miles` and
+bucket lengths $\ell_b$: for every start $i$ let $\rho(i)$ be the smallest index
+with $\sum_{t=i}^{\rho(i)} \ell_t > G_{\max}$; require at least one energized
+bucket in every minimal over-length window,
 $$
-\sum_{b=i}^{\rho(i)} u_b \;\ge\; 1
-\qquad \forall\, i \text{ with } \rho(i) < n. \tag{C7}
+\sum_{b=i}^{\rho(i)} u_b \;\ge\; 1 \qquad \forall\, i:\ \rho(i) < n_B. \tag{C7a}
 $$
+An interval (consecutive-ones) covering matrix — totally unimodular.
 
-(`model.max_gap`.) Because each row's support is a *contiguous* block of buckets,
-any all-zero (unelectrified) run longer than $G_{\max}$ would violate some row, so
-(C7) forbids exactly the over-length gaps; longer windows are implied by their
-minimal sub-window and are omitted. Windows touching a corridor **end are not**
-exempt — the battery is assumed full at each end (yard charging), so end gaps obey
-the same limit (contrast with (C6), whose boundary runs are exempt). Unlike the
-other optional constraints (C7) can **force** electrification; a feasibility
-pre-check therefore verifies that every binding window contains at least one
-coverable bucket (a piece auto-covered by an existing substation or reachable by a
-candidate) and otherwise raises `ValueError` naming the offending corridor miles.
+**(b) Energy gap.** Identical rows, but windows are bounded by cumulative **net
+drain energy** exceeding the usable pack $E$ = `max_energized_gap_kwh` (window
+weights $\delta^{\text{net}}_b$ instead of $\ell_b$), so wire is required where
+the pack drains fastest (steep/heavy track) rather than on a flat per-mile
+budget,
+$$
+\sum_{b=i}^{\rho(i)} u_b \;\ge\; 1, \qquad \rho(i) = \min\Big\{ j : \textstyle\sum_{t=i}^{j} \delta^{\text{net}}_t > E \Big\}. \tag{C7b}
+$$
+Still an interval covering (TU). It is the charge-credited form (c) with
+$\gamma_b \equiv 0$ and each row relaxed to $\sum u \ge 1$.
+
+**(c) Charge-credited gap (Tier 1).** Drops the “any energized bucket fully
+recharges” assumption of (a)/(b). For every contiguous window $S = [i,j]$ whose
+cumulative net drain exceeds the pack ($\sum_{b \in S} \delta^{\text{net}}_b - E > 0$),
+the energized buckets must bank at least the overrun:
+$$
+\sum_{b \in S} \max\!\big(\delta^{\text{net}}_b + \gamma_b,\, 0\big)\, u_b
+\;\ge\; \sum_{b \in S} \delta^{\text{net}}_b - E. \tag{C7c}
+$$
+One weighted-covering row per over-length window (windows capped at
+$\kappa_{\text{win}} E$ of drain, `_GAP_WINDOW_KWH_FACTOR` $= 2$). All weights are
+non-negative over contiguous support, so the LP stays tight though not strictly
+TU. Emitting the row for every window ending at each bucket covers the unknown
+“last full charge” point, so it is sufficient for SOC feasibility with no
+continuous state, no saturation, and no big-$M$.
+
+**(d) SOC recursion (Tier 2) — the model actually run in the study.** Replaces the
+covering rows with an explicit per-bucket state of charge that evolves along the
+mainline. With continuous $\mathrm{soc}_b \in [0,E]$ and free curtailment slack
+$\mathrm{curtail}_b \ge 0$, starting full ($\mathrm{soc}_{-1} = E$):
+$$
+\mathrm{soc}_b = \mathrm{soc}_{b-1} + \gamma_b\, u_b - \delta^{\text{net}}_b - \mathrm{curtail}_b,
+\qquad 0 \le \mathrm{soc}_b \le E,\ \ \mathrm{curtail}_b \ge 0. \tag{C7d}
+$$
+(`model.soc`, `model.curtail`, `model.soc_balance`.) The lower bound forbids
+depletion; the upper bound is charge **saturation**, made exact and LINEAR (no
+big-$M$) by the $\mathrm{curtail}_b$ slack — the solver discards exactly the
+charge that would overflow the pack because nothing rewards a lower SOC.
+Path-ordered and faithful, it subsumes (a)–(c) (their windows are its
+relaxations), at the cost of continuous state: no longer TU, but it adds no
+integers and no big-$M$, so the relaxation stays tractable.
+
+**Feasibility.** The covering families (a)–(c) can **force** electrification, so a
+pre-check verifies every binding window contains at least one coverable bucket
+(auto-covered by an existing substation or reachable by a candidate) and
+otherwise raises `ValueError` naming the offending corridor miles; the SOC
+recursion (d) reports an un-closeable stretch through the solver. In every
+variant the battery is assumed full at each corridor end (yard charging), so end
+gaps obey the same limit (no exemption — contrast the minimum-run C6, whose
+boundary runs are exempt).
 
 ---
 
@@ -354,28 +434,138 @@ $$
 & x_p = 1 && \forall p \in \mathcal{R} && \text{(C4, optional)}\\
 & s_c \le \textstyle\sum_{p:\,c(p)=c} x_p && \forall c \in \mathcal{C} && \text{(C5, optional)}\\
 & s_{\sigma_k} \ge s_{\sigma_i} - s_{\sigma_{i-1}} && \forall (\sigma_k,\sigma_i,\sigma_{i-1}) && \text{(C6, optional)}\\
-& \textstyle\sum_{b=i}^{\rho(i)} u_b \ge 1 && \forall i:\ \rho(i) < n && \text{(C7, optional)}\\
+& \textstyle\sum_{b\in S}\max(\delta^{\text{net}}_b+\gamma_b,0)\,u_b \ge \textstyle\sum_{b\in S}\delta^{\text{net}}_b - E && \forall\ \text{windows } S && \text{(C7a/b/c, BEL)}\\
+& \big[\text{or}\big]\ \ \mathrm{soc}_b = \mathrm{soc}_{b-1}+\gamma_b u_b-\delta^{\text{net}}_b-\mathrm{curtail}_b,\ 0\le\mathrm{soc}_b\le E && \forall b && \text{(C7d, BEL)}\\
 & x_p,\, s_c,\, y_j \in \{0,1\}. &&&&
 \end{aligned}
 $$
 
+This is the general **per-piece** template with the `max_benefit` objective and
+all optional rows shown together. The range rows C7 apply to the
+**battery-electric** variant only. The corridor study instead runs the
+**whole-site**, `min_cost` forms of §7, which specialize this template per
+powertrain.
+
 ---
 
-## 7. Structural / computational properties
+## 7. Powertrain-specific formulations (as run in the corridor study)
+
+The corridor study
+([applications/catenary_optimization/energization_optimization_corridor.py](../applications/catenary_optimization/energization_optimization_corridor.py))
+runs the model **twice** per (architecture, demand) case — once for each electric
+powertrain — sharing the same core (C1–C6) but differing in the objective's
+operating-cost term and in whether the battery range limit (C7) applies. Both
+variants run in **whole-site** mode with the `min_cost` objective and a 5-mile
+minimum energized run.
+
+### 7.1 Whole-site reformulation (both variants)
+
+With `electrify_whole_site=True`, energizing a structure site wires **every**
+track piece at it, so the per-piece binaries $x_p$ are eliminated and the site
+indicator $s_c$ alone represents electrification. Each per-cell coefficient
+aggregates its pieces:
+$$
+\kappa_c = \sum_{p:\,c(p)=c}\kappa_p, \qquad
+\Delta\text{opex}_c = \sum_{p:\,c(p)=c}\Delta\text{opex}_p, \qquad
+b_c = \sum_{p:\,c(p)=c} b_p,
+$$
+coverage uses the union of the cell's piece coverages, and the structure-linking
+row C1 becomes vacuous. This collapses roughly one binary per short link onto one
+per corridor site and tightens the LP relaxation, so the optimality gap closes
+instead of stalling near the weak per-piece bound. Results are reported per
+energized site.
+
+### 7.2 Dual-mode variant
+
+A dual-mode consist draws from the catenary wherever wire exists and burns diesel
+elsewhere — there is **no** battery state or contiguity coupling, so wiring value
+is fully **separable** per site. The operating term is the net annual fuel cost of
+energizing site $c$,
+$$
+\Delta\text{opex}^{\text{DM}}_c
+= \underbrace{(\text{grid energy incl. line \& conversion loss})\times p_{\text{elec}}}_{\text{electricity purchased}}
+\;-\; \underbrace{(\text{gallons displaced})\times p_{\text{diesel}}}_{\text{diesel avoided}}
+\quad (\$/\text{yr}),
+$$
+built by `energization.make_piece_opex_fn` (negative where electrification saves
+fuel). The dual-mode program is
+$$
+\begin{aligned}
+\min_{s,\,y}\quad
+& \sum_c S_c s_c + \sum_c \kappa_c s_c + \sum_j G_j y_j
+  + \mathrm{PVAF}(r,N)\sum_c \Delta\text{opex}^{\text{DM}}_c\, s_c \\
+\text{s.t.}\quad
+& s_c \le \textstyle\sum_{j\in\mathrm{cov}(c)} y_j\ \ (\text{or } s_c{=}0,\ \text{or skip}) && \forall c && \text{(C2)}\\
+& s_c = u_{b(c)},\quad s_{\sigma_k} \ge s_{\sigma_i} - s_{\sigma_{i-1}} && && \text{(C5–C6, min run)}\\
+& \textstyle\sum_c S_c s_c + \sum_c \kappa_c s_c + \sum_j G_j y_j \le B && && \text{(C3, optional)}\\
+& s_c,\ y_j \in \{0,1\}. &&&&
+\end{aligned}
+$$
+**No range constraint (C7).**
+
+### 7.3 Battery-electric (BEL) variant
+
+A BEL is a pure battery locomotive: it recharges only over energized track and
+must never deplete. Its operating term rewards charging over wire by the battery
+**round-trip loss avoided** (`energization.make_bel_piece_opex_fn`, a negative
+opex = saving), and it adds the range limit §5.6 — in the study, the **SOC
+recursion (Tier 2)** (C7d) with net drain, catenary charge crediting, and regen.
+The BEL program adds the SOC state to the core:
+$$
+\begin{aligned}
+\min_{s,\,y,\,\mathrm{soc},\,\mathrm{curtail}}\quad
+& \sum_c S_c s_c + \sum_c \kappa_c s_c + \sum_j G_j y_j
+  + \mathrm{PVAF}(r,N)\sum_c \Delta\text{opex}^{\text{BEL}}_c\, s_c \\
+\text{s.t.}\quad
+& \text{(C2), (C3 optional), (C5–C6) as in §7.2, with } s_c = u_{b(c)} \\
+& \mathrm{soc}_b = \mathrm{soc}_{b-1} + \gamma_b u_b - \delta^{\text{net}}_b - \mathrm{curtail}_b && \forall b && \text{(C7d)}\\
+& 0 \le \mathrm{soc}_b \le E,\quad \mathrm{curtail}_b \ge 0,\quad \mathrm{soc}_{-1} = E \\
+& s_c,\ y_j \in \{0,1\}. &&&&
+\end{aligned}
+$$
+The covering families C7a/b/c are the lighter alternatives (C7a/b totally
+unimodular, C7c a tight weighted covering; selected when
+`battery_soc_state_model=False`).
+
+### 7.4 Which constraints apply to which powertrain
+
+| Constraint | Dual-mode | BEL |
+|---|:---:|:---:|
+| C1 structure linking $x_p \le s_{c(p)}$ (per-piece mode) | ✓ | ✓ |
+| C2 substation coverage | ✓ | ✓ |
+| C3 capital budget (optional) | ✓ | ✓ |
+| C4 required high-grade coverage (optional) | ✓ | ✓ |
+| C5 structure ↔ energization tie | ✓ | ✓ |
+| C6 minimum energized run (5 mi in the study) | ✓ | ✓ |
+| C7 battery range limit (a/b/c covering **or** d SOC recursion) | — | ✓ (d) |
+| Objective operating term | net fuel cost $\Delta\text{opex}^{\text{DM}}$ | round-trip-loss saving $\Delta\text{opex}^{\text{BEL}}$ |
+
+The only *structural* difference is C7: the dual-mode layout is unconstrained by
+range (separable per site), while the BEL layout must keep every mainline stretch
+within the pack's usable energy $E$. Both otherwise share the same sites,
+substations, coverage, budget, and minimum-run logic.
+
+---
+
+## 8. Structural / computational properties
 
 - **Tight relaxation.** Constraints (C1), (C2), (C4)–(C6) have $\pm 1$
   coefficients; the corresponding coefficient matrix is (near) totally unimodular,
   so the LP relaxation is integral in the absence of the budget row.
-- **Gap constraint stays tight.** The maximum-gap rows (C7) are *covering* rows
-  whose support is a **contiguous block** of the ordered bucket variables — a
+- **Gap constraint stays tight.** The covering range rows (C7a/b) are *covering*
+  rows whose support is a **contiguous block** of the ordered bucket variables — a
   consecutive-ones (interval) matrix, which is totally unimodular. Added over the
-  1-D mainline together with the interval-structured (C1)/(C5) coupling, (C7)
-  introduces **no** fractionality of its own (no big-$M$, no general
+  1-D mainline together with the interval-structured (C1)/(C5) coupling, they
+  introduce **no** fractionality of their own (no big-$M$, no general
   coefficients), so the LP relaxation remains integral apart from the pre-existing
-  budget row. The practical effect of (C7) is on *feasibility*, not relaxation
-  looseness: because it can force electrification, it can tighten a binding budget
-  (C3) or render the model infeasible (caught by the pre-check) — but it does not
-  loosen the bound or trigger a branching blow-up.
+  budget row. The charge-credited form (C7c/Tier 1) uses non-negative weights over
+  the same contiguous support (weighted covering — tight, though not strictly TU).
+  The **SOC recursion (C7d/Tier 2)** used in the study is *not* TU (it carries
+  continuous state) but adds no integers and no big-$M$, so its relaxation stays
+  tractable. The practical effect of the range rows is on *feasibility*, not
+  relaxation looseness: because they can force electrification they can tighten a
+  binding budget (C3) or render the model infeasible (caught by the pre-check /
+  solver) — but they do not loosen the bound or trigger a branching blow-up.
 - **Single non-TU row.** Only the budget knapsack (C3) couples the decisions with
   general coefficients, which is what makes the MILP nontrivial yet fast.
 - **Solver.** HiGHS via Pyomo APPSI (`solve_model`), with optional
@@ -383,7 +573,7 @@ $$
 
 ---
 
-## 8. Outputs (`EnergizationPlacementResult`)
+## 9. Outputs (`EnergizationPlacementResult`)
 
 `extract_result` reads the solved model (thresholding each binary at $0.5$) and
 returns:
@@ -407,7 +597,7 @@ simulation and by the optional line-loss post-processing.
 
 ---
 
-## 9. Modeling assumptions and scope
+## 10. Modeling assumptions and scope
 
 1. **Electrical neutrality of placement.** Voltage, substation capacity, and
    conductor impedance do not appear above. Placement responds only to geometry
@@ -422,11 +612,15 @@ simulation and by the optional line-loss post-processing.
 4. **Uniform power limit.** `uniform_power_limit_watts` is stamped identically on
    all energized intervals; heterogeneous ratings, if required, are introduced in
    post-processing.
-5. **Battery-electric gap as pure geometry.** The maximum-gap constraint (C7)
-   keeps the optimizer electrically neutral: battery physics enters only through
-   the scalar $G_{\max}$, computed upstream from battery capacity and an assumed
-   constant average consumption $e$ (kWh/mi). It assumes any electrified segment
-   recharges the pack, ignores state-of-charge dynamics and grade-dependent draw
-   within a gap, and treats the battery as full at each corridor end (yard
-   charging). Heterogeneous consumption or true SOC tracking, if required, would
-   be introduced by a downstream simulation rather than in placement.
+5. **Battery-electric range model.** The BEL range limit is enforced in **energy**,
+   not pure distance: buckets carry traction **drain** $\delta_b$, catenary
+   **charge** $\gamma_b$, and **regen** $\rho_b$ densities (from a first-pass
+   simulation), and the study uses the explicit **SOC recursion** (C7d/Tier 2),
+   which tracks pack state along the mainline with charge saturation encoded by a
+   linear curtailment slack. It still treats the pack as full at each corridor end
+   (yard charging) and aggregates drain/charge to coarse corridor buckets;
+   sub-bucket SOC excursions and true instantaneous power limits are resolved by
+   the downstream train simulation, not in placement. The simpler distance,
+   energy, and charge-credited covering families (C7a/b/c) remain available; C7a/b
+   are totally unimodular. The dual-mode variant carries none of this — its
+   placement is fully separable per site.

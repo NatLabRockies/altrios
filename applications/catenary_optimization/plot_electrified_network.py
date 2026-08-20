@@ -65,6 +65,10 @@ from matplotlib.lines import Line2D
 
 _M_PER_MILE = 1609.344
 
+# Monotonic clock of the last tile HTTP request, shared across every tiler so a
+# multi-panel figure throttles all its panels' fetches together (see _make_tiler).
+_TILE_LAST_FETCH = [0.0]
+
 # Topographic tile sources (no API key). ``{z}/{x}/{y}`` order noted per source.
 _TILE_SOURCES: Dict[str, Tuple[str, str, str]] = {
     # name: (url template, xyz order, attribution)
@@ -254,8 +258,23 @@ def _lambert_conformal(lat_min, lat_max, lon_min, lon_max):
     )
 
 
-def _make_tiler(url: str, order: str):
-    """Return a Cartopy tile source that fetches ``url`` (a ``{z}/{x}/{y}`` template)."""
+def _make_tiler(url: str, order: str, *, cache: bool = True,
+                min_interval_s: float = 0.2, retries: int = 4):
+    """Return a Cartopy tile source that fetches ``url`` (a ``{z}/{x}/{y}`` template).
+
+    Tiles are cached on disk so repeated renders at the same extent/zoom reuse one
+    download. The fetch is throttled to at most one request per ``min_interval_s``
+    and retried up to ``retries`` times, so a multi-panel figure's burst of requests
+    stays under the tile server's rate limit. Crucially -- unlike Cartopy's default
+    ``get_image`` -- a failed fetch returns a blank tile *without caching it*, so a
+    transient rate-limit never poisons the cache with permanent gray tiles.
+    """
+    import io as _io
+    import time as _time
+    from urllib.request import HTTPError, Request, URLError, urlopen
+
+    import numpy as _np
+    from PIL import Image as _Image
     from cartopy.io.img_tiles import GoogleTiles
 
     class _Tiler(GoogleTiles):
@@ -263,8 +282,82 @@ def _make_tiler(url: str, order: str):
             x, y, z = tile
             return url.format(x=x, y=y, z=z)
 
+        def get_image(self, tile):
+            # Check the tile ON DISK (not the in-memory snapshot taken at __init__),
+            # so panels drawn after the first reuse its freshly-downloaded tiles
+            # instead of re-fetching them and tripping the server's rate limit.
+            cached_file = None
+            if self.cache_path is not None:
+                cached_file = self._cache_dir / (
+                    "_".join(str(i) for i in tile) + ".npy")
+                if cached_file.exists():
+                    return (_np.load(cached_file, allow_pickle=False),
+                            self.tileextent(tile), "lower")
+            img = None
+            for attempt in range(retries):
+                wait = min_interval_s - (_time.monotonic() - _TILE_LAST_FETCH[0])
+                if wait > 0:
+                    _time.sleep(wait)
+                _TILE_LAST_FETCH[0] = _time.monotonic()
+                try:
+                    req = Request(self._image_url(tile),
+                                  headers={"User-Agent": self.user_agent})
+                    fh = urlopen(req)
+                    data = _io.BytesIO(fh.read())
+                    fh.close()
+                    img = _Image.open(data).convert(self.desired_tile_form)
+                    break
+                except (HTTPError, URLError):
+                    _time.sleep(min_interval_s * (attempt + 1))  # back off, then retry
+            if img is None:  # give up without caching, so a later render can retry
+                return (_np.full((256, 256, 3), 250, dtype=_np.uint8),
+                        self.tileextent(tile), "lower")
+            if cached_file is not None:
+                _np.save(cached_file, _np.array(img), allow_pickle=False)
+                self.cache.add(cached_file)
+            return img, self.tileextent(tile), "lower"
+
     _ = order  # url template already encodes tile axis order
-    return _Tiler()
+    return _Tiler(cache=cache)
+
+
+# Composited basemap rasters, memoized by (mode, zoom, rounded extent) so a
+# multi-panel figure fetches the shared corridor basemap once and reuses the same
+# image in every panel (Cartopy's per-axes ``add_image`` only renders the tiles on
+# the first-drawn GeoAxes when several share a projection).
+_BASEMAP_MEMO: Dict[tuple, tuple] = {}
+
+
+def _add_basemap_image(ax, mode, url, order, zoom, extent_deg):
+    """Draw the topographic basemap into ``ax`` via a memoized composited raster.
+
+    ``extent_deg`` is ``(lon_min, lon_max, lat_min, lat_max)`` in degrees. The tiles
+    are fetched once (through the throttled :func:`_make_tiler`), merged into a
+    single image in the tiler's CRS, cached in ``_BASEMAP_MEMO``, and ``imshow``\\n
+    into every panel -- so all panels get the basemap, not just the first drawn.
+    """
+    import numpy as _np
+    import cartopy.crs as ccrs
+    from shapely.geometry import box
+
+    lon0, lon1, lat0, lat1 = extent_deg
+    key = (mode, zoom, round(lon0, 2), round(lon1, 2), round(lat0, 2), round(lat1, 2))
+    memo = _BASEMAP_MEMO.get(key)
+    if memo is None:
+        tiler = _make_tiler(url, order)
+        merc = tiler.crs
+        pts = merc.transform_points(
+            ccrs.PlateCarree(),
+            _np.array([lon0, lon1, lon1, lon0]),
+            _np.array([lat0, lat0, lat1, lat1]))
+        domain = box(pts[:, 0].min(), pts[:, 1].min(),
+                     pts[:, 0].max(), pts[:, 1].max())
+        img, img_extent, origin = tiler.image_for_domain(domain, zoom)
+        memo = (_np.asarray(img), img_extent, origin, merc)
+        _BASEMAP_MEMO[key] = memo
+    img, img_extent, origin, merc = memo
+    ax.imshow(img, extent=img_extent, transform=merc, origin=origin,
+              interpolation="bilinear", zorder=0)
 
 
 def _tile_zoom(lon_span: float, override: Optional[int]) -> int:
@@ -287,12 +380,16 @@ def _nice_step(span: float) -> float:
     return 10.0 * mag
 
 
-def _add_scale_bar(ax):
-    """Draw a scale bar in MILES (projected LCC units are meters, near-true)."""
+def _add_scale_bar(ax, bar_miles=None):
+    """Draw a scale bar in MILES (projected LCC units are meters, near-true).
+
+    ``bar_miles`` fixes the bar length; when ``None`` a 'nice' length near 30% of
+    the map width is chosen automatically.
+    """
     x0, x1 = ax.get_xlim()
     y0, y1 = ax.get_ylim()
     span_mi = (x1 - x0) / _M_PER_MILE
-    bar_mi = _nice_step(span_mi)
+    bar_mi = float(bar_miles) if bar_miles else _nice_step(span_mi)
     bar_m = bar_mi * _M_PER_MILE
     bx0 = x0 + 0.06 * (x1 - x0)
     by = y0 + 0.07 * (y1 - y0)
@@ -320,6 +417,7 @@ def plot_electrified_track(
     tiles_zoom: Optional[int] = None,
     gridlines: bool = True,
     scale_bar: bool = True,
+    scale_bar_miles: Optional[float] = 50.0,
     projection=None,
     substation_feed_distance_miles: Optional[float] = None,
     electrified_color: str = "#e8710a",
@@ -330,6 +428,9 @@ def plot_electrified_track(
     padding_deg: float = 0.4,
     figsize: Tuple[float, float] = (11.0, 7.0),
     dpi: int = 300,
+    legend_loc: str = "lower right",
+    legend_show_distances: bool = False,
+    marker_edgecolor: str = "none",
     ax=None,
 ):
     """Render a projected static map of electrified track; return ``(fig, ax)``.
@@ -367,6 +468,9 @@ def plot_electrified_track(
         Override the tile zoom level (higher = more detail, more tiles).
     gridlines, scale_bar
         Draw a lat/lon graticule with degree labels / a scale bar (in miles).
+    scale_bar_miles
+        Fix the scale-bar length in miles (default 50); pass ``None`` for a 'nice'
+        auto length near 30% of the map width.
     projection
         A ``cartopy.crs.Projection`` for the map. Defaults to a Lambert Conformal
         Conic fit to the corridor's extent (recommended for long corridors).
@@ -383,6 +487,12 @@ def plot_electrified_track(
         corridor-arc TRACK distance as the optimizer and line-loss model.
     dpi
         Raster resolution for ``.png``/``.tif`` (ignored by vector formats).
+    legend_loc
+        Matplotlib legend location (e.g. ``"upper left"``, ``"lower right"``).
+    legend_show_distances
+        When ``True`` the track legend labels include the miles per category.
+    marker_edgecolor
+        Edge color of substation markers (``"none"`` for no outline).
     ax
         Draw into an existing Cartopy ``GeoAxes`` (for multi-panel figures)
         instead of creating a new projected figure.
@@ -521,8 +631,10 @@ def plot_electrified_track(
         url, order, attribution = _TILE_SOURCES[mode]
         zoom = _tile_zoom(lon_max - lon_min, tiles_zoom)
         try:
-            ax.add_image(_make_tiler(url, order), zoom, interpolation="bilinear",
-                         zorder=0)
+            _add_basemap_image(
+                ax, mode, url, order, zoom,
+                (lon_min - padding_deg, lon_max + padding_deg,
+                 lat_min - padding_deg, lat_max + padding_deg))
         except Exception as exc:  # noqa: BLE001 - tiles are best-effort (need net)
             import warnings
 
@@ -591,11 +703,11 @@ def plot_electrified_track(
             continue
         lons = [p[1] for p in pts]
         lats = [p[0] for p in pts]
-        ax.scatter(lons, lats, s=size, c=color, marker=marker, edgecolors="white",
-                   linewidths=0.7, zorder=z, transform=pc)
+        ax.scatter(lons, lats, s=size, c=color, marker=marker,
+                   edgecolors=marker_edgecolor, linewidths=0.7, zorder=z, transform=pc)
         legend_handles.append(Line2D(
             [], [], color=color, marker=marker, linestyle="none",
-            markersize=math.sqrt(size), markeredgecolor="white", label=label,
+            markersize=math.sqrt(size), markeredgecolor=marker_edgecolor, label=label,
         ))
 
     # electrified track ON TOP of substations
@@ -610,26 +722,38 @@ def plot_electrified_track(
         gl.xlabel_style = {"size": 8}
         gl.ylabel_style = {"size": 8}
     if scale_bar:
-        _add_scale_bar(ax)
+        _add_scale_bar(ax, scale_bar_miles)
 
     # --- legend -------------------------------------------------------------
     line_handles: List[Line2D] = []
+    _elec_lbl = (f"Electrified ({elec_miles:.0f} mi)" if legend_show_distances
+                 else "Electrified")
+    _cov_lbl = (f"Within range, not electrified ({covered_miles:.0f} mi)"
+                if legend_show_distances else "Within range, not electrified")
     if elec_geoms:
         line_handles.append(Line2D(
             [], [], color=electrified_color, linewidth=electrified_width,
-            label=f"Electrified ({elec_miles:.0f} mi)"))
+            label=_elec_lbl))
     if show_base_network and covered_geoms:
         line_handles.append(Line2D(
             [], [], color=covered_color, linewidth=track_width,
-            label=f"Within range, not electrified ({covered_miles:.0f} mi)"))
+            label=_cov_lbl))
     if show_base_network and uncovered_geoms:
         line_handles.append(Line2D(
             [], [], color=uncovered_color, linewidth=track_width,
             label="Out of range"))
     handles = line_handles + legend_handles
     if handles:
-        ax.legend(handles=handles, loc="upper left", fontsize=8,
-                  framealpha=0.9, edgecolor="#444")
+        leg_kwargs = dict(handles=handles, loc=legend_loc, fontsize=8,
+                          framealpha=0.9, edgecolor="#444")
+        if "lower" in legend_loc:
+            # Lift a bottom legend ~10 pt so it clears the basemap attribution label.
+            from matplotlib.transforms import ScaledTranslation
+            _x = 0.0 if "left" in legend_loc else (0.5 if "center" in legend_loc else 1.0)
+            leg_kwargs["bbox_to_anchor"] = (_x, 0.0)
+            leg_kwargs["bbox_transform"] = (
+                ax.transAxes + ScaledTranslation(0, 10 / 72, fig.dpi_scale_trans))
+        ax.legend(**leg_kwargs)
 
     if attribution:
         ax.text(0.995, 0.008, attribution, transform=ax.transAxes, ha="right",

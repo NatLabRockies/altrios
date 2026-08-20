@@ -27,8 +27,9 @@ corridor (speed-, grade-, and mass-aware), summing per-link energy across all
 trains, and annualizing (the plan is treated as one representative week). Each
 train keeps its plan attributes (origin/destination, train type, car counts,
 weight, length, consist size) while its locomotives are overridden to be all
-dual-mode (cost analysis) or n-1 BEL-with-pantograph + 1 diesel (battery
-analysis). The demand sweep is a MULTIPLIER on that annualized plan (central=1x,
+dual-mode (cost analysis) or all BEL-with-pantograph (100% battery-electric, no
+diesel-assist; battery analysis). The demand sweep is a MULTIPLIER on that
+annualized plan (central=1x,
 high=2x). The illustrative grade-scaled constants remain as a fast fallback.
 
 Finally, a SIMULATION STEP re-runs the full consist plan over a chosen plan's
@@ -307,10 +308,38 @@ SOLVER_TIME_LIMIT_SECONDS = 600.0
 
 # Common structure-site (corridor) settings shared by every sweep run. Capital
 # costs are passed per-sweep (the cost-based matrix varies them).
+# WHOLE-SITE electrification: wire every track piece at an energized structure
+# site (x == s) instead of choosing per piece. Collapses ~18k link-driven piece
+# binaries onto ~2k site binaries and strengthens the LP relaxation, so the
+# optimality gap CLOSES (publishable) instead of stalling near the weak per-piece
+# bound. Applied to both the dual-mode and BEL layouts. Set False for the fine
+# per-piece formulation (much larger optimality gap within a time limit).
+ELECTRIFY_WHOLE_SITE = True
+# Back-end direction exclusion: the whole-site optimizer wires every track at an
+# energized site (full cost), but a parallel track/direction the fleet never
+# charges from is wasted. When True, the STUDY (metrics) subtracts the marginal
+# wire cost of energized links whose plan-wide catenary draw is ~0 (structure and
+# substations, shared per site, are kept). Optimization is unchanged.
+EXCLUDE_UNUSED_DIRECTION_WIRE = True
+# Feed the direction exclusion INTO the buildout (optional, gated). When True, the
+# zero-catenary-draw links found after simulating a layout are removed from the
+# optimizer's candidate set and the layout is RE-OPTIMIZED (and re-simulated), so
+# the exclusion factors into the NPV/objective rather than only the reported cost.
+# A bounded fixed point: applied identically to EACH powertrain using its OWN
+# realized draw (fair -- same method, each fleet's own information; no grade/regen
+# heuristic). Only links a fleet never charged from are removed, so a BEL's SOC
+# feasibility is preserved. Each extra iteration ~doubles that variant's heavy sim
+# cost; the loop stops early once the excluded set stops growing. Requires
+# EXCLUDE_UNUSED_DIRECTION_WIRE. False (default) keeps the pure back-end refund.
+DIRECTION_EXCLUSION_IN_BUILDOUT = True
+# Max extra optimize+simulate feedback rounds when the above is enabled.
+DIRECTION_EXCLUSION_MAX_ITERS = 1
+
 COMMON = dict(
     uniform_power_limit_watts=50.0e6,
     structure_spacing_miles=1.0,
     corridor_width_miles=0.05,
+    electrify_whole_site=ELECTRIFY_WHOLE_SITE,
     mip_gap=0.01,
     tee=SOLVER_LOG,
     time_limit_seconds=SOLVER_TIME_LIMIT_SECONDS,
@@ -405,6 +434,90 @@ def build_opex_fn(diesel_by_link, elec_by_link, diesel_price, elec_price):
     return lambda ctx: base(ctx) / USD_PER_MUSD
 
 
+def bel_drain_by_link(traction_by_link=None, grade_multiplier=40.0):
+    """Per-link single-locomotive traction DRAIN (kWh per corridor-mile).
+
+    The relative per-link SHAPE comes from ``traction_by_link`` when supplied --
+    the sim-derived per-track-mile traction intensity (grade/speed/mass aware,
+    e.g. ``first_pass_densities`` output) -- else from a grade proxy
+    ``1 + grade_multiplier * grade``. Either shape is normalized (length-weighted)
+    so the corridor-average equals the measured fleet-mean ``BEL_AVG_KWH_PER_MILE``
+    (Option B sizing), keeping the per-loco scale grounded while the shape reflects
+    real physics. Traffic-independent (one locomotive traversing once).
+    """
+    if traction_by_link:
+        shape = {idx: float(traction_by_link.get(idx, 0.0)) for idx in GRADE_BY_LINK}
+    else:
+        shape = {idx: 1.0 + grade_multiplier * g for idx, g in GRADE_BY_LINK.items()}
+    wsum = sum(shape[idx] * LINK_MILES.get(idx, 0.0) for idx in shape)
+    wmi = sum(LINK_MILES.get(idx, 0.0) for idx in shape)
+    mean_shape = (wsum / wmi) if wmi > 0 else 1.0
+    if mean_shape <= 0:
+        mean_shape = 1.0
+    return {idx: BEL_AVG_KWH_PER_MILE * s / mean_shape for idx, s in shape.items()}
+
+
+def bel_charge_by_link(drain=None):
+    """Per-link NET CHARGE banked per energized corridor-mile (kWh/mi, Tier 1).
+
+    ``min(gross wire delivery - local draw, battery charge-acceptance)``, floored:
+    steep track (high draw) banks less, and no link banks faster than the pack can
+    accept -- both matched to ALTRIOS's physical power caps.
+    """
+    d_by = drain if drain is not None else bel_drain_by_link()
+    return {
+        idx: min(
+            max(BEL_GROSS_CHARGE_KWH_PER_MILE - d, BEL_MIN_NET_CHARGE_KWH_PER_MILE),
+            BEL_CHARGE_ACCEPT_KWH_PER_MILE,
+        )
+        for idx, d in d_by.items()
+    }
+
+
+def bel_regen_by_link(drain=None):
+    """Per-link regen recovery per corridor-mile (kWh/mi).
+
+    Modeled as a flat fraction (``BEL_REGEN_FRACTION``, measured from simulation)
+    of the local drain -- ``max_grade`` carries no sign, so regen cannot be
+    localized to specific downgrades; the flat fraction captures the average range
+    extension. Feeds NET drain (drain - regen) in the gap/SOC constraints.
+    """
+    d_by = drain if drain is not None else bel_drain_by_link()
+    return {idx: BEL_REGEN_FRACTION * d for idx, d in d_by.items()}
+
+
+def bel_traction_annual_by_link(trains_per_day, grade_multiplier=40.0,
+                                kwh_traction_per_train_mi=33.0):
+    """Per-link ANNUAL traction (at-the-wheel) energy per track-mile (kWh).
+
+    The traffic-scaled quantity behind the BEL round-trip-loss opex (Item 3); it
+    mirrors the traction term of ``energy_densities`` but is NOT divided by the
+    grid->wheel chain (it is wheel energy, the amount that would pass through the
+    battery).
+    """
+    annual_trains = trains_per_day * 365
+    return {
+        idx: annual_trains * kwh_traction_per_train_mi * (1.0 + grade_multiplier * g)
+        for idx, g in GRADE_BY_LINK.items()
+    }
+
+
+def build_bel_opex_fn(trains_per_day, elec_price):
+    """Per-piece annual net operating-cost fn ($M/yr) for a battery-electric fleet.
+
+    Unlike the dual-mode opex (electricity minus displaced diesel), the BEL opex is
+    the round-trip battery loss avoided by drawing a piece's traction energy
+    straight from the wire -- a saving proportional to the piece's energy, which is
+    what makes "prioritize highest energy/mile" the correct objective gradient.
+    """
+    base = en.make_bel_piece_opex_fn(
+        traction_kwh_per_track_mile_by_link=bel_traction_annual_by_link(trains_per_day),
+        electricity_price_usd_per_kwh=elec_price,
+        battery_roundtrip_efficiency=BEL_ROUNDTRIP_EFFICIENCY,
+    )
+    return lambda ctx: base(ctx) / USD_PER_MUSD
+
+
 def plan_energy_mj(result, diesel_by_link, elec_by_link):
     """Annual (diesel_MJ, electricity_MJ) consumed under a chosen plan.
 
@@ -446,14 +559,83 @@ def plan_energy_mj(result, diesel_by_link, elec_by_link):
 # ``BEL_AVG_KWH_PER_MILE`` bridges ``en.max_gap_miles_from_battery`` miles. The
 # ``reserve_fraction`` holds back part of the pack (SOC protection / accessory
 # load). Tune the two energy numbers to a specific locomotive to re-scale the gap.
-BEL_USABLE_BATTERY_KWH = 9000.0   # usable traction energy between charges (kWh)
-BEL_AVG_KWH_PER_MILE = 190.0      # avg per-locomotive traction draw (kWh/mile)
+# Nameplate pack energy (kWh) overriding the ALTRIOS default (2.4 MWh); applied to
+# the sim loco in ``_bel_with_cat_loco`` and used to size the optimizer gap.
+SIM_BEL_BATTERY_CAPACITY_KWH = 9600.0   # 9.6 MWh nameplate
+# Usable SOC span (default RES min_soc=0.05, max_soc=0.95 -> 0.90 usable).
+SIM_BEL_SOC_WINDOW = 0.90
+BEL_USABLE_BATTERY_KWH = SIM_BEL_BATTERY_CAPACITY_KWH * SIM_BEL_SOC_WINDOW  # kWh
+# Per-locomotive traction draw, regen, and charge rates RECONCILED against a
+# dual-mode simulation of representative plan trains over this corridor (per-loco
+# electrical traction output; avg speed ~32 mph on the 3.28 MW-rated loco):
+#   gross draw ~49 kWh/mi/loco (24 light .. 62 heavy), regen ~9% of draw,
+#   5 MW pantograph @ 32 mph -> ~156 kWh/mi gross charge capability.
+BEL_AVG_KWH_PER_MILE = 49.0       # measured avg per-locomotive traction draw (kWh/mi)
+BEL_REGEN_FRACTION = 0.09         # regen recovered as a fraction of gross draw
 BEL_RESERVE_FRACTION = 0.15       # withheld reserve (SOC protection + accessories)
 BEL_MAX_GAP_MILES = en.max_gap_miles_from_battery(
     BEL_USABLE_BATTERY_KWH,
     BEL_AVG_KWH_PER_MILE,
     reserve_fraction=BEL_RESERVE_FRACTION,
 )
+# ENERGY-based range parameterization (replaces the flat per-mile gap for the BEL
+# layout). ``BEL_MAX_GAP_KWH`` is the usable pack energy; the optimizer bounds
+# each unelectrified window by its per-link DRAIN energy (``bel_drain_by_link``)
+# so wire is required where the battery depletes fastest, not on a flat distance.
+BEL_MAX_GAP_KWH = en.max_gap_kwh_from_battery(
+    BEL_USABLE_BATTERY_KWH, reserve_fraction=BEL_RESERVE_FRACTION,
+)
+BEL_ROUNDTRIP_EFFICIENCY = 0.90   # pack round-trip eff (RES eta curve, one-way^2)
+# Charge model matched to ALTRIOS's physical caps. Per-mile charge is bounded by
+# BOTH the pantograph power (5 MW, gross wire delivery) and the battery
+# charge-acceptance = RES pwr_out_max_watts (3.281 MW on the default BEL RES,
+# symmetric charge/discharge), each converted to kWh/mi at the representative
+# corridor speed. NET charge = min(gross - draw, charge-acceptance), floored.
+BEL_REPRESENTATIVE_SPEED_MPH = 32.0     # measured avg corridor speed
+SIM_BEL_RES_PWR_OUT_MAX_WATTS = 3.281e6  # default BEL RES charge/discharge limit
+
+
+def _pwr_w_to_kwh_per_mi(power_w, mph):
+    """Energy per mile (kWh) a constant power (W) delivers at speed ``mph``."""
+    return power_w / (mph * 0.44704) * 1609.344 / 3.6e6
+
+
+# 5.0e6 matches SIM_BEL_CAT_PWR_MAX_WATTS (defined with the sim config below).
+BEL_GROSS_CHARGE_KWH_PER_MILE = _pwr_w_to_kwh_per_mi(
+    5.0e6, BEL_REPRESENTATIVE_SPEED_MPH)
+BEL_CHARGE_ACCEPT_KWH_PER_MILE = _pwr_w_to_kwh_per_mi(
+    SIM_BEL_RES_PWR_OUT_MAX_WATTS, BEL_REPRESENTATIVE_SPEED_MPH)
+BEL_MIN_NET_CHARGE_KWH_PER_MILE = 20.0
+BEL_AVG_NET_CHARGE_KWH_PER_MILE = max(
+    min(BEL_GROSS_CHARGE_KWH_PER_MILE - BEL_AVG_KWH_PER_MILE,
+        BEL_CHARGE_ACCEPT_KWH_PER_MILE),
+    BEL_MIN_NET_CHARGE_KWH_PER_MILE,
+)
+# Tier-0 recharge: minimum energized run (miles) sized so a run refills
+# ``BEL_RECHARGE_FRACTION`` of the usable pack at the average net charge rate
+# (fraction < 1 since not every gap fully depletes the pack). Combined (max) with
+# the anti-sliver minimum run.
+BEL_RECHARGE_FRACTION = 0.5
+BEL_RECHARGE_MILES = en.min_recharge_miles_from_battery(
+    BEL_USABLE_BATTERY_KWH, BEL_AVG_NET_CHARGE_KWH_PER_MILE,
+    recharge_fraction=BEL_RECHARGE_FRACTION, reserve_fraction=BEL_RESERVE_FRACTION,
+)
+# When True the BEL layout uses the charge-credited (Tier 1) gap family: an
+# energized bucket credits only (charge + drain), so short slivers on steep track
+# no longer count as a full recharge. Under WHOLE-SITE it solves to PROVEN OPTIMAL
+# fast (~23s at 2mi buckets); the recharge physics is then also carried by the
+# Tier-0 min-run below. False (default) uses the fast ``sum u>=1`` energy gap (any
+# single energized bucket resets the gap; totally unimodular) + Tier-0 recharge.
+BEL_RECHARGE_TIER1 = False
+# When True the BEL layout uses the explicit SOC-recursion (Tier 2) range model
+# instead of the covering families: a continuous per-bucket state of charge with a
+# curtailment slack (linear, no big-M) that tracks charge/drain/regen exactly and
+# forbids depletion. The MOST FAITHFUL model, and under WHOLE-SITE it solves to
+# PROVEN OPTIMAL fast (~14s at 2mi buckets, resolution-robust). Recommended for a
+# rigorous study; it needs MORE wire than the optimistic default (slivers do not
+# fully recharge), and it supersedes the Tier-0 recharge min-run (only the
+# anti-sliver floor is applied when on). False uses the covering gap above.
+BEL_SOC_STATE_MODEL = True
 
 RULE_CONFIGS = [
     dict(label="baseline",          budget=150, high_grade_benefit_weight=5.0,
@@ -535,7 +717,7 @@ PROJECT_LIFESPAN_YEARS = 25
 # level is a MULTIPLIER on the annualized plan energy: "central" = the plan as-is,
 # "high" = double the traffic (catenary utilization-stress case). Per-train consist
 # size + makeup come from the plan; each train's locomotives are overridden to be
-# either all dual-mode (cost analysis) or n-1 BEL-with-pantograph + 1 diesel
+# either all dual-mode (cost analysis) or all BEL-with-pantograph (100% BEL)
 # (battery analysis).
 PLAN_DAYS = 7.0                     # consist plan treated as one representative week
 ANNUAL_SCALER = 365.25 / PLAN_DAYS  # week -> year
@@ -595,6 +777,17 @@ ENERGY_LEVELS = {
     "med":  dict(diesel=1.0, elec=1.0),
     "high": dict(diesel=1.0 + ENERGY_GAP_WIDTH, elec=1.0 - ENERGY_GAP_WIDTH),
 }
+
+# Buildout-map PDFs are the most expensive per-cell serialization step, so render
+# them only for a few representative cost cells (the reference and the two extremes
+# that bracket electrification) instead of all 9. Every cell still writes its
+# metrics/network/sim outputs. Set to None to render every cell.
+PDF_RENDER_CELLS = {("med", "med"), ("low", "high"), ("high", "low")}
+
+
+def _should_render_pdf(infra_lvl, energy_lvl):
+    """Whether to render the buildout PDF for this (infra, energy) cost cell."""
+    return PDF_RENDER_CELLS is None or (infra_lvl, energy_lvl) in PDF_RENDER_CELLS
 
 
 def _aeo_price_at(df, year):
@@ -690,15 +883,21 @@ def _region_fractions(dual_mode_energy, substation_meta):
     return {GRID_REGION_EAST: 1.0}
 
 
-def _split_electricity(energy, region_frac):
+def _split_electricity(energy, region_frac, stationary_j=0.0):
     """Split a variant's grid electricity across grid-emissions regions.
 
-    Catenary charging follows ``region_frac`` (by feeding substation); any
-    stationary charging would be attributed to the Spokane (West) region -- none
-    is modeled in this catenary workflow, so it is omitted here.
+    Catenary charging follows ``region_frac`` (by feeding substation); train-planner
+    stationary charging (``stationary_j`` grid joules, week total) is attributed to
+    the Spokane (West) terminus region. Feeding both into the metrics calculator's
+    electricity total lets it back out ``Electricity_Stationary_Charging`` (total
+    grid electricity minus the sim's catenary grid draw) and price/attribute the
+    stationary energy's emissions by region.
     """
     catenary_j = float(energy.get("grid_elec_j") or 0.0)
     region_elec = {r: catenary_j * f for r, f in region_frac.items()}
+    if stationary_j:
+        region_elec[STATIONARY_CHARGING_REGION] = (
+            region_elec.get(STATIONARY_CHARGING_REGION, 0.0) + float(stationary_j))
     return region_elec or {GRID_REGION_EAST: catenary_j}
 
 
@@ -728,7 +927,9 @@ def run_pipeline():
     target), and each of the three variants is simulated ONCE:
 
       1. ``dual_mode``  -- unconstrained layout, 100% dual-mode consists.
-      2. ``bel``        -- gap-constrained layout, (n-1) BEL-with-cat + 1 diesel.
+      2. ``bel``        -- gap-constrained layout, 100% BEL-with-cat consists; a
+                           diesel helper is swapped in per train ONLY if a pure-BEL
+                           consist cannot pull the grade (``_walk_plan_train``).
       3. ``diesel``     -- NO catenary / NO optimization, 100% conventional diesel.
 
     INFRASTRUCTURE COST x ENERGY PRICE are then swept as a pure ECONOMIC sensitivity
@@ -774,6 +975,14 @@ def run_pipeline():
     # Cache heavy full-plan sims by (traction_kind, layout fingerprint); the diesel
     # baseline network is constant so its sim runs once and is reused everywhere.
     sim_cache = {}
+    # Derived post-processing (region fractions + direction-exclusion), cached by
+    # (traction_kind, layout fingerprint) so cost scenarios sharing a buildout only
+    # pay for it once.
+    derive_cache = {}
+    # Bound the in-memory sim bundles (each ~160 walked sims) so per-cell dual
+    # re-optimization can't accumulate every distinct layout and exhaust memory;
+    # the disk bundle cache still allows reload, and BEL stays alive via ``e_bel``.
+    _MAX_SIM_CACHE = 6
 
     def _sim(net, traction_kind, fingerprint, label):
         key = (traction_kind, fingerprint)
@@ -785,7 +994,74 @@ def run_pipeline():
                                     keep_sims=True)
             _save_sim_bundle(traction_kind, fingerprint, cached)
         sim_cache[key] = cached
+        while len(sim_cache) > _MAX_SIM_CACHE:  # FIFO evict oldest layout
+            sim_cache.pop(next(iter(sim_cache)))
         return cached
+
+    def _optimize_and_sim(label, traction_kind, opt_kwargs):
+        """Optimize a layout and simulate it, optionally feeding the realized
+        zero-catenary-draw exclusion back into the buildout as a bounded fixed
+        point (gated by ``DIRECTION_EXCLUSION_IN_BUILDOUT``).
+
+        Each round removes the links this fleet actually drew ~0 catenary from
+        (its OWN realized draw -- no grade/regen heuristic) from the optimizer's
+        candidate set and re-optimizes, so the exclusion informs the NPV/objective
+        rather than only the reported cost. Only never-charged links are removed,
+        so a BEL's SOC feasibility is preserved. Stops after
+        ``DIRECTION_EXCLUSION_MAX_ITERS`` rounds or once the excluded set stops
+        growing. A failed re-optimization keeps the prior (feasible) layout.
+
+        Returns ``(result, sim_net, energy, excl, meta, subs, region_frac)``; all
+        but ``result`` are ``None`` when the optimizer yields no usable layout.
+        """
+        denylist: list = []
+        best = None
+        n_iters = (DIRECTION_EXCLUSION_MAX_ITERS
+                   if DIRECTION_EXCLUSION_IN_BUILDOUT else 0)
+        for it in range(n_iters + 1):
+            try:
+                r = run_opt(label, excluded_link_idxs=(denylist or None),
+                            **opt_kwargs)
+            except Exception as exc:  # noqa: BLE001
+                if best is None:
+                    raise
+                _log(f"  {label}: re-optimize failed ({exc}); keeping prior layout")
+                break
+            if r is None or r.network is None:
+                break
+            subs = _built_sub_objs(r)
+            net, meta = en.apply_line_losses(
+                r.network, subs,
+                system_voltage_volts=SIM_SYSTEM_VOLTAGE_VOLTS,
+                electrification_type=SIM_ELECTRIFICATION_TYPE,
+                base_power_limit_watts=COMMON["uniform_power_limit_watts"])
+            net = _calibrate_speeds(net)
+            fp = _layout_fingerprint(r)
+            e = _sim(net, traction_kind, fp, label)
+            derived = derive_cache.get((traction_kind, fp))
+            if derived is None:
+                region_frac = _region_fractions(e, meta)
+                excl = (_excluded_energization_miles(
+                            r, e["sims"], e.get("draw_by_link"))
+                        if EXCLUDE_UNUSED_DIRECTION_WIRE else (0.0, []))
+                derived = (region_frac, excl)
+                derive_cache[(traction_kind, fp)] = derived
+            region_frac, excl = derived
+            best = (r, net, e, excl, meta, subs, region_frac)
+            if it == n_iters:
+                break
+            new_excl = [li for li in excl[1] if li not in set(denylist)]
+            if not new_excl:
+                _log(f"  {label}: direction exclusion converged after "
+                     f"{it} feedback iter(s)")
+                break
+            denylist = list(set(denylist) | set(excl[1]))
+            _log(f"  {label}: feedback iter {it + 1}: dropping {len(new_excl)} "
+                 f"zero-draw links ({excl[0]:.1f} mi), re-optimizing "
+                 f"(denylist now {len(denylist)} links)")
+        if best is None:
+            return None, None, None, (0.0, []), None, None, None
+        return best
 
     # Reference cost point that determines the SIMULATED buildout. Infra cost and
     # energy price are swept later ONLY in the metrics accounting, so they never
@@ -800,7 +1076,9 @@ def run_pipeline():
     ref_infra_mult = INFRA_LEVELS["med"]
 
     for arch in ("ac_25kv", "ac_2x25", "dc_9kv"):
-        sug = en.suggest_optimization_inputs(arch)
+        # Feed distance (substation spacing) sized to the 95th-pct consist draw.
+        sug = en.suggest_optimization_inputs(
+            arch, design_train_power_watts=_design_train_power_watts())
         med = ARCH_MEDIUM_COSTS[arch]
         for demand_lvl, demand_mult in DEMAND_LEVELS.items():
             trains_per_day = ps["trains_per_day"] * demand_mult
@@ -821,7 +1099,8 @@ def run_pipeline():
             if _step_done(step_id):
                 _log(f"RESUME: skipping completed step {layout}")
                 continue
-            # Optimize the SIMULATED buildout once, at the reference cost point.
+            # Reference cost point: fixes the BEL buildout and serves as the base
+            # that per-cell energy-price multipliers scale from.
             ref_costs = cp.EnergizationOptCosts(
                 structure_cost_per_mile=med["structure"] * ref_infra_mult,
                 energization_cost_per_mile=med["energization"] * ref_infra_mult,
@@ -829,86 +1108,80 @@ def run_pipeline():
             )
             common_opt = dict(
                 objective="min_cost", economics=econ,
-                piece_opex_fn=build_opex_fn(diesel_by_link, elec_by_link,
-                                            ref_diesel, ref_elec),
-                costs=ref_costs, substation_feed_distance_miles=feed_mi,
-                min_energized_length_miles=5.0, **COMMON,
+                substation_feed_distance_miles=feed_mi,
+                **COMMON,
             )
-            # Variant-1 layout: NPV-optimal, NO max-gap constraint.
-            r_dual = run_opt(f"{layout}/dual", **common_opt)
-            # Variant-2 layout: NPV-optimal, WITH the BEL max-gap constraint
-            # (can be infeasible -> skip that variant for this layout).
+            # Variant-2 layout (BEL) is optimized ONCE at the reference cost point:
+            # its energized mileage is pinned by the battery-range (max-gap)
+            # constraint, so it is far less cost-sensitive than the dual-mode NPV
+            # layout -- only RE-PRICED across the cost grid, not re-optimized.
+            # ENERGY-based range gap (wire where the pack drains fastest),
+            # round-trip-loss opex, energy-sized recharge min run. BEL drain shape
+            # from the sim-derived per-link traction intensity when available.
+            bel_drain = bel_drain_by_link(sim_kwh_mi if USE_SIM_DERIVED_DENSITIES
+                                          else None)
+            r_bel = None
+            net_bel = subs_bel = e_bel = region_frac_bel = meta_bel = None
+            excl_bel = (0.0, [])
+            net_bel_out = None
             try:
-                r_bel = run_opt(f"{layout}/bel",
-                                max_energized_gap_miles=BEL_MAX_GAP_MILES,
-                                **common_opt)
+                (r_bel, net_bel, e_bel, excl_bel, meta_bel, subs_bel,
+                 region_frac_bel) = _optimize_and_sim(
+                    f"{layout}/bel", "battery_electric",
+                    dict(piece_opex_fn=build_bel_opex_fn(trains_per_day, ref_elec),
+                         costs=ref_costs,
+                         max_energized_gap_kwh=BEL_MAX_GAP_KWH,
+                         gap_energy_kwh_per_mile_by_link=bel_drain,
+                         # Charge densities feed BOTH the Tier-1 covering and the
+                         # SOC (Tier-2) recursion; either needs them.
+                         charge_energy_kwh_per_mile_by_link=(
+                             bel_charge_by_link(bel_drain)
+                             if (BEL_RECHARGE_TIER1 or BEL_SOC_STATE_MODEL) else None),
+                         regen_energy_kwh_per_mile_by_link=bel_regen_by_link(bel_drain),
+                         battery_soc_state_model=BEL_SOC_STATE_MODEL,
+                         # SOC (Tier 2) tracks recharge exactly, so only the
+                         # anti-sliver floor is needed; the covering tiers use the
+                         # Tier-0 recharge run.
+                         min_energized_length_miles=(
+                             5.0 if BEL_SOC_STATE_MODEL
+                             else max(5.0, BEL_RECHARGE_MILES)),
+                         warmstart=True, **common_opt))
+                if r_bel is not None and r_bel.network is None:
+                    _log(f"BEL layout for {layout}: no incumbent "
+                         f"(status={str(r_bel.status).split('.')[-1]}); skipping")
+                    r_bel = None
             except Exception as exc:  # noqa: BLE001 - keep pipeline on infeasible gap
                 _log(f"BEL layout FAILED for {layout}: {exc}")
                 r_bel = None
+            if r_bel is None:
+                net_bel = subs_bel = e_bel = region_frac_bel = meta_bel = None
+                excl_bel = (0.0, [])
+                net_bel_out = None
+            else:
+                net_bel_out = _prune_unused_catenary(net_bel, excl_bel[1])
 
-            summary_row = {
-                "layout": layout, "architecture": arch,
-                "demand_level": demand_lvl, "demand_multiplier": demand_mult,
-                "dual_status": str(r_dual.status).split(".")[-1],
-                "dual_miles": r_dual.energized_track_miles or 0.0,
-                "dual_capex_musd": r_dual.total_cost or 0.0,
-                "dual_lifecycle_musd": r_dual.lifecycle_cost or 0.0,
-                "dual_substations": len(r_dual.built_substation_ids),
-                "bel_status": str(r_bel.status).split(".")[-1] if r_bel else "skipped",
-                "bel_miles": (r_bel.energized_track_miles or 0.0) if r_bel else 0.0,
-                "bel_capex_musd": (r_bel.total_cost or 0.0) if r_bel else 0.0,
-                "bel_substations": len(r_bel.built_substation_ids) if r_bel else 0,
-            }
-            summary_rows.append(summary_row)
-            _write_csv(RESULTS_DIR / "energization_cost_results.csv", summary_rows)
-
-            # Simulate each variant ONCE (cached); the infra x energy sweep below
-            # reuses these -- it never re-runs a simulation.
-            subs_dual = _built_sub_objs(r_dual)
-            net_dual, meta_dual = en.apply_line_losses(
-                r_dual.network, subs_dual,
-                system_voltage_volts=SIM_SYSTEM_VOLTAGE_VOLTS,
-                electrification_type=SIM_ELECTRIFICATION_TYPE,
-                base_power_limit_watts=COMMON["uniform_power_limit_watts"])
-            net_dual = _calibrate_speeds(net_dual)
-            e_dual = _sim(net_dual, "dual_mode", _layout_fingerprint(r_dual),
-                          f"{layout}/dual")
-            region_frac_dual = _region_fractions(e_dual, meta_dual)
-
-            net_bel = subs_bel = e_bel = region_frac_bel = None
-            if r_bel is not None:
-                subs_bel = _built_sub_objs(r_bel)
-                net_bel, meta_bel = en.apply_line_losses(
-                    r_bel.network, subs_bel,
-                    system_voltage_volts=SIM_SYSTEM_VOLTAGE_VOLTS,
-                    electrification_type=SIM_ELECTRIFICATION_TYPE,
-                    base_power_limit_watts=COMMON["uniform_power_limit_watts"])
-                net_bel = _calibrate_speeds(net_bel)
-                e_bel = _sim(net_bel, "battery_electric",
-                             _layout_fingerprint(r_bel), f"{layout}/bel")
-                region_frac_bel = _region_fractions(e_bel, meta_bel)
-
-            # Train-planner charging pass: schedules stationary charging sessions
-            # (BEL only) and yields actual departure times to place each train's
-            # load curve on a common wall-clock. The dispatch schedule is traction-
-            # agnostic, so its departures are reused for the dual-mode curves too.
-            sched_net = net_bel if r_bel is not None else net_dual
+            # Train-planner charging pass (BEL only): stationary-charging sessions +
+            # actual departure times to align load curves on a common wall-clock.
+            # The dispatch schedule is traction-agnostic, so its departures are
+            # reused for the dual-mode curves too; computed ONCE per block.
+            sched_net = net_bel if r_bel is not None else net_diesel
             refuel_sessions_bel, dep_by_index = _planner_charge_pass(
                 sched_net, location_map)
             if r_bel is None:
                 refuel_sessions_bel = None
-            dep_seconds = _departure_seconds(dep_by_index, len(e_dual["sims"]))
+            dep_seconds = _departure_seconds(dep_by_index, ps["n_trains"])
 
             def _do_variant(tag, net, result, built_objs, energy, region_frac,
-                            loco_type, loco_cost, render_pdf, *, scenario,
+                            loco_type, cost_fns, render_pdf, *, scenario,
                             infra_lvl, infra_mult, energy_lvl,
                             substation_meta=None, refuel_sessions=None):
                 try:
                     m = _variant_metrics_df(
-                        tag, loco_type, loco_cost, energy, result, built_objs,
+                        tag, loco_type, cost_fns, energy, result, built_objs,
                         region_frac, arch=arch, demand_lvl=demand_lvl,
                         demand_mult=demand_mult, infra_lvl=infra_lvl,
-                        infra_mult=infra_mult, energy_lvl=energy_lvl)
+                        infra_mult=infra_mult, energy_lvl=energy_lvl,
+                        net_purchased=net, stationary_sessions=refuel_sessions)
                     _serialize_variant_run(
                         RESULTS_DIR / f"{scenario}__{tag}", tag=tag, net=net,
                         result=result, metrics_df=m, sims=energy["sims"],
@@ -920,25 +1193,85 @@ def run_pipeline():
                 except Exception as exc:  # noqa: BLE001 - keep pipeline alive
                     _log(f"variant [{tag}] FAILED for {scenario}: {exc}")
 
-            # ECONOMIC sensitivity: sweep infra cost x energy price over the FIXED
-            # simulated buildouts. Only the metrics calculator re-runs here.
+            # COST-SCENARIO sweep. The dual-mode buildout is RE-OPTIMIZED per cell
+            # (its NPV layout genuinely depends on infra cost x fuel-price spread);
+            # the fingerprint sim/derive caches make cells yielding an identical
+            # layout nearly free. BEL is re-priced from its single reference buildout.
+            ref_r_dual = None
             for infra_lvl, infra_mult in INFRA_LEVELS.items():
+                cell_costs = cp.EnergizationOptCosts(
+                    structure_cost_per_mile=med["structure"] * infra_mult,
+                    energization_cost_per_mile=med["energization"] * infra_mult,
+                    substation_fixed_cost=med["substation"] * infra_mult,
+                )
                 for energy_lvl in ENERGY_LEVELS:
+                    emult = ENERGY_LEVELS[energy_lvl]
+                    cell_diesel = ref_diesel * emult["diesel"]
+                    cell_elec = ref_elec * emult["elec"]
                     scenario = f"{layout}_infra-{infra_lvl}_energy-{energy_lvl}"
-                    _do_variant("dual_mode", net_dual, r_dual, subs_dual, e_dual,
+                    render_pdf = _should_render_pdf(infra_lvl, energy_lvl)
+                    # Dual-mode buildout at THIS cost scenario (NPV-optimal, anti-
+                    # sliver min run, NO max-gap constraint).
+                    (r_dual, net_dual, e_dual, excl_dual, meta_dual, subs_dual,
+                     region_frac_dual) = _optimize_and_sim(
+                        f"{scenario}/dual", "dual_mode",
+                        dict(piece_opex_fn=build_opex_fn(
+                                 diesel_by_link, elec_by_link, cell_diesel, cell_elec),
+                             costs=cell_costs, min_energized_length_miles=5.0,
+                             warmstart=True, **common_opt))
+                    net_dual_out = _prune_unused_catenary(net_dual, excl_dual[1])
+                    if infra_lvl == "med" and energy_lvl == "med":
+                        ref_r_dual = r_dual
+                    _do_variant("dual_mode", net_dual_out, r_dual, subs_dual, e_dual,
                                 region_frac_dual, "Dual_Mode",
-                                lambda _y: _defaults.DUAL_MODE_LOCO_COST_USD, True,
+                                {"Dual_Mode": lambda _y: _defaults.DUAL_MODE_LOCO_COST_USD},
+                                render_pdf,
                                 scenario=scenario, infra_lvl=infra_lvl,
                                 infra_mult=infra_mult, energy_lvl=energy_lvl,
                                 substation_meta=meta_dual)
                     if r_bel is not None:
-                        _do_variant("bel", net_bel, r_bel, subs_bel, e_bel,
+                        _do_variant("bel", net_bel_out, r_bel, subs_bel, e_bel,
                                     region_frac_bel, "BEL",
-                                    _bel_with_cat_loco_cost, True,
+                                    {"BEL": _bel_with_cat_loco_cost,
+                                     "Diesel": lambda _y: _defaults.DIESEL_LOCO_COST_USD},
+                                    render_pdf,
                                     scenario=scenario, infra_lvl=infra_lvl,
                                     infra_mult=infra_mult, energy_lvl=energy_lvl,
                                     substation_meta=meta_bel,
                                     refuel_sessions=refuel_sessions_bel)
+
+            # Summary row: dual-mode reported at the reference (med/med) cell; BEL
+            # from its single buildout.
+            summary_row = {
+                "layout": layout, "architecture": arch,
+                "demand_level": demand_lvl, "demand_multiplier": demand_mult,
+                "dual_status": (str(ref_r_dual.status).split(".")[-1]
+                                if ref_r_dual else "failed"),
+                "dual_gap_pct": (ref_r_dual.optimality_gap_rel * 100.0
+                                 if ref_r_dual is not None
+                                 and ref_r_dual.optimality_gap_rel is not None
+                                 else None),
+                "dual_gap_abs_musd": (ref_r_dual.optimality_gap_abs
+                                      if ref_r_dual else None),
+                "dual_miles": ((ref_r_dual.energized_track_miles or 0.0)
+                               if ref_r_dual else 0.0),
+                "dual_capex_musd": ((ref_r_dual.total_cost or 0.0)
+                                    if ref_r_dual else 0.0),
+                "dual_lifecycle_musd": ((ref_r_dual.lifecycle_cost or 0.0)
+                                        if ref_r_dual else 0.0),
+                "dual_substations": (len(ref_r_dual.built_substation_ids)
+                                     if ref_r_dual else 0),
+                "bel_status": str(r_bel.status).split(".")[-1] if r_bel else "skipped",
+                "bel_gap_pct": (r_bel.optimality_gap_rel * 100.0
+                                if r_bel and r_bel.optimality_gap_rel is not None
+                                else None),
+                "bel_gap_abs_musd": r_bel.optimality_gap_abs if r_bel else None,
+                "bel_miles": (r_bel.energized_track_miles or 0.0) if r_bel else 0.0,
+                "bel_capex_musd": (r_bel.total_cost or 0.0) if r_bel else 0.0,
+                "bel_substations": len(r_bel.built_substation_ids) if r_bel else 0,
+            }
+            summary_rows.append(summary_row)
+            _write_csv(RESULTS_DIR / "energization_cost_results.csv", summary_rows)
 
             # Step complete: rebuild the combined metrics CSV and checkpoint so a
             # RESUMED run skips this whole (arch, demand) block next time.
@@ -964,19 +1297,25 @@ def run_pipeline():
         for energy_lvl in ENERGY_LEVELS:
             try:
                 die_metrics.append(_variant_metrics_df(
-                    "diesel", "Diesel", lambda _y: _defaults.DIESEL_LOCO_COST_USD, e_die,
+                    "diesel", "Diesel",
+                    {"Diesel": lambda _y: _defaults.DIESEL_LOCO_COST_USD}, e_die,
                     None, [], {GRID_REGION_EAST: 1.0}, arch="none",
                     demand_lvl=demand_lvl, demand_mult=demand_mult,
                     infra_lvl="na", infra_mult=1.0, energy_lvl=energy_lvl))
             except Exception as exc:  # noqa: BLE001 - keep pipeline alive
                 _log(f"diesel metrics FAILED {demand_lvl}/{energy_lvl}: {exc}")
-        if die_metrics:
-            m = pl.concat(die_metrics, how="diagonal_relaxed")
-            _serialize_variant_run(
-                RESULTS_DIR / f"cost_diesel_{demand_lvl}__diesel", tag="diesel",
-                net=net_diesel, result=None, metrics_df=m, sims=e_die["sims"],
-                feed_distance_miles=None, render_pdf=False,
-                plan_label=f"diesel {demand_lvl}")
+        if not die_metrics:
+            # Every energy level raised: don't checkpoint an empty step (which would
+            # let SWEEP_COMPLETE be written with the diesel baseline silently missing).
+            raise RuntimeError(
+                f"diesel metrics produced nothing for demand {demand_lvl}; "
+                "see the 'diesel metrics FAILED' log lines above")
+        m = pl.concat(die_metrics, how="diagonal_relaxed")
+        _serialize_variant_run(
+            RESULTS_DIR / f"cost_diesel_{demand_lvl}__diesel", tag="diesel",
+            net=net_diesel, result=None, metrics_df=m, sims=e_die["sims"],
+            feed_distance_miles=None, render_pdf=False,
+            plan_label=f"diesel {demand_lvl}")
         _rebuild_metrics_csv(metrics_csv)
         _mark_step_done(d_step, {"demand": demand_lvl})
 
@@ -1005,16 +1344,17 @@ SIM_N_CARS = {"Manifest_Loaded": 75, "Manifest_Empty": 75}
 # Fallback consist size for the loco-independent traffic est-time nets only
 # (``_make_corridor_ts``); the energy sims size every consist from the plan.
 SIM_N_LOCOS = 10
-# BEL variant: each plan train is rebuilt as n-1 BEL-with-pantograph units + 1
-# diesel. On energized track a BEL draws catenary power for traction first, then
-# charges its battery with leftover capacity; off catenary it runs on the battery.
+# BEL variant: each plan train is rebuilt as all BEL-with-pantograph units (100%
+# battery-electric, no diesel-assist). On energized track a BEL draws catenary
+# power for traction first, then charges its battery with leftover capacity; off
+# catenary it runs on the battery.
 # SIM_BEL_CAT_PWR_MAX_WATTS is the per-locomotive max deliverable pantograph power.
 SIM_BEL_CAT_PWR_MAX_WATTS = 5.0e6
 # Imported train consist plan (``_load_full_consist_plan``): one row per
 # locomotive assignment, collapsed to one record per train. EVERY train is
 # simulated (pre-optimization for densities, post-optimization to test the
-# buildout) with its locomotives overridden to all dual-mode (cost) or n-1 BEL +
-# 1 diesel (battery). Defaults to the milestone_1.3 Spokane-Lethbridge consist
+# buildout) with its locomotives overridden to all dual-mode (cost) or all BEL
+# (battery). Defaults to the milestone_1.3 Spokane-Lethbridge consist
 # plan sitting next to this script.
 CONSIST_PLAN_PATH = (Path(__file__).resolve().parent
                      / "train_consist_plan_spokane_lethbridge_clean.csv")
@@ -1081,7 +1421,7 @@ def _load_full_consist_plan(path=None):
     collapses it to a per-train list carrying origin/destination, train type,
     loaded/empty car counts, physical length/weight, and the number of assigned
     locomotives (consist size). The full-plan simulators then override each
-    train's locomotives to be all dual-mode or n-1 BEL + 1 diesel while preserving
+    train's locomotives to be all dual-mode or all BEL while preserving
     that consist size and the rest of the train's attributes.
     """
     global _FULL_CONSIST_PLAN
@@ -1130,14 +1470,48 @@ def _plan_summary():
     return _PLAN_SUMMARY
 
 
-def _build_locos(n_locos, traction_kind, save_interval=SIM_SAVE_INTERVAL):
+# Substation SPACING is sized from a voltage-drop model at a DESIGN train power:
+# the aggregate pantograph draw of a high-percentile consist = percentile over
+# trains of (locos/train) x per-loco pantograph rating. Consist sizes come from
+# the imported plan; a higher percentile -> heavier design train -> shorter max
+# feed distance (more/closer substations). Replaces the 10 MW library default,
+# which understated real per-consist draws now that line loss is aggregated per
+# consist rather than per locomotive.
+DESIGN_TRAIN_POWER_PERCENTILE = 95.0
+_DESIGN_TRAIN_POWER_WATTS = None
+
+
+def _design_train_power_watts():
+    """Aggregate pantograph power of the ``DESIGN_TRAIN_POWER_PERCENTILE``-th
+    percentile consist, feeding the substation-spacing voltage-drop model."""
+    global _DESIGN_TRAIN_POWER_WATTS
+    if _DESIGN_TRAIN_POWER_WATTS is None:
+        import numpy as _np
+        n_locos = [int(t["n_locos"]) for t in _load_full_consist_plan()]
+        pct_locos = float(_np.percentile(n_locos, DESIGN_TRAIN_POWER_PERCENTILE))
+        _DESIGN_TRAIN_POWER_WATTS = pct_locos * SIM_BEL_CAT_PWR_MAX_WATTS
+        _log(f"substation-spacing design train power: "
+             f"p{DESIGN_TRAIN_POWER_PERCENTILE:.0f} consist = {pct_locos:.1f} locos "
+             f"x {SIM_BEL_CAT_PWR_MAX_WATTS / 1e6:.1f} MW = "
+             f"{_DESIGN_TRAIN_POWER_WATTS / 1e6:.1f} MW")
+    return _DESIGN_TRAIN_POWER_WATTS
+
+
+def _build_locos(n_locos, traction_kind, save_interval=SIM_SAVE_INTERVAL,
+                 n_diesel_helpers=0):
     """Build one train's locomotive list with composition set by ``traction_kind``.
 
     - ``"dual_mode"`` -- all ``n_locos`` units are dual-mode (diesel + catenary),
       for the COST analysis (diesel displaced by grid electricity on wire).
-    - ``"battery_electric"`` -- ``n_locos - 1`` BEL-with-pantograph units plus ONE
-      conventional diesel (non-dual-mode "get-home" unit), for the BATTERY
-      analysis. For ``n_locos == 1`` a minimal 1 BEL + 1 diesel pair is built.
+    - ``"battery_electric"`` -- all ``n_locos`` units are BEL-with-pantograph
+      (100% battery-electric, no diesel-assist), for the BATTERY analysis. The
+      Tier-2 SOC layout guarantees the pack never depletes and simulation confirms
+      every plan train completes with SOC margin, so no get-home diesel is needed.
+      ``n_diesel_helpers`` swaps that many BELs for conventional diesel units --
+      the per-train fallback when a pure-BEL consist cannot pull a grade (see
+      ``_walk_plan_train``); the resulting mixed consist is carried on the sim.
+    - ``"conventional"`` -- all ``n_locos`` units are conventional diesel, the
+      all-diesel baseline for comparison.
 
     The consist SIZE comes from the plan; only the unit composition is set here.
     """
@@ -1147,9 +1521,9 @@ def _build_locos(n_locos, traction_kind, save_interval=SIM_SAVE_INTERVAL):
     elif traction_kind == "conventional":
         locos = [alt.Locomotive.default() for _ in range(n)]  # 100% diesel baseline
     elif traction_kind == "battery_electric":
-        n_bel = max(n - 1, 1)
-        locos = [_bel_with_cat_loco() for _ in range(n_bel)]
-        locos.append(alt.Locomotive.default())  # conventional diesel (not dual-mode)
+        k = min(max(int(n_diesel_helpers), 0), n)  # diesel helpers swapped in
+        locos = [_bel_with_cat_loco() for _ in range(n - k)]
+        locos += [alt.Locomotive.default() for _ in range(k)]
     else:
         raise ValueError(
             "traction_kind must be 'dual_mode', 'conventional', or "
@@ -1161,20 +1535,22 @@ def _build_locos(n_locos, traction_kind, save_interval=SIM_SAVE_INTERVAL):
 
 
 def _make_plan_train_ts(train, location_map, traction_kind,
-                        save_interval=SIM_SAVE_INTERVAL):
+                        save_interval=SIM_SAVE_INTERVAL, n_diesel_helpers=0):
     """Build one SpeedLimitTrainSim for a consist-plan train.
 
     Uses the train's actual plan attributes -- origin/destination, train type,
     loaded/empty car counts, and physical weight/length (rail-vehicle mass and
     length are scaled to match) -- with the locomotive composition overridden per
-    ``traction_kind`` (all dual-mode, or n-1 BEL + 1 diesel).
+    ``traction_kind`` (all dual-mode, or all BEL). ``n_diesel_helpers`` swaps that
+    many BELs for conventional diesel units (battery-electric fallback only).
     """
     rail_vehicles, freight_map = _load_rail_vehicles()
     rv_to_use, n_cars_by_type = _data_prep.configure_rail_vehicles(
         train["Train_Type"], int(train["Cars_Loaded"]), int(train["Cars_Empty"]),
         rail_vehicles, freight_map,
     )
-    locos = _build_locos(train["n_locos"], traction_kind, save_interval)
+    locos = _build_locos(train["n_locos"], traction_kind, save_interval,
+                         n_diesel_helpers=n_diesel_helpers)
     rv_to_use = _data_prep.scale_rv_mass_and_length(
         rv_to_use, n_cars_by_type, locos,
         total_mass_kilograms=train["Train_Weight_tons"] * _utils.KG_PER_TON,
@@ -1257,10 +1633,20 @@ def _traffic_est_time_nets():
 
 
 def _bel_with_cat_loco():
-    """Factory for a battery-electric locomotive equipped with a pantograph."""
-    return alt.Locomotive.default_battery_electric_loco_with_cat(
+    """Factory for a battery-electric locomotive equipped with a pantograph.
+
+    Overrides the ALTRIOS default pack (2.4 MWh) to
+    ``SIM_BEL_BATTERY_CAPACITY_KWH`` by round-tripping the locomotive through a
+    pydict (there is no direct setter for ``res.energy_capacity_joules``).
+    """
+    loco = alt.Locomotive.default_battery_electric_loco_with_cat(
         SIM_BEL_CAT_PWR_MAX_WATTS
     )
+    d = loco.to_pydict()
+    d["loco_type"]["BatteryElectricLoco"]["res"]["energy_capacity_joules"] = (
+        SIM_BEL_BATTERY_CAPACITY_KWH * 3.6e6  # kWh -> J
+    )
+    return alt.Locomotive.from_pydict(d)
 
 
 def _loco_cat_int(loco: dict):
@@ -1277,33 +1663,34 @@ def _loco_cat_int(loco: dict):
     return None
 
 
-def _energy_from_walked(ts):
-    """Extract energy totals from a single walked SpeedLimitTrainSim.
+def _extract_from_pydict(ts, d):
+    """Single pass over a walked sim's pydict: energy totals + per-link consist
+    fuel (J) + per-link pantograph draw (J).
 
-    Returns a dict with diesel fuel J, pantograph electricity-in J, catenary
-    line-loss J, grid electricity-in J (pantograph + line loss), net
-    battery-discharge J, and travel time (hr). Diesel is the built-in consist fuel
-    getter (zero for a pure battery-electric consist); grid and line-loss energy
-    come from each locomotive's catenary-interface cumulative energy history
-    (dual-mode always, battery-electric when a pantograph is fitted). Shared by the
-    full-plan aggregator ``_run_full_plan``.
+    Consolidates what used to be three separate ``ts.to_pydict()`` passes
+    (``_energy_from_walked``, ``_per_link_energy_from_sim``, and
+    ``_per_link_catenary_draw``) into one, since each full-history serialization is
+    the dominant per-sim cost. Returns ``{"totals", "diesel_j_by_link",
+    "draw_by_link"}``. ``draw_by_link`` (pantograph energy per link, any loco with a
+    catenary interface) feeds the direction-exclusion pass; ``diesel_j_by_link``
+    (consist fuel per link) feeds the first-pass densities.
     """
-    d = ts.to_pydict()
-    times = d["history"]["time_seconds"]
+    hist = d["history"]
+    times = hist["time_seconds"]
+    front = hist["link_idx_front"]
+    n = len(times)
     dts = [t2 - t1 for t1, t2 in zip(times[:-1], times[1:])]
-    # Pantograph-side electrical energy drawn by the consist and the ADDITIONAL
-    # resistive line-loss energy the substation must supply (grid-side draw =
-    # pantograph + line loss). Prefer the exact cumulative energy history; fall
-    # back to integrating power if an older build lacks the cumulative fields.
-    pantograph_j = line_loss_j = 0.0
-    battery_j = 0.0
+    fuel_w = [0.0] * n
+    panto_w = [0.0] * n
+    pantograph_j = line_loss_j = battery_j = 0.0
     for loco in d["loco_con"]["loco_vec"]:
-        ch = _loco_cat_int(loco)
-        if ch is not None:
-            ch = ch["history"]
+        lt = loco["loco_type"]
+        ci = _loco_cat_int(loco)
+        if ci is not None:
+            ch = ci["history"]
             e_in = ch.get("energy_elec_in_joules")
             e_ll = ch.get("energy_line_loss_joules")
-            if e_in:
+            if e_in:  # prefer exact cumulative energy history
                 pantograph_j += e_in[-1]
                 line_loss_j += e_ll[-1] if e_ll else 0.0
             else:  # fallback: left-rectangle integration of power over time steps
@@ -1311,18 +1698,87 @@ def _energy_from_walked(ts):
                 loss = ch.get("pwr_line_loss_watts") or [0.0] * len(grid)
                 pantograph_j += sum(p * dt for p, dt in zip(grid[:-1], dts))
                 line_loss_j += sum(p * dt for p, dt in zip(loss[:-1], dts))
+            pin = ch.get("pwr_elec_in_watts") or []
+            for i in range(min(n, len(pin))):
+                panto_w[i] += pin[i]
+        for key in ("DualModeLoco", "ConventionalLoco"):
+            sub = lt.get(key)
+            if sub is not None:
+                fh = sub["fc"]["history"].get("pwr_fuel_watts") or []
+                for i in range(min(n, len(fh))):
+                    fuel_w[i] += fh[i]
+                break
         # Net chemical energy discharged from the battery (positive) / charged
-        # (negative); makes the battery's role in the energy balance visible for
-        # the BEL analysis.
-        bel = loco["loco_type"].get("BatteryElectricLoco")
+        # (negative); makes the battery's role in the energy balance visible.
+        bel = lt.get("BatteryElectricLoco")
         if bel is not None:
             e_chem = bel["res"]["history"].get("energy_out_chemical_joules")
             if e_chem:
                 battery_j += e_chem[-1]
-    return {"diesel_j": ts.get_energy_fuel_joules(False),
-            "pantograph_elec_j": pantograph_j, "line_loss_j": line_loss_j,
-            "grid_elec_j": pantograph_j + line_loss_j, "battery_j": battery_j,
-            "travel_hr": times[-1] / 3600.0}
+    diesel_j_by_link = {}
+    draw_by_link = {}
+    for i, dt in enumerate(dts):
+        li = front[i]
+        if not li:  # skip 0 / None (off-network / pre-departure steps)
+            continue
+        if fuel_w[i]:
+            diesel_j_by_link[li] = diesel_j_by_link.get(li, 0.0) + fuel_w[i] * dt
+        if panto_w[i] > 0.0:
+            draw_by_link[li] = draw_by_link.get(li, 0.0) + panto_w[i] * dt
+    totals = {"diesel_j": ts.get_energy_fuel_joules(False),
+              "pantograph_elec_j": pantograph_j, "line_loss_j": line_loss_j,
+              "grid_elec_j": pantograph_j + line_loss_j, "battery_j": battery_j,
+              "travel_hr": times[-1] / 3600.0}
+    return {"totals": totals, "diesel_j_by_link": diesel_j_by_link,
+            "draw_by_link": draw_by_link}
+
+
+def _energy_from_walked(ts):
+    """Energy totals for one walked sim (thin wrapper over ``_extract_from_pydict``)."""
+    return _extract_from_pydict(ts, ts.to_pydict())["totals"]
+
+
+def _walk_plan_train(train, location_map, sim_network, traction_kind):
+    """Build, dispatch, and walk ONE plan train; return ``(walked_ts, n_helpers)``.
+
+    For ``battery_electric`` consists this adds a diesel-helper fallback: if a pure
+    -BEL consist fails to run -- ``make_est_times`` (or the subsequent dispatch /
+    walk) raises, typically a grade too steep for the available off-wire BEL power
+    -- one BEL is swapped for a conventional diesel unit and the run is retried,
+    escalating up to an all-diesel consist (which always runs, matching the diesel
+    baseline). The realized mixed consist is carried on the returned sim, so the
+    exact BEL/diesel composition is recoverable from
+    ``ts.to_pydict()["loco_con"]["loco_vec"]`` for downstream costing.
+
+    Non-BEL traction kinds never add helpers (``max_help == 0``); a failure there
+    propagates as before.
+    """
+    n_locos = max(int(train["n_locos"]), 1)
+    max_help = n_locos if traction_kind == "battery_electric" else 0
+    last_exc = None
+    for n_help in range(0, max_help + 1):
+        try:
+            ts = _make_plan_train_ts(train, location_map, traction_kind,
+                                     n_diesel_helpers=n_help)
+            etn, _consist = alt.make_est_times(ts, sim_network)
+            timed_path = next(iter(alt.run_dispatch(
+                sim_network, alt.SpeedLimitTrainSimVec([ts]), [etn], False, False)))
+            ts.walk_timed_path(network=sim_network, timed_path=timed_path)
+            if n_help:
+                _log(f"    train {train.get('Train_ID')}: pure-BEL run infeasible; "
+                     f"succeeded with {n_help} diesel helper(s) of {n_locos} units")
+            return ts, n_help
+        except Exception as exc:  # noqa: BLE001 - escalate to a diesel helper
+            last_exc = exc
+    raise RuntimeError(
+        f"train {train.get('Train_ID')} failed to run even with {max_help} diesel "
+        f"helper(s): {last_exc}"
+    )
+
+
+# Walk all non-BEL plan trains in one parallel rayon batch (core-side) instead of
+# one-at-a-time; set False to force the serial per-train walk.
+WALK_PARALLELIZE = True
 
 
 def _run_full_plan(sim_network, location_map, label, traction_kind,
@@ -1331,7 +1787,7 @@ def _run_full_plan(sim_network, location_map, label, traction_kind,
     ``sim_network``; return energy summed over all trains.
 
     Each train is built from its plan attributes (``_make_plan_train_ts``) with the
-    locomotive composition set by ``traction_kind`` (all dual-mode, or n-1 BEL + 1
+    locomotive composition set by ``traction_kind`` (all dual-mode, or all BEL
     diesel). Trains are dispatched independently (no meet/pass interaction), which
     matches how the per-link densities / aggregate energy are used here. The
     returned totals are for the plan's ~one-week traffic; callers annualize with
@@ -1350,35 +1806,78 @@ def _run_full_plan(sim_network, location_map, label, traction_kind,
     n = len(plan)
     totals = {"diesel_j": 0.0, "pantograph_elec_j": 0.0, "line_loss_j": 0.0,
               "battery_j": 0.0, "travel_hr": 0.0}
-    diesel_by_link, elec_by_link = {}, {}
+    diesel_by_link, elec_by_link, draw_by_link = {}, {}, {}
     sims = []
+    trains_with_helpers = 0
+    total_diesel_helpers = 0
     _log(f"  {label}: simulating {n} plan trains ({traction_kind}) ...")
     t0 = time.perf_counter()
-    for k, train in enumerate(plan, 1):
-        ts = _make_plan_train_ts(train, location_map, traction_kind)
-        etn, _consist = alt.make_est_times(ts, sim_network)
-        timed_path = next(iter(alt.run_dispatch(
-            sim_network, alt.SpeedLimitTrainSimVec([ts]), [etn], False, False)))
-        ts.walk_timed_path(network=sim_network, timed_path=timed_path)
-        e = _energy_from_walked(ts)
+
+    def _accumulate(ts):
+        ex = _extract_from_pydict(ts, ts.to_pydict())
         for key in totals:
-            totals[key] += e[key]
+            totals[key] += ex["totals"][key]
+        # Per-link pantograph draw (any loco) always, so the direction-exclusion
+        # pass never has to re-serialize the sims.
+        for li, v in ex["draw_by_link"].items():
+            draw_by_link[li] = draw_by_link.get(li, 0.0) + v
         if want_per_link:
-            dbl, ebl = _per_link_energy_from_sim(ts)
-            for li, v in dbl.items():
+            for li, v in ex["diesel_j_by_link"].items():
                 diesel_by_link[li] = diesel_by_link.get(li, 0.0) + v
-            for li, v in ebl.items():
+            for li, v in ex["draw_by_link"].items():
                 elec_by_link[li] = elec_by_link.get(li, 0.0) + v
         if keep_sims:
             sims.append(ts)
-        if k % 20 == 0 or k == n:
-            _log(f"    {label}: {k}/{n} trains ({time.perf_counter() - t0:.0f}s)")
+
+    # Non-BEL consists have no diesel-helper escalation (a walk failure is fatal),
+    # so build + dispatch serially, then walk EVERY train in one parallel rayon
+    # batch -- the dominant cost. BEL keeps the per-train retry path.
+    if WALK_PARALLELIZE and traction_kind in ("dual_mode", "conventional"):
+        built = []
+        for k, train in enumerate(plan, 1):
+            ts = _make_plan_train_ts(train, location_map, traction_kind)
+            etn, _consist = alt.make_est_times(ts, sim_network)
+            timed_path = next(iter(alt.run_dispatch(
+                sim_network, alt.SpeedLimitTrainSimVec([ts]), [etn], False, False)))
+            built.append((ts, timed_path))
+            if k % 20 == 0 or k == n:
+                _log(f"    {label}: dispatched {k}/{n} "
+                     f"({time.perf_counter() - t0:.0f}s)")
+        vec = alt.SpeedLimitTrainSimVec([ts for ts, _ in built])
+        timed = [tp for _, tp in built]
+        del built
+        vec.walk_timed_paths(sim_network, timed, True)
+        del timed
+        _log(f"    {label}: parallel-walked {n} trains "
+             f"({time.perf_counter() - t0:.0f}s)")
+        walked = vec.tolist()
+        del vec
+        for ts in walked:
+            _accumulate(ts)
+    else:
+        for k, train in enumerate(plan, 1):
+            ts, n_help = _walk_plan_train(train, location_map, sim_network,
+                                          traction_kind)
+            if n_help:
+                trains_with_helpers += 1
+                total_diesel_helpers += n_help
+            _accumulate(ts)
+            if k % 20 == 0 or k == n:
+                _log(f"    {label}: {k}/{n} trains "
+                     f"({time.perf_counter() - t0:.0f}s)")
+
     totals["grid_elec_j"] = totals["pantograph_elec_j"] + totals["line_loss_j"]
     _log(f"  {label} TOTAL over {n} trains: diesel {totals['diesel_j']/1e9:.1f} GJ, "
          f"grid {totals['grid_elec_j']/1e9:.1f} GJ, "
          f"battery {totals['battery_j']/1e9:.1f} GJ")
+    if trains_with_helpers:
+        _log(f"  {label}: {trains_with_helpers}/{n} trains required a diesel helper "
+             f"({total_diesel_helpers} helper units total)")
     return {**totals, "sims": sims, "n_trains": n,
-            "diesel_j_by_link": diesel_by_link, "elec_j_by_link": elec_by_link}
+            "diesel_j_by_link": diesel_by_link, "elec_j_by_link": elec_by_link,
+            "draw_by_link": draw_by_link,
+            "trains_with_helpers": trains_with_helpers,
+            "total_diesel_helpers": total_diesel_helpers}
 
 
 def _per_link_energy_from_sim(ts):
@@ -1416,6 +1915,98 @@ def _per_link_energy_from_sim(ts):
     return diesel_j_by_link, elec_j_by_link
 
 
+def _per_link_catenary_draw(sims) -> dict:
+    """Per-link catenary (pantograph) energy drawn (J), summed over all trains.
+
+    Works for any loco type (reads each loco's ``cat_int`` pantograph power). A link
+    that was energized but drew ~0 over the whole plan is never used -- e.g. a
+    parallel track / direction whose trains stay on battery -- so its marginal wire
+    cost can be excluded on the back-end (see ``_excluded_energization_miles``).
+    """
+    draw: dict = {}
+    for ts in sims:
+        d = ts.to_pydict()
+        hist = d["history"]
+        front = hist["link_idx_front"]
+        times = hist["time_seconds"]
+        n = len(times)
+        dts = [t2 - t1 for t1, t2 in zip(times[:-1], times[1:])]
+        panto_w = [0.0] * n
+        for loco in d["loco_con"]["loco_vec"]:
+            ci = _loco_cat_int(loco)
+            if ci is None:
+                continue
+            ph = ci["history"].get("pwr_elec_in_watts") or []
+            for i in range(min(n, len(ph))):
+                panto_w[i] += ph[i]
+        for i, dt in enumerate(dts):
+            li = front[i]
+            if not li:
+                continue
+            if panto_w[i] > 0.0:
+                draw[li] = draw.get(li, 0.0) + panto_w[i] * dt
+    return draw
+
+
+def _excluded_energization_miles(result, sims, draw_by_link=None, threshold_j=1.0e6):
+    """Track-miles of energized wire that NEVER drew catenary over the whole plan.
+
+    The optimizer wires every track at an energized site (whole-site, full cost);
+    this back-end pass finds energized links whose plan-wide catenary draw is below
+    ``threshold_j`` (a parallel track/direction the fleet never charges from) so the
+    STUDY can subtract that marginal wire cost. Structure (shared per site) and
+    substations are unaffected. Returns ``(excluded_miles, excluded_link_idxs)``.
+
+    ``draw_by_link`` (precomputed during the sim walk) is used when supplied to
+    avoid re-serializing every sim; otherwise it is derived here.
+    """
+    if result is None or (not sims and not draw_by_link):
+        return 0.0, []
+    draw = draw_by_link if draw_by_link is not None else _per_link_catenary_draw(sims)
+    intervals = result.energized_link_intervals or {}
+    excl_miles = 0.0
+    excl_links = []
+    for li, ivs in intervals.items():
+        if draw.get(li, 0.0) <= threshold_j:
+            excl_miles += sum((b - a) for a, b in ivs) * _utils.MI_PER_M
+            excl_links.append(li)
+    return excl_miles, excl_links
+
+
+def _prune_unused_catenary(net, excl_links):
+    """Return a network copy with catenary removed on ``excl_links``.
+
+    The optimizer wires every track at an energized site (whole-site); this strips
+    ``cat_power_limits`` from links the fleet never charges from so the serialized
+    network file reflects the AS-PURCHASED catenary, consistent with the back-end
+    direction-exclusion cost subtraction. ``net`` is returned unchanged when there
+    is nothing to prune.
+    """
+    if not excl_links:
+        return net
+    excl = set(excl_links)
+    d = net.to_pydict()
+    for link in d[1][1:]:
+        if link.get("idx_curr") in excl:
+            link["cat_power_limits"] = []
+    return alt.Network.from_pydict(d)
+
+
+def _net_energized_track_miles(net) -> float:
+    """Total energized track-miles actually present in a network's cat_power_limits.
+
+    The single source of truth for AS-PURCHASED energization -- reads the network
+    object directly, so a pruned (direction-excluded) network reports its reduced
+    wire without any separate bookkeeping.
+    """
+    total_m = 0.0
+    for L in net.to_pydict()[1][1:]:
+        for c in (L.get("cat_power_limits") or []):
+            total_m += (c.get("offset_end_meters", 0.0)
+                        - c.get("offset_start_meters", 0.0))
+    return total_m * _utils.MI_PER_M
+
+
 # ---------------------------------------------------------------------------
 # Walked-sim disk cache: the ~full-plan sim is the most expensive step, so each
 # bundle is serialized to ``_CACHE_DIR`` the instant it finishes (keyed by
@@ -1432,13 +2023,17 @@ def _aggregate_walked_energy(sims: list) -> dict:
     dispatch), so a reloaded bundle matches a freshly simulated one."""
     totals = {"diesel_j": 0.0, "pantograph_elec_j": 0.0, "line_loss_j": 0.0,
               "battery_j": 0.0, "travel_hr": 0.0}
+    draw_by_link = {}
     for ts in sims:
-        e = _energy_from_walked(ts)
+        ex = _extract_from_pydict(ts, ts.to_pydict())
         for k in totals:
-            totals[k] += e[k]
+            totals[k] += ex["totals"][k]
+        for li, v in ex["draw_by_link"].items():
+            draw_by_link[li] = draw_by_link.get(li, 0.0) + v
     totals["grid_elec_j"] = totals["pantograph_elec_j"] + totals["line_loss_j"]
     return {**totals, "sims": list(sims), "n_trains": len(sims),
-            "diesel_j_by_link": {}, "elec_j_by_link": {}}
+            "diesel_j_by_link": {}, "elec_j_by_link": {},
+            "draw_by_link": draw_by_link}
 
 
 def _load_sim_bundle(traction_kind: str, fingerprint: str):
@@ -1643,16 +2238,18 @@ def _bel_with_cat_loco_cost(year: int) -> float:
 
 
 def _infrastructure_costs_df(plan_result, built_subs, arch=ITEMIZED_ARCH,
-                             infra_mult=1.0) -> pl.DataFrame:
+                             infra_mult=1.0, net_purchased=None) -> pl.DataFrame:
     """Per-asset catenary infrastructure capital ($) for the metrics rollover,
     using ``arch``'s medium costs scaled by ``infra_mult`` (the infrastructure-cost
     sweep level): one aggregate structure asset, one aggregate energization asset,
     and one row per built (non-existing) substation.
 
-    Structure is charged per corridor route-mile and energization per track-mile;
-    on this single-track corridor both use the energized track-miles. This is the
-    illustrative decomposition documented in
-    docs/energization-voltage-and-capacity.md, not a costing study.
+    Structure is charged per corridor route-mile (shared per site) and energization
+    per track-mile. When ``net_purchased`` is given, the energization (marginal
+    wire) miles are read straight from that network's ``cat_power_limits`` -- i.e.
+    the AS-PURCHASED wire after direction exclusion strips catenary the fleet never
+    charges from -- while structure keeps the full optimizer mileage (masts serve
+    the site regardless of direction). ``None`` uses the full mileage for both.
 
     The ``Distance_Miles`` / ``Distance_Units`` columns feed the metrics
     calculator's ``Distance_Energized`` metric: energization carries the built
@@ -1660,17 +2257,19 @@ def _infrastructure_costs_df(plan_result, built_subs, arch=ITEMIZED_ARCH,
     that is not stored on the plan result, so it is left null here.
     """
     med = ARCH_MEDIUM_COSTS[arch]
-    miles = plan_result.energized_track_miles or 0.0
+    struct_miles = plan_result.energized_track_miles or 0.0
+    energ_miles = (_net_energized_track_miles(net_purchased)
+                   if net_purchased is not None else struct_miles)
     n_subs = sum(1 for s in built_subs if not getattr(s, "existing", False))
     rows = [
         {"Infrastructure_Type": "Catenary_Structure",
-         "Cost_USD": med["structure"] * infra_mult * USD_PER_MUSD * miles,
+         "Cost_USD": med["structure"] * infra_mult * USD_PER_MUSD * struct_miles,
          "Lifespan_Years": STRUCTURE_LIFESPAN_YEARS,
          "Distance_Miles": None, "Distance_Units": None},
         {"Infrastructure_Type": "Catenary_Energization",
-         "Cost_USD": med["energization"] * infra_mult * USD_PER_MUSD * miles,
+         "Cost_USD": med["energization"] * infra_mult * USD_PER_MUSD * energ_miles,
          "Lifespan_Years": ENERGIZATION_LIFESPAN_YEARS,
-         "Distance_Miles": miles, "Distance_Units": "track-miles"},
+         "Distance_Miles": energ_miles, "Distance_Units": "track-miles"},
     ]
     rows += [
         {"Infrastructure_Type": "Substation",
@@ -1682,29 +2281,60 @@ def _infrastructure_costs_df(plan_result, built_subs, arch=ITEMIZED_ARCH,
     return pl.DataFrame(rows)
 
 
-def _build_fleet_tables(sims_list, loco_type, loco_cost):
+def _classify_loco_type(loco_dict) -> str:
+    """Canonical fleet-costing label for one locomotive from its ``to_pydict``
+    ``loco_type`` variant: ``"BEL"`` (battery-electric, incl. pantograph-equipped),
+    ``"Dual_Mode"`` (diesel + catenary), or ``"Diesel"`` (conventional). These match
+    the keys of the per-variant ``cost_fns`` maps so mixed consists (e.g. a BEL
+    train carrying a diesel helper) are priced and counted per actual unit."""
+    lt = loco_dict.get("loco_type", {})
+    if "BatteryElectricLoco" in lt:
+        return "BEL"
+    if "DualModeLoco" in lt:
+        return "Dual_Mode"
+    return "Diesel"  # ConventionalLoco
+
+
+def _price_pool_for_year(pool, cost_fns, year):
+    """Re-price a ``loco_pool`` for one rollout ``year``, per ``Locomotive_Type``.
+
+    ``cost_fns`` maps each canonical label (see :func:`_classify_loco_type`) to a
+    ``year -> USD`` cost function, so each unit is priced at its year-of-purchase
+    cost by TYPE -- exact for mixed BEL + diesel-helper consists.
+    """
+    price_map = pl.DataFrame({
+        "Locomotive_Type": list(cost_fns.keys()),
+        "Cost_USD": [float(fn(year)) for fn in cost_fns.values()],
+    })
+    return pool.drop("Cost_USD").join(price_map, on="Locomotive_Type", how="left")
+
+
+def _build_fleet_tables(sims_list, cost_fns):
     """Build the ``loco_pool`` + ``consist_plan`` tables spanning the full plan.
 
     Enumerates every locomotive in every plan train (``sims_list`` order == the
     ``SpeedLimitTrainSimVec`` index) so the metrics calculator can attribute
-    purchases and energy per train. As an approximation the whole variant fleet is
-    priced/typed as ``loco_type`` (for the BEL variant this also prices the single
-    per-train diesel unit as BEL); the itemized report is illustrative, not a
-    costing study.
+    purchases and energy per train. Each unit is typed by its ACTUAL locomotive
+    variant (:func:`_classify_loco_type`) and priced from ``cost_fns`` at the
+    start-year cost, so a mixed BEL consist carrying a diesel helper contributes a
+    correctly-typed, correctly-priced diesel unit rather than an approximated BEL.
+    Per-year re-pricing over the rollout is applied later by
+    :func:`_price_pool_for_year`.
     """
     plan = _load_full_consist_plan()
     pool_rows, cp_rows = [], []
     loco_id = 0
     for idx, ts in enumerate(sims_list):
-        n_locos = len(ts.to_pydict()["loco_con"]["loco_vec"])
+        loco_vec = ts.to_pydict()["loco_con"]["loco_vec"]
         train = plan[idx] if idx < len(plan) else {}
         train_id = str(train.get("Train_ID", idx))
         train_type = train.get("Train_Type", "Manifest")
-        for _ in range(n_locos):
+        for loco in loco_vec:
+            label = _classify_loco_type(loco)
             loco_id += 1
             pool_rows.append({
-                "Locomotive_ID": loco_id, "Locomotive_Type": loco_type,
-                "Cost_USD": float(loco_cost),
+                "Locomotive_ID": loco_id, "Locomotive_Type": label,
+                "Cost_USD": float(cost_fns[label](METRICS_START_YEAR)),
                 "Lifespan_Years": _defaults.LOCO_LIFESPAN,
             })
             cp_rows.append({
@@ -1761,7 +2391,6 @@ def _year_scenario(scenario_year, sims, loco_pool, consist_plan, region_elec_j,
 # metric_calculator.main default list), and sim_manager_demo; metrics.main drops
 # any that evaluate to null (e.g. Count_Refuelers when none are modeled here).
 _ANNUAL_METRICS = [
-    ("Meet_Pass_Events", "count"),
     ("Freight_Moved", "million tonne-mi"),
     ("Freight_Moved", "million tonne-km"),
     ("Freight_Moved", "car-miles"),
@@ -1777,9 +2406,10 @@ _ANNUAL_METRICS = [
 ]
 
 
-def _variant_metrics_df(tag, loco_type, loco_cost_fn, energy, plan_result, built_subs,
+def _variant_metrics_df(tag, loco_type, cost_fns, energy, plan_result, built_subs,
                         region_frac, *, arch, demand_lvl, demand_mult, infra_lvl,
-                        infra_mult, energy_lvl):
+                        infra_mult, energy_lvl, net_purchased=None,
+                        stationary_sessions=None):
     """Run the metrics calculator for ONE simulated variant at ONE economic point
     (infra cost x energy price); return its tidy long-format metrics cross-joined
     with a single-row provenance frame.
@@ -1789,6 +2419,15 @@ def _variant_metrics_df(tag, loco_type, loco_cost_fn, energy, plan_result, built
     sweep, so infra/energy never re-run the simulation. Catenary variants pass their
     infrastructure (scaled by ``infra_mult``) + built substations; the diesel
     baseline (``tag == "diesel"``) has no infrastructure.
+    ``net_purchased`` is the AS-PURCHASED (direction-excluded) network; the
+    energization cost is read straight from its ``cat_power_limits``, so no separate
+    exclusion bookkeeping is threaded in.
+
+    ``cost_fns`` maps each canonical locomotive label (see
+    :func:`_classify_loco_type`) to a ``year -> USD`` cost function; each unit is
+    priced by its ACTUAL type, so a BEL consist carrying a diesel helper is costed
+    exactly (BEL units at the BEL price, the helper at the diesel price).
+    ``loco_type`` is the representative label used for provenance reporting.
     """
     mult = ENERGY_LEVELS[energy_lvl]
     ps = _plan_summary()
@@ -1797,27 +2436,38 @@ def _variant_metrics_df(tag, loco_type, loco_cost_fn, energy, plan_result, built
         [GRID_REGION_WEST, GRID_REGION_EAST], rollout_years, CAMBIUM_SCENARIO)
     infra_df = (None if tag == "diesel"
                 else _infrastructure_costs_df(plan_result, built_subs, arch,
-                                              infra_mult))
+                                              infra_mult, net_purchased=net_purchased))
+    full_miles = (plan_result.energized_track_miles or 0.0
+                  if plan_result is not None else 0.0)
+    purchased_miles = (_net_energized_track_miles(net_purchased)
+                       if net_purchased is not None else full_miles)
+    excl_miles = max(full_miles - purchased_miles, 0.0)
     # Full plan == one week of traffic; the demand multiplier scales it by
     # shortening the represented window (annualization = 365.25 / simulation_days),
     # scaling sim diesel and refuel electricity together.
     simulation_days = PLAN_DAYS / max(demand_mult, 1e-9)
     n_locos = int(round(ps["total_locos"] * demand_mult))
-    loco_cost_ref = float(loco_cost_fn(METRICS_START_YEAR))  # year-1 purchase cost
+    loco_cost_ref = float(cost_fns[loco_type](METRICS_START_YEAR))  # representative
     _log(f"METRICS [{tag}] {arch}/{demand_lvl}/infra-{infra_lvl}/energy-{energy_lvl}: "
          f"{METRICS_ROLLOUT_YEARS}-yr rollout of {ps['n_trains']} trains "
          f"(loco ${loco_cost_ref/1e6:.2f}M @{METRICS_START_YEAR})")
     sims = alt.SpeedLimitTrainSimVec(list(energy["sims"]))
     # Consist plan is year-invariant; the loco pool's Cost_USD is set per rollout
-    # year so purchases are priced at their year of purchase in the DCF rollover.
-    loco_pool_base, consist_plan = _build_fleet_tables(
-        energy["sims"], loco_type, loco_cost_ref)
-    region_elec_j = _split_electricity(energy, region_frac)
+    # year (by locomotive TYPE) so purchases are priced at their year of purchase in
+    # the DCF rollover -- exact for mixed BEL + diesel-helper consists.
+    loco_pool_base, consist_plan = _build_fleet_tables(energy["sims"], cost_fns)
+    # Grid-side stationary (terminal) charging energy, week total, so the metrics
+    # calculator sees it in the electricity total and reports it as
+    # Electricity_Stationary_Charging (total grid electricity minus catenary draw).
+    stationary_j = 0.0
+    if stationary_sessions is not None and stationary_sessions.height > 0:
+        stationary_j = float(
+            stationary_sessions.get_column("Refuel_Energy_J").sum() or 0.0)
+    region_elec_j = _split_electricity(energy, region_frac, stationary_j)
     scenarios = [
         _year_scenario(
             year, sims,
-            loco_pool_base.with_columns(
-                pl.lit(float(loco_cost_fn(year))).alias("Cost_USD")),
+            _price_pool_for_year(loco_pool_base, cost_fns, year),
             consist_plan, region_elec_j, energy_lvl, emissions_factors,
             simulation_days, infra_df)
         for year in rollout_years
@@ -1845,6 +2495,17 @@ def _variant_metrics_df(tag, loco_type, loco_cost_fn, energy, plan_result, built
         "n_locos": n_locos,
         "energized_track_miles": (plan_result.energized_track_miles or 0.0)
         if plan_result is not None else 0.0,
+        "excluded_direction_miles": excl_miles,
+        # Diesel (arch "none") has no catenary, hence no energization to exclude.
+        "direction_exclusion_savings_musd": (
+            ARCH_MEDIUM_COSTS[arch]["energization"] * infra_mult * excl_miles
+            if arch in ARCH_MEDIUM_COSTS else 0.0),
+        "optimality_gap_pct": (plan_result.optimality_gap_rel * 100.0
+                               if plan_result is not None
+                               and plan_result.optimality_gap_rel is not None
+                               else None),
+        "solve_status": (str(plan_result.status).split(".")[-1]
+                         if plan_result is not None else None),
         "num_substations": len(built_subs),
     }])
     return metrics.join(params, how="cross")
@@ -1916,6 +2577,13 @@ def _opt_outputs_df(result) -> pl.DataFrame:
         "offset_end_meters": pl.Float64, "miles": pl.Float64})
     summary = pl.DataFrame([{
         "status": str(result.status).split(".")[-1] if result is not None else "none",
+        "optimality_gap_abs_musd": (result.optimality_gap_abs
+                                    if result is not None else None),
+        "optimality_gap_pct": (result.optimality_gap_rel * 100.0
+                               if result is not None
+                               and result.optimality_gap_rel is not None else None),
+        "objective_bound_musd": (result.objective_bound
+                                 if result is not None else None),
         "energized_track_miles": (result.energized_track_miles or 0.0)
         if result is not None else 0.0,
         "total_cost_musd": (result.total_cost or 0.0) if result is not None else 0.0,

@@ -111,7 +111,9 @@ impl CatenaryInterface {
         // Resistive line loss in the catenary between the feeding substation and
         // the pantograph: `loss = k * pwr_elec_in^2`. This is additional power
         // the substation must supply; it does not change the train energy
-        // balance and is recorded purely for accounting.
+        // balance and is recorded purely for accounting. NOTE: for a multi-loco
+        // consist this per-loco term is re-aggregated to the shared-conductor
+        // loss `k * (sum_i P_i)^2` in `Consist::set_aggregate_cat_line_loss`.
         let p_watts = self.state.pwr_elec_in.get_fresh(|| format_dbg!())?.get::<si::watt>();
         self.state.pwr_line_loss.update(
             uc::W * (self.loss_factor * p_watts * p_watts),

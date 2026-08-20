@@ -274,6 +274,88 @@ def max_gap_miles_from_battery(
     return usable_energy_kwh * (1.0 - reserve_fraction) / avg_consumption_kwh_per_mile
 
 
+def max_gap_kwh_from_battery(
+    usable_energy_kwh: float,
+    *,
+    reserve_fraction: float = 0.0,
+) -> float:
+    """Usable battery traction energy (kWh) for ``max_energized_gap_kwh``.
+
+    The ENERGY-based analogue of :func:`max_gap_miles_from_battery`: instead of
+    pre-dividing by an average per-mile consumption, it returns the raw kWh a BEL
+    may spend between charges, ``usable_energy_kwh * (1 - reserve_fraction)``. The
+    optimizer then bounds each unelectrified corridor window by its per-link drain
+    density (``gap_energy_kwh_per_mile_by_link``) instead of a flat distance, so
+    the wire is required where the battery actually depletes fastest.
+
+    Parameters
+    ----------
+    usable_energy_kwh : float
+        Battery energy (kWh) available for traction between charges.
+    reserve_fraction : float, default 0.0
+        Fraction withheld as reserve (0 <= f < 1).
+    """
+    if usable_energy_kwh < 0.0:
+        raise ValueError("usable_energy_kwh must be non-negative.")
+    if not (0.0 <= reserve_fraction < 1.0):
+        raise ValueError("reserve_fraction must be in [0, 1).")
+    return usable_energy_kwh * (1.0 - reserve_fraction)
+
+
+def min_recharge_miles_from_battery(
+    usable_energy_kwh: float,
+    net_charge_kwh_per_mile: float,
+    *,
+    recharge_fraction: float = 1.0,
+    reserve_fraction: float = 0.0,
+) -> float:
+    """Minimum energized-run length (miles) to recharge the pack (Tier 0 recharge).
+
+    Sizes ``min_energized_length_miles`` from battery/charge physics so an
+    energized run is long enough to actually restore charge, replacing the
+    optimizer's optimistic "any energized segment fully recharges" assumption with
+    a physically sized minimum run. Under a roughly constant net charge rate
+    (charge power minus draw, per corridor-mile) the run needed to bank a fraction
+    ``recharge_fraction`` of the usable pack is
+
+    .. math::
+
+        L_\\text{recharge} = \\frac{E_\\text{usable}(1 - \\text{reserve})\\,
+        \\text{recharge\\_fraction}}{c_\\text{net}},
+
+    where ``c_net`` is the net charge in kWh per mile. This is the Tier-0 recharge
+    formulation: it keeps the minimum-run constraint measured in CORRIDOR MILES
+    (its matrix is unchanged), so it is structurally free; the "energy" only sizes
+    the threshold. Take the max with any anti-sliver minimum run.
+
+    Parameters
+    ----------
+    usable_energy_kwh : float
+        Usable (not nameplate) battery capacity (kWh).
+    net_charge_kwh_per_mile : float
+        Net charge delivered per energized corridor-mile (catenary charge power
+        minus traction draw, converted to energy per mile at line speed). Must be
+        positive.
+    recharge_fraction : float, default 1.0
+        Fraction of the usable pack the run must restore (e.g. 1.0 to refill a
+        fully depleted pack).
+    reserve_fraction : float, default 0.0
+        Fraction of the pack withheld as reserve (0 <= f < 1).
+    """
+    if net_charge_kwh_per_mile <= 0.0:
+        raise ValueError("net_charge_kwh_per_mile must be positive.")
+    if usable_energy_kwh < 0.0:
+        raise ValueError("usable_energy_kwh must be non-negative.")
+    if not (0.0 <= reserve_fraction < 1.0):
+        raise ValueError("reserve_fraction must be in [0, 1).")
+    if recharge_fraction < 0.0:
+        raise ValueError("recharge_fraction must be non-negative.")
+    return (
+        usable_energy_kwh * (1.0 - reserve_fraction) * recharge_fraction
+        / net_charge_kwh_per_mile
+    )
+
+
 def suggest_optimization_inputs(
     config: Union[str, ElectrificationConfig],
     *,
@@ -482,10 +564,17 @@ def energize_optimized(
     substation_feed_distance_miles: float = 20.0,
     require_high_grade_coverage: bool = False,
     est_time_nets: Optional[List[alt.EstTimeNet]] = None,
+    excluded_link_idxs: Optional[List[int]] = None,
     structure_spacing_miles: Optional[float] = None,
     corridor_width_miles: float = 0.05,
+    electrify_whole_site: bool = False,
     min_energized_length_miles: Optional[float] = None,
     max_energized_gap_miles: Optional[float] = None,
+    max_energized_gap_kwh: Optional[float] = None,
+    gap_energy_kwh_per_mile_by_link: Optional[Dict[int, float]] = None,
+    charge_energy_kwh_per_mile_by_link: Optional[Dict[int, float]] = None,
+    regen_energy_kwh_per_mile_by_link: Optional[Dict[int, float]] = None,
+    battery_soc_state_model: bool = False,
     objective: str = "max_benefit",
     economics: Optional["EconomicParameters"] = None,
     piece_opex_fn: Optional[Callable[["PieceBenefitContext"], float]] = None,
@@ -494,6 +583,7 @@ def energize_optimized(
     mip_gap: Optional[float] = None,
     tee: bool = False,
     solver_threads: Optional[int] = None,
+    warmstart: bool = False,
 ) -> "EnergizationPlacementResult":
     """
     Optimize energization placement with a MILP, prioritizing high-grade track.
@@ -545,6 +635,13 @@ def energize_optimized(
     corridor_width_miles : float, default 0.05
         Lateral distance (miles) within which parallel-track pieces are clustered
         into one shared structure site (structure-site mode only).
+    electrify_whole_site : bool, default False
+        If True, use the WHOLE-SITE formulation: energizing a structure site wires
+        every track piece at it (``x == s``), collapsing the per-piece binaries
+        onto the site indicators. Far fewer integer variables and a stronger LP
+        relaxation, so the optimality gap closes much faster; the trade-off is no
+        partial-cross-section electrification (parallel tracks/sidings at a site
+        are wired together).
     min_energized_length_miles : float, optional
         Minimum contiguous energized run length in CORRIDOR miles (parallel
         tracks/sidings in a site count once). Prevents energizing tiny isolated
@@ -559,6 +656,35 @@ def energize_optimized(
         electrification (a feasibility pre-check raises ``ValueError`` if a gap
         cannot be closed by any reachable substation). Requires structure-site
         mode with a contiguous mainline path; ``None`` (default) disables it.
+    max_energized_gap_kwh : float, optional
+        ENERGY-based range limit (kWh): the usable battery traction energy a BEL
+        may spend between charges (see :func:`max_gap_kwh_from_battery`). When set,
+        the gap constraint bounds each unelectrified window's cumulative DRAIN
+        energy (from ``gap_energy_kwh_per_mile_by_link``) instead of its distance,
+        so wire is required where the pack depletes fastest. Takes precedence over
+        ``max_energized_gap_miles``. ``None`` (default) disables it.
+    gap_energy_kwh_per_mile_by_link : dict[int, float], optional
+        Per-link single-locomotive traction DRAIN per corridor-mile (kWh/mi).
+        Required when ``max_energized_gap_kwh`` is set; also weights the
+        energy-priority objective term.
+    charge_energy_kwh_per_mile_by_link : dict[int, float], optional
+        Per-link NET CHARGE delivered per energized corridor-mile (kWh/mi). When
+        supplied with ``max_energized_gap_kwh`` this enables the charge-credited
+        (recharge Tier 1) gap family, which no longer assumes a single energized
+        bucket fully recharges the pack. ``None`` (default) uses the simpler
+        ``sum u >= 1`` energy-gap family.
+    regen_energy_kwh_per_mile_by_link : dict[int, float], optional
+        Per-link regenerative-braking recovery per corridor-mile (kWh/mi). When
+        supplied, the gap/SOC constraints use NET drain (``drain - regen``) so
+        regen extends the modeled battery range. ``None`` (default) treats regen
+        as zero.
+    battery_soc_state_model : bool, default False
+        If True, use the explicit SOC-recursion (Tier 2) range model instead of the
+        covering gap families: a continuous per-bucket state of charge with a
+        curtailment slack (linear, no big-M) that tracks charge/drain/regen exactly
+        and forbids depletion. Faithful (subsumes the covering gaps) but heavier
+        (continuous state, not TU). Requires ``max_energized_gap_kwh`` +
+        ``gap_energy_kwh_per_mile_by_link``.
     objective : str, default "max_benefit"
         ``"max_benefit"`` maximizes priority-weighted (grade) benefit subject to
         ``budget`` -- the rule-based formulation. ``"min_cost"`` instead minimizes
@@ -585,6 +711,11 @@ def energize_optimized(
     solver_threads : int, optional
         Cap the HiGHS solver's parallelism to this many threads. ``None``
         (default) uses the solver default (all available cores).
+    warmstart : bool, default False
+        Seed a feasible fully-wired MIP start so HiGHS always has an incumbent
+        (useful for the heavy Tier-1/SOC models). A no-incumbent time-limit hit
+        returns a result carrying only ``status`` (``network`` is ``None``) rather
+        than raising.
 
     Returns
     -------
@@ -606,10 +737,18 @@ def energize_optimized(
         substation_feed_distance_miles=substation_feed_distance_miles,
         require_high_grade_coverage=require_high_grade_coverage,
         est_time_nets=list(est_time_nets) if est_time_nets is not None else [],
+        excluded_link_idxs=(list(excluded_link_idxs)
+                            if excluded_link_idxs is not None else None),
         structure_spacing_miles=structure_spacing_miles,
         corridor_width_miles=corridor_width_miles,
+        electrify_whole_site=electrify_whole_site,
         min_energized_length_miles=min_energized_length_miles,
         max_energized_gap_miles=max_energized_gap_miles,
+        max_energized_gap_kwh=max_energized_gap_kwh,
+        gap_energy_kwh_per_mile_by_link=gap_energy_kwh_per_mile_by_link,
+        charge_energy_kwh_per_mile_by_link=charge_energy_kwh_per_mile_by_link,
+        regen_energy_kwh_per_mile_by_link=regen_energy_kwh_per_mile_by_link,
+        battery_soc_state_model=battery_soc_state_model,
         objective=objective,
         economics=economics,
         piece_opex_fn=piece_opex_fn,
@@ -621,6 +760,7 @@ def energize_optimized(
         mip_gap=mip_gap,
         tee=tee,
         solver_threads=solver_threads,
+        warmstart=warmstart,
     )
 
 
@@ -682,6 +822,68 @@ def make_piece_opex_fn(
         gallons = gal_per_mi * ctx.length_miles
         kwh = kwh_per_mi * ctx.length_miles
         return electricity_price_usd_per_kwh * kwh - diesel_price_usd_per_gallon * gallons
+
+    return _opex
+
+
+def make_bel_piece_opex_fn(
+    *,
+    traction_kwh_per_track_mile_by_link: Dict[int, float],
+    electricity_price_usd_per_kwh: float,
+    battery_roundtrip_efficiency: float,
+    default_traction_kwh_per_track_mile: float = 0.0,
+) -> Callable[["PieceBenefitContext"], float]:
+    """Per-piece annual operating-cost function for a BATTERY-ELECTRIC fleet.
+
+    A BEL never burns mainline diesel, so the dual-mode "electricity minus diesel
+    displaced" opex (:func:`make_piece_opex_fn`) does not apply. To first order the
+    total grid energy a BEL draws is fixed by the route's traction demand
+    regardless of WHERE the wire hangs, so the electricity bill is nearly
+    layout-independent and the BEL problem is capital-dominated. The one
+    layout-dependent operating cost is the battery **round-trip loss** on the
+    energy that must pass through the pack: energizing a piece lets its traction
+    energy be drawn straight from the wire instead of via the battery, avoiding
+    that loss. The per-piece opex is therefore a SAVING (negative):
+
+    ``opex_p = - price_e * (1/eta_rt - 1) * E_p``
+
+    where ``E_p`` = annual traction kWh on the piece (per-track-mile density *
+    ``length_miles``). Minimizing ``capital + PVAF * sum_p opex_p * x_p`` thus
+    rewards energizing the highest-energy (steep/heavy) track first -- i.e.
+    "prioritize the segments with the largest energy requirement per mile" -- which
+    is exactly the gradient of the round-trip-loss term, not an ad hoc heuristic.
+    The range-extender diesel term (for a SOFT range limit) is intentionally
+    omitted; add it when soft gaps are modeled.
+
+    Parameters
+    ----------
+    traction_kwh_per_track_mile_by_link : dict[int, float]
+        Annual traction (at-the-wheel) energy per track-mile, keyed by link index.
+        Grade/speed/mass scaling and traffic assumptions live here, as in
+        :func:`make_piece_opex_fn`.
+    electricity_price_usd_per_kwh : float
+        Grid electricity price.
+    battery_roundtrip_efficiency : float
+        Pack charge->discharge round-trip efficiency ``eta_rt`` in ``(0, 1]``.
+    default_traction_kwh_per_track_mile : float, default 0.0
+        Fallback density for links absent from the map.
+
+    Returns
+    -------
+    callable
+        ``PieceBenefitContext -> float`` annual net operating cost ($/yr, negative
+        = saving).
+    """
+    if not 0.0 < battery_roundtrip_efficiency <= 1.0:
+        raise ValueError("battery_roundtrip_efficiency must be in (0, 1].")
+    loss_factor = (1.0 / battery_roundtrip_efficiency) - 1.0
+
+    def _opex(ctx: "PieceBenefitContext") -> float:
+        kwh_per_mi = traction_kwh_per_track_mile_by_link.get(
+            ctx.link_idx, default_traction_kwh_per_track_mile
+        )
+        e_p = kwh_per_mi * ctx.length_miles
+        return -electricity_price_usd_per_kwh * loss_factor * e_p
 
     return _opex
 

@@ -65,6 +65,19 @@ from altrios.defaults import DISCOUNT_RATE
 MILES_PER_METER = 0.000621371
 #: Mean Earth radius in miles (for haversine distance).
 _EARTH_RADIUS_MILES = 3958.7613
+#: Charge-credited (Tier 1) gap horizon: cap net-drain windows at this many full
+#: usable packs. Longer over-drains are either implied by shorter windows or
+#: physically un-closeable, so bounding the lookahead keeps the row count linear.
+#: Tier 1 is a PROTOTYPE: with fine buckets it emits ~(this factor) windows per
+#: start, i.e. many weighted-covering rows -- heavier than the TU ``sum u >= 1``
+#: energy gap. Lower it (or coarsen buckets) to trade fidelity for speed.
+_GAP_WINDOW_KWH_FACTOR = 2.0
+#: Upper bound (miles) on the shared run/gap bucket width. Buckets target
+#: ~param/8 but are capped here so a LONG run/gap (e.g. a 36 mi battery recharge
+#: run) does not force sub-mile buckets -> a quadratic blow-up in the min-run
+#: difference rows. 2 mi keeps run/gap boundaries within ~2 mi while cutting the
+#: min-run row count ~30x on long-range BEL problems.
+_BUCKET_MAX_MILES = 2.0
 
 
 @dataclass
@@ -217,6 +230,12 @@ class EnergizationPlacementInputs:
     #: Est-time nets. In per-link mode, restricts candidate segments to the links
     #: these trains traverse. Not required by structure-site (corridor) mode.
     est_time_nets: List[alt.EstTimeNet] = field(default_factory=list)
+    #: Link indices to EXCLUDE from candidacy (a denylist), applied after the
+    #: est-time-net / flip candidate selection in both modes. Used to feed a
+    #: realized-draw exclusion back into the buildout: links a fleet never drew
+    #: catenary from (e.g. a descending/no-traction direction) are removed so the
+    #: optimizer neither wires nor pays for them. ``None`` (default) excludes none.
+    excluded_link_idxs: Optional[List[int]] = None
     #: If set, enable structure-site (corridor) mode: densify every link into
     #: uniform along-track pieces of this length (miles) and cluster parallel
     #: tracks that share a location so they share one structure cost. Requires
@@ -226,6 +245,15 @@ class EnergizationPlacementInputs:
     #: Lateral distance (miles) within which pieces from parallel tracks are
     #: clustered into the same shared structure site (structure-site mode only).
     corridor_width_miles: float = 0.05
+    #: If True, use the WHOLE-SITE (per-cell) formulation: energizing a structure
+    #: site wires every track piece at it (``x == s``), collapsing the per-piece
+    #: electrification binaries onto the site indicators ``s[c]``. This shrinks the
+    #: model from ~one binary per (short) link to ~one per corridor site and
+    #: strengthens the LP relaxation, so the optimality gap closes far faster; the
+    #: modeling cost is that parallel tracks/sidings at a site are wired together
+    #: (no partial-cross-section electrification). ``False`` (default) keeps the
+    #: fine per-piece formulation.
+    electrify_whole_site: bool = False
     #: Minimum contiguous energized run length in CORRIDOR miles (parallel tracks
     #: and sidings in a structure site count once, so both directions of a
     #: double-track energized for 5 mi count as 5, not 10). Once an interior run
@@ -251,6 +279,44 @@ class EnergizationPlacementInputs:
     #: closed by any reachable substation. Requires structure-site mode with a
     #: contiguous mainline path. ``None`` (default) disables the constraint.
     max_energized_gap_miles: Optional[float] = None
+    #: ENERGY-based maximum-gap limit (kWh): the usable battery traction energy a
+    #: BEL can spend between charges. When set (with
+    #: ``gap_energy_kwh_per_mile_by_link``), the gap constraint limits the
+    #: cumulative *drain energy* of any unelectrified corridor window rather than
+    #: its distance, so wire is required where the battery actually depletes
+    #: fastest (steep/heavy track) instead of on a flat per-mile budget. Takes
+    #: precedence over ``max_energized_gap_miles``. ``None`` (default) disables it.
+    max_energized_gap_kwh: Optional[float] = None
+    #: Per-link single-locomotive traction DRAIN per corridor-mile (kWh/mi),
+    #: keyed by link index. Supplies the drain weights ``delta`` for the
+    #: energy-based gap (``max_energized_gap_kwh``) and the energy-priority
+    #: objective term. Required whenever ``max_energized_gap_kwh`` is set.
+    gap_energy_kwh_per_mile_by_link: Optional[Dict[int, float]] = None
+    #: Per-link NET CHARGE delivered per corridor-mile of ENERGIZED track
+    #: (kWh/mi), keyed by link index. When supplied alongside
+    #: ``max_energized_gap_kwh`` this enables the **charge-credited** gap family
+    #: (recharge Tier 1): an energized bucket credits only ``charge + drain`` (not
+    #: an unconditional full recharge), so short slivers that cannot refill the
+    #: pack no longer "reset" a gap. ``None`` (default) uses the simpler
+    #: ``sum u >= 1`` energy-gap family (any single energized bucket resets the
+    #: gap), which is totally unimodular but assumes any energized segment fully
+    #: recharges.
+    charge_energy_kwh_per_mile_by_link: Optional[Dict[int, float]] = None
+    #: Per-link REGEN recovery per corridor-mile (kWh/mi), keyed by link index.
+    #: When supplied, the gap/SOC constraints use NET drain (``drain - regen``) so
+    #: regenerative braking extends the battery range through gaps. Regen buckets
+    #: should carry ``charge = 0`` (no catenary charging value where the train is
+    #: braking). ``None`` (default) treats regen as zero.
+    regen_energy_kwh_per_mile_by_link: Optional[Dict[int, float]] = None
+    #: If True, replace the covering gap family with the explicit SOC-recursion
+    #: (Tier 2) range model: a continuous per-bucket state of charge evolves along
+    #: the mainline as ``soc[b] = soc[b-1] + charge*u - net_drain - curtail`` with a
+    #: free curtailment slack ``curtail >= 0`` (the linear, big-M-free encoding of
+    #: charge saturation) and is held in ``[0, max_energized_gap_kwh]``, forbidding
+    #: depletion. Faithful and order-aware (subsumes the covering gaps) but heavier
+    #: (continuous state, not totally unimodular). Requires ``max_energized_gap_kwh``
+    #: + ``gap_energy_kwh_per_mile_by_link``. ``False`` (default) uses the covering.
+    battery_soc_state_model: bool = False
     #: Optional custom objective-benefit model. When provided, it is called once
     #: per track piece to return that piece's objective coefficient ``b_p``,
     #: replacing the built-in grade-priority-weighted mileage. This is the seam
@@ -312,6 +378,15 @@ class EnergizationPlacementResult:
     lifecycle_cost: Optional[float] = None
     #: Solver termination condition / status string.
     status: Optional[str] = None
+    #: Best objective bound (dual bound) reported by the solver -- the proven
+    #: bound on the optimum. ``None`` if unavailable.
+    objective_bound: Optional[float] = None
+    #: Absolute optimality gap = ``|objective_value - objective_bound|`` (same
+    #: units as the objective: lifecycle $ in min-cost mode). ``None`` if no bound.
+    optimality_gap_abs: Optional[float] = None
+    #: Relative optimality gap = ``optimality_gap_abs / |objective_value|`` (the
+    #: MIP gap; 0.0 means proven optimal). ``None`` if no bound/incumbent.
+    optimality_gap_rel: Optional[float] = None
 
 
 @dataclass
@@ -352,6 +427,18 @@ class _ProblemData:
     #: Along-corridor arc position (meters) of each cell in ``mainline_site_seq``
     #: (aligned), used to bucket the corridor for the min-run-length constraint.
     mainline_site_arcs: Optional[List[float]] = None
+    #: Per-cell single-traversal traction DRAIN energy (kWh) = per-mile drain
+    #: density * cell corridor length. Weights the energy-based gap constraint.
+    #: Empty when no drain densities were supplied.
+    cell_drain_kwh: Dict[Hashable, float] = field(default_factory=dict)
+    #: Per-cell NET CHARGE energy (kWh) delivered if the cell is energized =
+    #: per-mile charge density * cell corridor length. Empty unless the
+    #: charge-credited (Tier 1) gap family is enabled.
+    cell_charge_kwh: Dict[Hashable, float] = field(default_factory=dict)
+    #: Per-cell REGEN recovery energy (kWh) over one corridor traversal =
+    #: per-mile regen density * cell corridor length. Empty unless regen supplied;
+    #: subtracted from drain to form NET drain in the gap/SOC constraints.
+    cell_regen_kwh: Dict[Hashable, float] = field(default_factory=dict)
 
 
 def _first_not_none(*values: Optional[float]) -> float:
@@ -360,6 +447,36 @@ def _first_not_none(*values: Optional[float]) -> float:
         if value is not None:
             return value
     return 0.0
+
+
+def _cell_energy_from_density(
+    density_by_link: Optional[Dict[int, float]],
+    cell_ids: List[Hashable],
+    piece_ids: List[Hashable],
+    piece_cell: Dict[Hashable, Hashable],
+    piece_link: Dict[Hashable, int],
+    cell_len_miles: Dict[Hashable, float],
+) -> Dict[Hashable, float]:
+    """Per-cell single-traversal energy (kWh) from a per-link kWh/mi density.
+
+    ``energy[cell] = mean(density[link] over the cell's pieces) * cell corridor
+    length (miles)``. Parallel tracks clustered into one corridor cell share the
+    same location, so their per-mile densities average to the corridor rate and
+    the corridor is traversed once. Returns ``{}`` when no density is supplied.
+    """
+    if not density_by_link:
+        return {}
+    sums: Dict[Hashable, float] = {c: 0.0 for c in cell_ids}
+    counts: Dict[Hashable, int] = {c: 0 for c in cell_ids}
+    for p in piece_ids:
+        c = piece_cell[p]
+        sums[c] += float(density_by_link.get(piece_link[p], 0.0))
+        counts[c] += 1
+    return {
+        c: (sums[c] / counts[c] if counts[c] else 0.0) * cell_len_miles.get(c, 0.0)
+        for c in cell_ids
+    }
+
 
 
 def _compute_piece_benefit(
@@ -506,19 +623,25 @@ def _candidate_link_idxs(
     Without ``est_time_nets`` every link is a candidate (unchanged behavior).
     """
     if not inputs.est_time_nets:
-        return list(link_by_idx.keys())
-    seen: set = set()
-    ordered: List[int] = []
-    for etn in inputs.est_time_nets:
-        for idx in _ordered_path_link_idxs(etn):
-            if idx not in link_by_idx:
-                continue
-            flip = link_by_idx[idx].get("idx_flip", 0)
-            for j in (idx, flip):
-                if j and j in link_by_idx and j not in seen:
-                    seen.add(j)
-                    ordered.append(j)
-    return ordered
+        candidates = list(link_by_idx.keys())
+    else:
+        seen: set = set()
+        ordered: List[int] = []
+        for etn in inputs.est_time_nets:
+            for idx in _ordered_path_link_idxs(etn):
+                if idx not in link_by_idx:
+                    continue
+                flip = link_by_idx[idx].get("idx_flip", 0)
+                for j in (idx, flip):
+                    if j and j in link_by_idx and j not in seen:
+                        seen.add(j)
+                        ordered.append(j)
+        candidates = ordered
+    # Denylist: drop links a realized-draw pass flagged as never energized in use.
+    if inputs.excluded_link_idxs:
+        excl = set(inputs.excluded_link_idxs)
+        candidates = [i for i in candidates if i not in excl]
+    return candidates
 
 
 def _merge_intervals(
@@ -814,6 +937,19 @@ def _prepare_per_link(
         piece_cover[idx] = cover
         piece_auto_covered[idx] = auto
 
+    cell_drain_kwh = _cell_energy_from_density(
+        inputs.gap_energy_kwh_per_mile_by_link,
+        cell_ids, piece_ids, piece_cell, piece_link, cell_len_miles,
+    )
+    cell_charge_kwh = _cell_energy_from_density(
+        inputs.charge_energy_kwh_per_mile_by_link,
+        cell_ids, piece_ids, piece_cell, piece_link, cell_len_miles,
+    )
+    cell_regen_kwh = _cell_energy_from_density(
+        inputs.regen_energy_kwh_per_mile_by_link,
+        cell_ids, piece_ids, piece_cell, piece_link, cell_len_miles,
+    )
+
     return _ProblemData(
         cell_ids=cell_ids,
         struct_cost=struct_cost,
@@ -833,6 +969,9 @@ def _prepare_per_link(
         substation_ids=substation_ids,
         sub_cost=sub_cost,
         network_dict=network_dict,
+        cell_drain_kwh=cell_drain_kwh,
+        cell_charge_kwh=cell_charge_kwh,
+        cell_regen_kwh=cell_regen_kwh,
     )
 
 
@@ -1114,6 +1253,19 @@ def _prepare_sites(
         mainline_site_seq = _seq
         mainline_site_arcs = _arcs
 
+    cell_drain_kwh = _cell_energy_from_density(
+        inputs.gap_energy_kwh_per_mile_by_link,
+        cell_ids, piece_ids, piece_cell, piece_link, struct_len_miles,
+    )
+    cell_charge_kwh = _cell_energy_from_density(
+        inputs.charge_energy_kwh_per_mile_by_link,
+        cell_ids, piece_ids, piece_cell, piece_link, struct_len_miles,
+    )
+    cell_regen_kwh = _cell_energy_from_density(
+        inputs.regen_energy_kwh_per_mile_by_link,
+        cell_ids, piece_ids, piece_cell, piece_link, struct_len_miles,
+    )
+
     return _ProblemData(
         cell_ids=cell_ids,
         struct_cost=struct_cost,
@@ -1135,6 +1287,9 @@ def _prepare_sites(
         network_dict=network_dict,
         mainline_site_seq=mainline_site_seq,
         mainline_site_arcs=mainline_site_arcs,
+        cell_drain_kwh=cell_drain_kwh,
+        cell_charge_kwh=cell_charge_kwh,
+        cell_regen_kwh=cell_regen_kwh,
     )
 
 
@@ -1185,7 +1340,8 @@ def _build_link_chains(
 
 
 def _install_corridor_buckets(
-    model: pyo.ConcreteModel, data: "_ProblemData", bucket_mi: float
+    model: pyo.ConcreteModel, data: "_ProblemData", bucket_mi: float,
+    tie_structure_to_x: bool = True,
 ) -> Tuple[int, List[float], Dict[Hashable, int]]:
     """Install the shared corridor bucket layer for the run-length / gap constraints.
 
@@ -1211,14 +1367,16 @@ def _install_corridor_buckets(
     for p in data.piece_ids:
         pieces_in_cell.setdefault(data.piece_cell[p], []).append(p)
 
-    # Structure only where at least one track is energized (ties s to x).
-    def _structure_used_rule(m, c):
-        ps = pieces_in_cell.get(c, [])
-        if not ps:
-            return m.s[c] == 0
-        return m.s[c] <= sum(m.x[p] for p in ps)
+    # Structure only where at least one track is energized (ties s to x). Skipped
+    # in whole-site mode, where s IS the electrification (there is no x).
+    if tie_structure_to_x:
+        def _structure_used_rule(m, c):
+            ps = pieces_in_cell.get(c, [])
+            if not ps:
+                return m.s[c] == 0
+            return m.s[c] <= sum(m.x[p] for p in ps)
 
-    model.structure_used = pyo.Constraint(model.C, rule=_structure_used_rule)
+        model.structure_used = pyo.Constraint(model.C, rule=_structure_used_rule)
 
     seq = getattr(data, "mainline_site_seq", None)
     if not seq or len(seq) < 2:
@@ -1260,6 +1418,49 @@ def _install_corridor_buckets(
     return n_buckets, bucket_len_miles, cell_bucket
 
 
+def _install_soc_state_model(
+    model: pyo.ConcreteModel,
+    n_buckets: int,
+    bucket_net: List[float],
+    bucket_charge: List[float],
+    prefix_mi: List[float],
+    pack_kwh: float,
+) -> None:
+    """Install the explicit SOC-recursion (Tier 2) battery-range model.
+
+    A continuous state of charge evolves bucket-to-bucket along the mainline:
+
+        soc[b] = soc[b-1] + charge_b * u[b] - net_drain_b - curtail[b],
+        0 <= soc[b] <= pack_kwh,   curtail[b] >= 0,
+
+    starting full (``soc[-1] = pack_kwh``). The lower bound forbids depletion; the
+    upper bound is charge SATURATION, made exact and LINEAR (no big-M) by the free
+    ``curtail`` slack -- the solver discards exactly the charge that would overflow
+    the pack because nothing rewards a lower SOC. ``net_drain`` already nets regen
+    out of drain, and ``charge_b`` (the per-bucket net charge if energized, 0 on
+    regen buckets) is credited only when the bucket is electrified (``u[b]``).
+
+    Path-ordered and faithful (it subsumes the covering gap families, which are its
+    window relaxations), at the cost of continuous state: it is no longer totally
+    unimodular, but adds no integers or big-M, so the relaxation stays tractable.
+    Infeasibility (an un-closeable stretch) is reported by the solver rather than a
+    pre-check.
+    """
+    model.SocBucket = pyo.Set(initialize=range(n_buckets), ordered=True)
+    model.soc = pyo.Var(model.SocBucket, domain=pyo.NonNegativeReals,
+                        bounds=(0.0, pack_kwh))
+    model.curtail = pyo.Var(model.SocBucket, domain=pyo.NonNegativeReals)
+
+    def _soc_rule(m, b):
+        prev = pack_kwh if b == 0 else m.soc[b - 1]
+        return (
+            m.soc[b]
+            == prev + bucket_charge[b] * m.u[b] - bucket_net[b] - m.curtail[b]
+        )
+
+    model.soc_balance = pyo.Constraint(model.SocBucket, rule=_soc_rule)
+
+
 def build_model(
     inputs: EnergizationPlacementInputs, data: _ProblemData
 ) -> pyo.ConcreteModel:
@@ -1271,35 +1472,70 @@ def build_model(
     model.J = pyo.Set(initialize=data.substation_ids, ordered=True)
 
     # s[c]: install shared corridor structure; x[p]: electrify a track piece;
-    # y[j]: build a substation. All binary.
+    # y[j]: build a substation. All binary. In WHOLE-SITE mode there is no per-
+    # piece x -- energizing a site (s[c]=1) wires all its pieces, so wire cost /
+    # opex / benefit / coverage collapse onto s and the piece binaries vanish.
+    _per_cell = bool(inputs.electrify_whole_site)
     model.s = pyo.Var(model.C, domain=pyo.Binary)
-    model.x = pyo.Var(model.P, domain=pyo.Binary)
+    if not _per_cell:
+        model.x = pyo.Var(model.P, domain=pyo.Binary)
     model.y = pyo.Var(model.J, domain=pyo.Binary)
 
+    if _per_cell:
+        _cell_pieces: Dict[Hashable, List[Hashable]] = {}
+        for p in data.piece_ids:
+            _cell_pieces.setdefault(data.piece_cell[p], []).append(p)
+        cell_marginal = {c: 0.0 for c in data.cell_ids}
+        cell_opex = {c: 0.0 for c in data.cell_ids}
+        cell_benefit = {c: 0.0 for c in data.cell_ids}
+        cell_cover: Dict[Hashable, List[Hashable]] = {}
+        cell_auto: Dict[Hashable, bool] = {}
+        for c in data.cell_ids:
+            ps = _cell_pieces.get(c, [])
+            cell_marginal[c] = sum(data.piece_marginal_cost[p] for p in ps)
+            cell_opex[c] = sum(data.piece_annual_opex[p] for p in ps)
+            cell_benefit[c] = sum(data.piece_benefit[p] for p in ps)
+            cov: set = set()
+            auto = False
+            for p in ps:
+                cov.update(data.piece_cover[p])
+                auto = auto or data.piece_auto_covered[p]
+            cell_cover[c] = list(cov)
+            cell_auto[c] = auto
+
     # Strong per-piece structure linking: a track piece can only be electrified
-    # if its corridor cell's shared structure is installed.
-    def _structure_rule(m, p):
-        return m.x[p] <= m.s[data.piece_cell[p]]
+    # if its corridor cell's shared structure is installed. (Whole-site mode has
+    # no per-piece x -- s IS the electrification -- so this is skipped.)
+    if not _per_cell:
+        def _structure_rule(m, p):
+            return m.x[p] <= m.s[data.piece_cell[p]]
 
-    model.structure = pyo.Constraint(model.P, rule=_structure_rule)
+        model.structure = pyo.Constraint(model.P, rule=_structure_rule)
 
-    # Strong disaggregated feeding/coverage: a piece may be energized only if an
-    # in-range substation is built. Pieces fed by a pre-existing substation are
-    # unconstrained; pieces with no in-range candidate (and no existing feed)
-    # are forced off.
-    # Feeding/coverage: a piece may be energized only if an in-range substation
-    # is built. Pieces fed by a pre-existing substation are auto-covered
-    # (unconstrained); pieces with no in-range candidate (and no existing feed)
-    # are forced off.
-    def _coverage_rule(m, p):
-        if data.piece_auto_covered[p]:
-            return pyo.Constraint.Skip
-        covering = data.piece_cover[p]
-        if not covering:
-            return m.x[p] == 0
-        return m.x[p] <= sum(m.y[j] for j in covering)
+    # Feeding/coverage: a piece (or, in whole-site mode, a site) may be energized
+    # only if an in-range substation is built. Pieces fed by a pre-existing
+    # substation are auto-covered (unconstrained); those with no in-range
+    # candidate (and no existing feed) are forced off.
+    if not _per_cell:
+        def _coverage_rule(m, p):
+            if data.piece_auto_covered[p]:
+                return pyo.Constraint.Skip
+            covering = data.piece_cover[p]
+            if not covering:
+                return m.x[p] == 0
+            return m.x[p] <= sum(m.y[j] for j in covering)
 
-    model.coverage = pyo.Constraint(model.P, rule=_coverage_rule)
+        model.coverage = pyo.Constraint(model.P, rule=_coverage_rule)
+    else:
+        def _coverage_rule_cell(m, c):
+            if cell_auto[c]:
+                return pyo.Constraint.Skip
+            cov = cell_cover[c]
+            if not cov:
+                return m.s[c] == 0
+            return m.s[c] <= sum(m.y[j] for j in cov)
+
+        model.coverage = pyo.Constraint(model.C, rule=_coverage_rule_cell)
 
     # Optional minimum contiguous energized run length, measured in CORRIDOR
     # miles (NOT track-miles: parallel tracks/sidings in a structure site count
@@ -1320,16 +1556,32 @@ def build_model(
     _need_buckets = (
         inputs.min_energized_length_miles is not None
         or inputs.max_energized_gap_miles is not None
+        or inputs.max_energized_gap_kwh is not None
     )
     if _need_buckets:
         _widths = []
         if inputs.min_energized_length_miles is not None:
-            _widths.append(min(0.5, max(inputs.min_energized_length_miles / 8.0, 1e-6)))
+            _widths.append(min(_BUCKET_MAX_MILES,
+                               max(inputs.min_energized_length_miles / 8.0, 1e-6)))
         if inputs.max_energized_gap_miles is not None:
-            _widths.append(min(0.5, max(inputs.max_energized_gap_miles / 8.0, 1e-6)))
+            _widths.append(min(_BUCKET_MAX_MILES,
+                               max(inputs.max_energized_gap_miles / 8.0, 1e-6)))
+        if inputs.max_energized_gap_kwh is not None:
+            # Size buckets to resolve the ENERGY budget: convert the kWh cap to an
+            # equivalent distance via the average drain density so resolution
+            # matches the miles-based gap (~gap/8 per bucket).
+            _tot_kwh = sum(data.cell_drain_kwh.values())
+            _tot_mi = sum(
+                data.cell_len_miles.get(c, 0.0) for c in data.cell_drain_kwh
+            )
+            _avg_drain = (_tot_kwh / _tot_mi) if _tot_mi > 0 else 0.0
+            _gap_equiv_mi = (
+                inputs.max_energized_gap_kwh / _avg_drain if _avg_drain > 0 else 0.5
+            )
+            _widths.append(min(_BUCKET_MAX_MILES, max(_gap_equiv_mi / 8.0, 1e-6)))
         bucket_mi = min(_widths)
         n_buckets, bucket_len_miles, cell_bucket = _install_corridor_buckets(
-            model, data, bucket_mi
+            model, data, bucket_mi, tie_structure_to_x=not _per_cell
         )
     else:
         n_buckets, bucket_len_miles, cell_bucket = 0, [], {}
@@ -1412,29 +1664,63 @@ def build_model(
                     model.min_run_index, rule=_min_run_rule
                 )
 
-    # Maximum contiguous UNelectrified gap length (battery-electric range limit).
-    # No stretch of un-energized corridor may exceed max_gap: in every window of
-    # consecutive buckets whose cumulative length EXCEEDS max_gap, at least one
-    # bucket must be energized (sum_{b in window} u[b] >= 1). The minimal such
-    # window per start index suffices (longer windows are implied). Windows that
-    # touch a corridor end are NOT exempt: the battery is assumed full at each end
-    # (yard charging), so end gaps obey the same limit. Because this can FORCE
-    # electrification (unlike the minimum run), a feasibility pre-check first
-    # verifies each binding window contains at least one coverable bucket.
-    if inputs.max_energized_gap_miles is not None:
-        gap_max = inputs.max_energized_gap_miles
+    # Maximum-gap (battery-electric range) constraint. Three variants share the
+    # bucket layer and all forbid a BEL from depleting between charges:
+    #   * DISTANCE (max_energized_gap_miles): no unelectrified window longer than
+    #     the cap; sum_{b in window} u[b] >= 1. Interval matrix -> TU.
+    #   * ENERGY (max_energized_gap_kwh, no charge densities): same sum u >= 1 but
+    #     windows are bounded by cumulative DRAIN ENERGY exceeding the usable
+    #     battery kWh, so wire is required where the pack drains fastest (steep/
+    #     heavy track) rather than on a flat per-mile budget. Still TU. Assumes any
+    #     single energized bucket fully recharges the pack (resets the gap).
+    #   * CHARGE-CREDITED / recharge Tier 1 (energy + charge densities): drops the
+    #     "any bucket fully recharges" assumption. For every contiguous window S
+    #     the NET drain (drain on un-energized buckets minus charge banked on
+    #     energized ones) may not exceed the usable pack:
+    #         sum_{b in S} (drain_b + charge_b) u[b] >= sum_{b in S} drain_b - usable
+    #     One row per window; all-positive u weights over CONTIGUOUS support
+    #     (weighted covering). Emitting it for every window ending at each bucket
+    #     covers the unknown "last full charge" point, so it is SUFFICIENT for SOC
+    #     feasibility with no continuous state, no saturation, no big-M -- weighted
+    #     C1P support keeps the LP tight though not strictly TU. The ENERGY form
+    #     above is exactly this with charge_b = 0 and each row relaxed to
+    #     sum u >= 1. Windows are capped at ``_GAP_WINDOW_KWH_FACTOR`` full packs
+    #     of drain (a prototype horizon: longer over-drains are either handled by
+    #     shorter windows or physically un-closeable).
+    _energy_gap = inputs.max_energized_gap_kwh is not None
+    if inputs.max_energized_gap_miles is not None or _energy_gap:
         if n_buckets < 2:
             raise ValueError(
-                "max_energized_gap_miles requires structure-site (corridor) mode "
-                "with a contiguous mainline path, but none was found. Set "
+                "max_energized_gap_miles/kwh requires structure-site (corridor) "
+                "mode with a contiguous mainline path, but none was found. Set "
                 "structure_spacing_miles and ensure the network has lat/lon "
                 "geometry."
             )
+        if _energy_gap and not data.cell_drain_kwh:
+            raise ValueError(
+                "max_energized_gap_kwh requires gap_energy_kwh_per_mile_by_link to "
+                "supply per-link drain densities."
+            )
+        if inputs.battery_soc_state_model and not _energy_gap:
+            raise ValueError(
+                "battery_soc_state_model requires max_energized_gap_kwh (pack size) "
+                "and gap_energy_kwh_per_mile_by_link (drain densities)."
+            )
 
-        # Prefix miles at each bucket boundary, for region reporting.
-        prefix = [0.0]
+        # Per-bucket drain / charge / regen energy (kWh); bucket miles for
+        # reporting. NET drain = drain - regen (regen extends range through gaps);
+        # the covering / SOC constraints all use net drain.
+        bucket_drain = [0.0] * n_buckets
+        bucket_charge = [0.0] * n_buckets
+        bucket_regen = [0.0] * n_buckets
+        for c, bkt in cell_bucket.items():
+            bucket_drain[bkt] += data.cell_drain_kwh.get(c, 0.0)
+            bucket_charge[bkt] += data.cell_charge_kwh.get(c, 0.0)
+            bucket_regen[bkt] += data.cell_regen_kwh.get(c, 0.0)
+        bucket_net = [bucket_drain[b] - bucket_regen[b] for b in range(n_buckets)]
+        prefix_mi = [0.0]
         for L in bucket_len_miles:
-            prefix.append(prefix[-1] + L)
+            prefix_mi.append(prefix_mi[-1] + L)
 
         # A bucket can be energized iff some cell it contains has a piece that is
         # auto-covered by an existing substation or reachable by a candidate.
@@ -1447,42 +1733,118 @@ def build_model(
             if cell_coverable.get(c):
                 bucket_coverable[bkt] = True
 
-        # Minimal window per start i: smallest [i..j] with sum(len) > gap_max.
-        windows: List[Tuple[int, ...]] = []
-        for i in range(n_buckets):
-            cum = 0.0
-            j = i
-            while j < n_buckets and cum + bucket_len_miles[j] <= gap_max:
-                cum += bucket_len_miles[j]
-                j += 1
-            if j < n_buckets:  # else: tail from i to corridor end <= gap_max -> ok
-                windows.append(tuple(range(i, j + 1)))
-
-        # Feasibility pre-check: a binding window with no coverable bucket can
-        # never satisfy sum u >= 1, so the gap is un-closeable -> infeasible.
-        for w in windows:
-            if not any(bucket_coverable[b] for b in w):
-                raise ValueError(
-                    f"max_energized_gap_miles={gap_max} is infeasible: the corridor "
-                    f"from mile {prefix[w[0]]:.1f} to {prefix[w[-1] + 1]:.1f} spans "
-                    f"more than the maximum gap yet contains no track reachable by "
-                    f"any candidate or existing substation, so the gap cannot be "
-                    f"closed. Add a substation in range or increase "
-                    f"substation_feed_distance_miles."
+        if inputs.battery_soc_state_model:
+            _install_soc_state_model(
+                model, n_buckets, bucket_net, bucket_charge, prefix_mi,
+                float(inputs.max_energized_gap_kwh),
+            )
+            _tier1 = False
+        else:
+            _tier1 = _energy_gap and bool(data.cell_charge_kwh)
+        if inputs.battery_soc_state_model:
+            pass  # SOC recursion installed above; skip the covering families
+        elif _tier1:
+            budget = float(inputs.max_energized_gap_kwh)
+            window_cap = budget * _GAP_WINDOW_KWH_FACTOR
+            # (window buckets, rhs) rows; rhs = cumulative NET drain - usable pack.
+            rows: List[Tuple[Tuple[int, ...], float]] = []
+            for i in range(n_buckets):
+                cum_drain = 0.0
+                for j in range(i, n_buckets):
+                    cum_drain += bucket_net[j]
+                    rhs = cum_drain - budget
+                    if rhs > 1e-9:
+                        w = tuple(range(i, j + 1))
+                        rows.append((w, rhs))
+                        # A window can be satisfied only if its coverable buckets
+                        # can bank enough (net drain + charge); else the gap is
+                        # un-closeable regardless of the solver.
+                        max_bank = sum(
+                            max(bucket_net[b] + bucket_charge[b], 0.0)
+                            for b in w
+                            if bucket_coverable[b]
+                        )
+                        if max_bank + 1e-9 < rhs:
+                            raise ValueError(
+                                f"max_energized_gap_kwh={budget:.0f} is infeasible: "
+                                f"the corridor from mile {prefix_mi[i]:.1f} to "
+                                f"{prefix_mi[j + 1]:.1f} would over-drain the battery "
+                                f"by {rhs - max_bank:.0f} kWh even if every reachable "
+                                f"segment in it were energized. Add a substation in "
+                                f"range or increase substation_feed_distance_miles / "
+                                f"battery size."
+                            )
+                    if cum_drain > window_cap:
+                        break
+            if rows:
+                model.max_gap_index = pyo.Set(
+                    initialize=range(len(rows)), ordered=True
                 )
 
-        wl = list(dict.fromkeys(windows))  # dedup, preserve order
-        if wl:
-            model.max_gap_index = pyo.Set(
-                initialize=range(len(wl)), ordered=True
-            )
+                def _max_gap_rule(m, t):
+                    w, rhs = rows[t]
+                    # Floor per-bucket credit at 0: a regen bucket (net<0) with no
+                    # charge cannot make the covering easier by being energized.
+                    return (
+                        sum(
+                            max(bucket_net[b] + bucket_charge[b], 0.0) * m.u[b]
+                            for b in w
+                        )
+                        >= rhs
+                    )
 
-            def _max_gap_rule(m, t):
-                return sum(m.u[b] for b in wl[t]) >= 1
+                model.max_gap = pyo.Constraint(
+                    model.max_gap_index, rule=_max_gap_rule
+                )
+        else:
+            if _energy_gap:
+                budget = float(inputs.max_energized_gap_kwh)
+                weight = bucket_net
+                label = f"max_energized_gap_kwh={budget:.0f}"
+                unit = "kWh"
+            else:
+                budget = float(inputs.max_energized_gap_miles)
+                weight = bucket_len_miles
+                label = f"max_energized_gap_miles={budget}"
+                unit = "mi"
 
-            model.max_gap = pyo.Constraint(
-                model.max_gap_index, rule=_max_gap_rule
-            )
+            # Minimal window per start i: smallest [i..j] whose weight exceeds
+            # the budget (distance or NET drain energy).
+            windows: List[Tuple[int, ...]] = []
+            for i in range(n_buckets):
+                cum = 0.0
+                j = i
+                while j < n_buckets and cum + weight[j] <= budget:
+                    cum += weight[j]
+                    j += 1
+                if j < n_buckets:  # else: tail to corridor end within budget -> ok
+                    windows.append(tuple(range(i, j + 1)))
+
+            # Feasibility pre-check: a binding window with no coverable bucket can
+            # never satisfy sum u >= 1, so the gap is un-closeable.
+            for w in windows:
+                if not any(bucket_coverable[b] for b in w):
+                    raise ValueError(
+                        f"{label} ({unit}) is infeasible: the corridor from mile "
+                        f"{prefix_mi[w[0]]:.1f} to {prefix_mi[w[-1] + 1]:.1f} exceeds "
+                        f"the maximum gap yet contains no track reachable by any "
+                        f"candidate or existing substation, so the gap cannot be "
+                        f"closed. Add a substation in range or increase "
+                        f"substation_feed_distance_miles."
+                    )
+
+            wl = list(dict.fromkeys(windows))  # dedup, preserve order
+            if wl:
+                model.max_gap_index = pyo.Set(
+                    initialize=range(len(wl)), ordered=True
+                )
+
+                def _max_gap_rule(m, t):
+                    return sum(m.u[b] for b in wl[t]) >= 1
+
+                model.max_gap = pyo.Constraint(
+                    model.max_gap_index, rule=_max_gap_rule
+                )
 
     # Optional hard requirement: electrify mainline track in every high-grade
     # cell (this pulls in the shared structure via the linking constraint).
@@ -1508,20 +1870,32 @@ def build_model(
 
         req_set = set(req)
 
-        def _require_rule(m, p):
-            if p in req_set:
-                return m.x[p] == 1
-            return pyo.Constraint.Skip
+        if _per_cell:
+            req_cells = {data.piece_cell[p] for p in req_set}
 
-        model.require_high_grade = pyo.Constraint(model.P, rule=_require_rule)
+            def _require_cell(m, c):
+                return m.s[c] == 1 if c in req_cells else pyo.Constraint.Skip
+
+            model.require_high_grade = pyo.Constraint(model.C, rule=_require_cell)
+        else:
+            def _require_rule(m, p):
+                if p in req_set:
+                    return m.x[p] == 1
+                return pyo.Constraint.Skip
+
+            model.require_high_grade = pyo.Constraint(model.P, rule=_require_rule)
 
     # Single budget knapsack row (the only non-TU constraint): shared structure
     # + marginal per-track electrification + substation capital.
     if inputs.budget is not None:
+        _wire_budget = (
+            sum(cell_marginal[c] * model.s[c] for c in model.C) if _per_cell
+            else sum(data.piece_marginal_cost[p] * model.x[p] for p in model.P)
+        )
         model.budget = pyo.Constraint(
             expr=(
                 sum(data.struct_cost[c] * model.s[c] for c in model.C)
-                + sum(data.piece_marginal_cost[p] * model.x[p] for p in model.P)
+                + _wire_budget
                 + sum(data.sub_cost[j] * model.y[j] for j in model.J)
                 <= inputs.budget
             )
@@ -1541,13 +1915,18 @@ def build_model(
                 "annual operating cost."
             )
         pvaf = inputs.economics.pvaf()
+        if _per_cell:
+            _wire = sum(cell_marginal[c] * model.s[c] for c in model.C)
+            _opex = sum(cell_opex[c] * model.s[c] for c in model.C)
+        else:
+            _wire = sum(data.piece_marginal_cost[p] * model.x[p] for p in model.P)
+            _opex = sum(data.piece_annual_opex[p] * model.x[p] for p in model.P)
         model.obj = pyo.Objective(
             expr=(
                 sum(data.struct_cost[c] * model.s[c] for c in model.C)
-                + sum(data.piece_marginal_cost[p] * model.x[p] for p in model.P)
+                + _wire
                 + sum(data.sub_cost[j] * model.y[j] for j in model.J)
-                + pvaf
-                * sum(data.piece_annual_opex[p] * model.x[p] for p in model.P)
+                + pvaf * _opex
             ),
             sense=pyo.minimize,
         )
@@ -1555,10 +1934,11 @@ def build_model(
         # Maximize total priority-weighted electrified track miles (each parallel
         # track contributes, so wiring both directions is rewarded once structure
         # is paid for). High-grade cells are up-weighted.
-        model.obj = pyo.Objective(
-            expr=sum(data.piece_benefit[p] * model.x[p] for p in model.P),
-            sense=pyo.maximize,
+        _benefit = (
+            sum(cell_benefit[c] * model.s[c] for c in model.C) if _per_cell
+            else sum(data.piece_benefit[p] * model.x[p] for p in model.P)
         )
+        model.obj = pyo.Objective(expr=_benefit, sense=pyo.maximize)
     else:
         raise ValueError(
             f"Unknown objective {inputs.objective!r}; expected 'max_benefit' or "
@@ -1575,10 +1955,18 @@ def solve_model(
     mip_gap: Optional[float] = None,
     tee: bool = False,
     solver_threads: Optional[int] = None,
-) -> Tuple[pyo.ConcreteModel, str]:
+    warmstart: bool = False,
+) -> Tuple[pyo.ConcreteModel, str, bool, Optional[float], Optional[float]]:
     """Solve the model with the HiGHS solver via Pyomo APPSI.
 
-    Returns the solved model and a termination-condition string.
+    Returns ``(model, termination_condition, has_solution, best_bound,
+    best_incumbent)``. ``load_solution`` is disabled so that hitting the time limit
+    with NO feasible incumbent (common for the heavy Tier-1 / SOC-state models)
+    returns gracefully -- ``has_solution`` is then ``False`` -- instead of raising
+    when APPSI tries to auto-load a nonexistent solution. ``best_bound`` /
+    ``best_incumbent`` are the solver's dual bound and incumbent objective (for the
+    optimality gap). When ``warmstart`` is set, any variable values pre-seeded on
+    the model are passed to HiGHS as a MIP start (an infeasible seed is discarded).
     """
     solver = Highs()
     if time_limit_seconds is not None:
@@ -1588,10 +1976,58 @@ def solve_model(
     if solver_threads is not None:
         # Cap HiGHS parallelism; its default (0) uses all available cores.
         solver.highs_options["threads"] = int(solver_threads)
+    # More heuristic effort (default 0.05) to find good incumbents faster on the
+    # large piece-count MIP, where the LP bound is weak and closing the gap relies
+    # on a strong incumbent.
+    solver.highs_options["mip_heuristic_effort"] = 0.2
     solver.config.stream_solver = tee
+    # Do not auto-load (and thus do not raise) when no incumbent exists.
+    solver.config.load_solution = False
+    if warmstart:
+        solver.config.warmstart = True
 
     results = solver.solve(model)
-    return model, str(results.termination_condition)
+    has_solution = results.best_feasible_objective is not None
+    if has_solution:
+        results.solution_loader.load_vars()
+    return (
+        model, str(results.termination_condition), has_solution,
+        getattr(results, "best_objective_bound", None),
+        results.best_feasible_objective,
+    )
+
+
+def _seed_warmstart(model: pyo.ConcreteModel, data: "_ProblemData") -> None:
+    """Seed a feasible 'electrify all reachable track' MIP start.
+
+    Builds every candidate substation and energizes every coverable piece (with the
+    shared structure/bucket indicators set to match). This is trivially feasible for
+    the coverage, min-run, gap, and SOC constraints (a fully wired mainline never
+    depletes), so it guarantees HiGHS an incumbent immediately. HiGHS silently
+    discards the start if a corner case makes it inconsistent, so an approximate
+    seed is safe.
+    """
+    for j in model.J:
+        model.y[j].set_value(1, skip_validation=True)
+    energized_cells = set()
+    _has_x = hasattr(model, "x")
+    for p in model.P:
+        on = 1 if (data.piece_auto_covered[p] or data.piece_cover[p]) else 0
+        if _has_x:
+            model.x[p].set_value(on, skip_validation=True)
+        if on:
+            energized_cells.add(data.piece_cell[p])
+    for c in model.C:
+        model.s[c].set_value(1 if c in energized_cells else 0, skip_validation=True)
+    if hasattr(model, "u"):
+        # Fully wired mainline seed: every bucket on (couples s[c] == u[bucket]).
+        for b in model.RunBucket:
+            model.u[b].set_value(1, skip_validation=True)
+    if hasattr(model, "soc"):
+        pack = model.soc[next(iter(model.SocBucket))].ub
+        for b in model.SocBucket:
+            model.soc[b].set_value(pack, skip_validation=True)
+            model.curtail[b].set_value(0.0, skip_validation=True)
 
 
 def extract_result(
@@ -1601,9 +2037,18 @@ def extract_result(
     status: str,
 ) -> EnergizationPlacementResult:
     """Translate the solved model into a :class:`EnergizationPlacementResult`."""
-    energized_pieces: List[Hashable] = [
-        p for p in data.piece_ids if pyo.value(model.x[p]) > 0.5
-    ]
+    if inputs.electrify_whole_site:
+        # Whole-site: energizing a site wires every piece at it (no per-piece x).
+        _on_cells = {
+            c for c in data.cell_ids if pyo.value(model.s[c]) > 0.5
+        }
+        energized_pieces: List[Hashable] = [
+            p for p in data.piece_ids if data.piece_cell[p] in _on_cells
+        ]
+    else:
+        energized_pieces = [
+            p for p in data.piece_ids if pyo.value(model.x[p]) > 0.5
+        ]
     built: List[Hashable] = [
         j for j in data.substation_ids if pyo.value(model.y[j]) > 0.5
     ]
@@ -1680,15 +2125,33 @@ def optimize_energization_placement(
     mip_gap: Optional[float] = None,
     tee: bool = False,
     solver_threads: Optional[int] = None,
+    warmstart: bool = False,
 ) -> EnergizationPlacementResult:
-    """End-to-end entry point: prepare data, build, solve, and extract."""
+    """End-to-end entry point: prepare data, build, solve, and extract.
+
+    When the solver returns with no feasible incumbent (e.g. a heavy Tier-1/SOC
+    model hits the time limit), a result carrying only ``status`` (no network) is
+    returned rather than raising. ``warmstart`` seeds a feasible fully-wired MIP
+    start so the solver always has an incumbent.
+    """
     data = _prepare(inputs)
     model = build_model(inputs, data)
-    model, status = solve_model(
+    if warmstart:
+        _seed_warmstart(model, data)
+    model, status, has_solution, bound, incumbent = solve_model(
         model,
         time_limit_seconds=time_limit_seconds,
         mip_gap=mip_gap,
         tee=tee,
         solver_threads=solver_threads,
+        warmstart=warmstart,
     )
-    return extract_result(inputs, data, model, status)
+    if not has_solution:
+        return EnergizationPlacementResult(status=status, objective_bound=bound)
+    result = extract_result(inputs, data, model, status)
+    result.objective_bound = bound
+    obj = result.objective_value
+    if bound is not None and obj is not None:
+        result.optimality_gap_abs = abs(obj - bound)
+        result.optimality_gap_rel = result.optimality_gap_abs / max(abs(obj), 1e-12)
+    return result
