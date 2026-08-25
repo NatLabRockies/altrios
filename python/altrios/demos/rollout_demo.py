@@ -1,6 +1,6 @@
 # %%
 import altrios as alt
-from altrios import rollout, defaults
+from altrios import defaults, metric_calculator, rollout
 from altrios.train_planner import planner_config
 import numpy as np
 import matplotlib.pyplot as plt
@@ -10,7 +10,7 @@ from pathlib import Path
 sns.set_theme()
 
 SHOW_PLOTS = alt.utils.show_plots()
-SAVE_INTERVAL = 1 if SHOW_PLOTS else None
+SAVE_INTERVAL = 1
 # %
 
 # %%
@@ -41,6 +41,16 @@ for target in targets:
         write_metrics=True,
         network_filename_path=alt.resources_root() / "networks/Taconite-NoBalloon.yaml",
     )
+
+    for scenario_info in scenario_infos:
+        meet_pass_events = metric_calculator.calculate_meet_pass_events(
+            scenario_info, "count"
+        )
+        meet_pass_event_count = metric_calculator.value_from_metrics(meet_pass_events)
+        print(
+            f"Meet/pass events in {scenario_info.scenario_year}: "
+            f"{meet_pass_event_count:.0f}"
+        )
 
 # %%
 # Plotting code currently just plots the first year of a multi-year simulation.

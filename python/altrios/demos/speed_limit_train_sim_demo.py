@@ -7,6 +7,7 @@ import os
 from copy import copy
 
 import altrios as alt
+from altrios import metric_calculator
 from altrios.demos import plot_util
 sns.set_theme()
 altrios_local_location = "C:/Users/fdste/OneDrive/Documents/GitHub/altrios-applied/python/altrios/resources/"
@@ -128,8 +129,8 @@ loco_con_sans_buffers = alt.Consist(
 # Instantiate the intermediate `TrainSimBuilder`
 tsb = alt.TrainSimBuilder(
     train_id="0",
-    origin_id="Winnipeg",
-    destination_id="Chicago",
+    origin_id="Toronto",
+    destination_id="Battle_Creek",
     train_config=train_config,
     loco_con=loco_con,
 )
@@ -137,8 +138,8 @@ tsb = alt.TrainSimBuilder(
 # Instantiate the intermediate `TrainSimBuilder`
 tsb_sans_buffers = alt.TrainSimBuilder(
     train_id="0",
-    origin_id="Winnipeg",
-    destination_id="Chicago",
+    origin_id="Toronto",
+    destination_id="Battle_Creek",
     train_config=train_config,
     loco_con=loco_con_sans_buffers,
 )
@@ -149,14 +150,14 @@ print("Loading `Network`")
 #     altrios_local_location + "networks/Taconite-NoBalloon.yaml"
 # )
 network = alt.Network.from_file(
-    altrios_local_location + "networks/Winnipeg_Chicago.yaml"
+    altrios_local_location + "networks/Toronto_Battle Creek.yaml"
 )
 
 # location_map = alt.import_locations(
 #     altrios_local_location + "networks/default_locations.csv"
 # )
 location_map = alt.import_locations(
-    altrios_local_location + "networks/Winnipeg_Chicago_locations.csv"
+    altrios_local_location + "networks/Toronto_Battle Creek_locations.csv"
 )
 train_sim: alt.SpeedLimitTrainSim = tsb.make_speed_limit_train_sim(
     location_map=location_map,
@@ -254,6 +255,31 @@ print(
     f"Total SOC-corrected fuel used with BEL and HEL buffers inactive: {corrected_fuel_sans_buffers_gigajoules:.6g} GJ"
 )
 assert len(train_sim_sans_buffers.to_pydict()["history"]) > 1
+
+meet_pass_events = metric_calculator.calculate_meet_pass_events(
+    metric_calculator.ScenarioInfo(
+        sims=alt.SpeedLimitTrainSimVec([train_sim]),
+        simulation_days=1,
+        annualize=False,
+    ),
+    "count",
+)
+meet_pass_events_sans_buffers = metric_calculator.calculate_meet_pass_events(
+    metric_calculator.ScenarioInfo(
+        sims=alt.SpeedLimitTrainSimVec([train_sim_sans_buffers]),
+        simulation_days=1,
+        annualize=False,
+    ),
+    "count",
+)
+print(
+    "Meet/pass events with buffers active: "
+    f"{metric_calculator.value_from_metrics(meet_pass_events):.0f}"
+)
+print(
+    "Meet/pass events with buffers inactive: "
+    f"{metric_calculator.value_from_metrics(meet_pass_events_sans_buffers):.0f}"
+)
 
 savings_raw = (
     -(raw_fuel_gigajoules - raw_fuel_sans_buffers_gigajoules)

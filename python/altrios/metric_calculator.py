@@ -1480,31 +1480,37 @@ def calculate_meet_pass_events(info: ScenarioInfo, units: str) -> MetricType:
 
         # NOTE: this code is somewhat clunky and would probably benifit from streamlining
         df = alt.SpeedLimitTrainSim.from_pydict(slts).to_dataframe()
-        if ("history.time" not in df.collect_schema()) or (
-            "history.speed" not in df.collect_schema()
+        if ("history.time_seconds" not in df.collect_schema()) or (
+            "history.speed_meters_per_second" not in df.collect_schema()
         ):
             print(
                 "SpeedLimitTrainSim history doesn't include time and/or speed, so meet pass events cannot be counted."
             )
             return metric("Meet_Pass_Events", units, None)
 
-        df = df.select("history.time", "history.speed").with_columns(
-            pl.lit(i).alias("train_idx")
-        )
+        df = df.select(
+            "history.time_seconds", "history.speed_meters_per_second"
+        ).with_columns(pl.lit(i).alias("train_idx"))
         if df.height > 0:
             slts_results.append(df)
         i += 1
     all = pl.concat(slts_results, how="diagonal_relaxed")
     val = (
-        all.sort("train_idx", "history.speed")
+        all.sort("train_idx", "history.speed_meters_per_second")
         .with_columns(
             (
-                pl.col("history.speed")
-                - pl.col("history.speed").shift(1).over("train_idx").fill_null(0.0)
+                pl.col("history.speed_meters_per_second")
+                - pl.col("history.speed_meters_per_second")
+                .shift(1)
+                .over("train_idx")
+                .fill_null(0.0)
             ).alias("speed_change")
         )
         .with_columns(
-            pl.when(pl.col("speed_change") < 0, pl.col("history.speed") == 0)
+            pl.when(
+                pl.col("speed_change") < 0,
+                pl.col("history.speed_meters_per_second") == 0,
+            )
             .then(1)
             .otherwise(0)
             .alias("stop")
