@@ -10,7 +10,7 @@ from pathlib import Path
 sns.set_theme()
 
 SHOW_PLOTS = alt.utils.show_plots()
-SAVE_INTERVAL = 1
+SAVE_INTERVAL = 30
 # %
 
 # %%
