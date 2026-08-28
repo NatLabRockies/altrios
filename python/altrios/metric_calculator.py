@@ -1479,16 +1479,16 @@ def calculate_meet_pass_events(info: ScenarioInfo, units: str) -> MetricType:
             return metric("Meet_Pass_Events", units, None)
 
         # NOTE: this code is somewhat clunky and would probably benifit from streamlining
-        df = alt.SpeedLimitTrainSim.from_pydict(slts).to_dataframe()
-        if ("history.time_seconds" not in df.collect_schema()) or (
-            "history.speed_meters_per_second" not in df.collect_schema()
+        lf = alt.SpeedLimitTrainSim.from_pydict(slts).to_dataframe().lazy()
+        if ("history.time_seconds" not in lf.collect_schema()) or (
+            "history.speed_meters_per_second" not in lf.collect_schema()
         ):
             print(
                 "SpeedLimitTrainSim history doesn't include time and/or speed, so meet pass events cannot be counted."
             )
             return metric("Meet_Pass_Events", units, None)
 
-        df = df.select(
+        df = lf.select(
             "history.time_seconds", "history.speed_meters_per_second"
         ).with_columns(pl.lit(i).alias("train_idx"))
         if df.height > 0:
@@ -1519,8 +1519,11 @@ def calculate_meet_pass_events(info: ScenarioInfo, units: str) -> MetricType:
         .agg(
             (pl.max_horizontal([0, pl.col("stop").sum() - 1]).alias("meet_pass_stops"))
         )
-        .get_column("meet_pass_stops")
-        .sum()
+        # .get_column("meet_pass_stops")
+        # .sum()
+        .select(pl.col("meet_pass_stops").sum())
+        .collect(engine="streaming")
+        .item()
     )
     return metric("Meet_Pass_Events", units, val)
 

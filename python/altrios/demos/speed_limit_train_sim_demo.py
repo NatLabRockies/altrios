@@ -129,8 +129,10 @@ loco_con_sans_buffers = alt.Consist(
 # Instantiate the intermediate `TrainSimBuilder`
 tsb = alt.TrainSimBuilder(
     train_id="0",
-    origin_id="Toronto",
-    destination_id="Battle_Creek",
+    # origin_id="Toronto",
+    # destination_id="Battle_Creek",
+    origin_id="Allouez",
+    destination_id="Hibbing",
     train_config=train_config,
     loco_con=loco_con,
 )
@@ -138,27 +140,29 @@ tsb = alt.TrainSimBuilder(
 # Instantiate the intermediate `TrainSimBuilder`
 tsb_sans_buffers = alt.TrainSimBuilder(
     train_id="0",
-    origin_id="Toronto",
-    destination_id="Battle_Creek",
+    # origin_id="Toronto",
+    # destination_id="Battle_Creek",
+    origin_id="Allouez",
+    destination_id="Hibbing",
     train_config=train_config,
     loco_con=loco_con_sans_buffers,
 )
 
 # Load the network and construct the timed link path through the network.
 print("Loading `Network`")
-# network = alt.Network.from_file(
-#     altrios_local_location + "networks/Taconite-NoBalloon.yaml"
-# )
 network = alt.Network.from_file(
-    altrios_local_location + "networks/Toronto_Battle Creek.yaml"
+    altrios_local_location + "networks/Taconite-NoBalloon.yaml"
 )
-
-# location_map = alt.import_locations(
-#     altrios_local_location + "networks/default_locations.csv"
+# network = alt.Network.from_file(
+#     altrios_local_location + "networks/Toronto_Battle Creek.yaml"
 # )
+
 location_map = alt.import_locations(
-    altrios_local_location + "networks/Toronto_Battle Creek_locations.csv"
+    altrios_local_location + "networks/default_locations.csv"
 )
+# location_map = alt.import_locations(
+#     altrios_local_location + "networks/Toronto_Battle Creek_locations.csv"
+# )
 train_sim: alt.SpeedLimitTrainSim = tsb.make_speed_limit_train_sim(
     location_map=location_map,
     save_interval=SAVE_INTERVAL,
