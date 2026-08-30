@@ -55,6 +55,34 @@ for target in targets:
                 f"{meet_pass_event_count:.0f}"
             )
 
+        dwell_fuel_energy = metric_calculator.calculate_dwell_fuel_energy(
+            scenario_info, "MJ"
+        )
+        dwell_fuel_energy_mj = metric_calculator.value_from_metrics(
+            dwell_fuel_energy
+        )
+        if dwell_fuel_energy_mj is None:
+            print(f"Dwell fuel energy in {scenario_info.scenario_year}: unavailable")
+        else:
+            print(
+                f"Dwell fuel energy in {scenario_info.scenario_year}: "
+                f"{dwell_fuel_energy_mj:.3f} MJ"
+            )
+
+        apu_fuel_consumption = metric_calculator.calculate_apu_fuel_consumption(
+            scenario_info, "MJ"
+        )
+        apu_fuel_energy_mj = metric_calculator.value_from_metrics(
+            apu_fuel_consumption
+        )
+        if apu_fuel_energy_mj is None:
+            print(f"APU fuel energy in {scenario_info.scenario_year}: unavailable")
+        else:
+            print(
+                f"APU fuel energy in {scenario_info.scenario_year}: "
+                f"{apu_fuel_energy_mj:.3f} MJ"
+            )
+
 # %%
 # Plotting code currently just plots the first year of a multi-year simulation.
 to_plot = scenario_infos[0].sims.to_pydict()
