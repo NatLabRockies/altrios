@@ -41,16 +41,19 @@ for target in targets:
         write_metrics=True,
         network_filename_path=alt.resources_root() / "networks/Taconite-NoBalloon.yaml",
     )
-
+    print(len(scenario_infos),len(metrics))
     for scenario_info in scenario_infos:
         meet_pass_events = metric_calculator.calculate_meet_pass_events(
             scenario_info, "count"
         )
         meet_pass_event_count = metric_calculator.value_from_metrics(meet_pass_events)
-        print(
-            f"Meet/pass events in {scenario_info.scenario_year}: "
-            f"{meet_pass_event_count:.0f}"
-        )
+        if meet_pass_event_count is None:
+            print(f"Meet/pass events in {scenario_info.scenario_year}: unavailable")
+        else:
+            print(
+                f"Meet/pass events in {scenario_info.scenario_year}: "
+                f"{meet_pass_event_count:.0f}"
+            )
 
 # %%
 # Plotting code currently just plots the first year of a multi-year simulation.
@@ -107,8 +110,8 @@ for idx, sim_dict in enumerate(to_plot[:10]):
 
     plt.tight_layout()
 
-    if SHOW_PLOTS:
-        plt.show()
+    # if SHOW_PLOTS:
+    #     plt.show()
 
 
 # %%

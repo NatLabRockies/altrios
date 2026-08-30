@@ -128,6 +128,9 @@ def main(
     scenario_infos: Union[ScenarioInfo, List[ScenarioInfo]],
     annual_metrics: Union[Tuple[str, str], List[Tuple[str, str]]] = [
         ("Meet_Pass_Events", "count"),
+        ("Dwell_Time", "seconds"),
+        ("Dwell_Fuel_Energy", "MJ"),
+        ("APU_Fuel_Consumption", "MJ"),
         ("Freight_Moved", "million tonne-mi"),
         ("Freight_Moved", "car-miles"),
         ("Freight_Moved", "cars"),
@@ -1472,27 +1475,23 @@ def calculate_meet_pass_events(info: ScenarioInfo, units: str) -> MetricType:
     slts_results = []
     i = 0
     for slts in info.sims.to_pydict():
-        if len(slts["history"]) == 0:
+        history = slts["history"]
+        time_seconds = history.get("time_seconds", [])
+        speed_meters_per_second = history.get("speed_meters_per_second", [])
+        if not time_seconds or not speed_meters_per_second:
             print(
                 "No SpeedLimitTrainSim history was saved, so meet pass events cannot be counted."
             )
             return metric("Meet_Pass_Events", units, None)
 
         # NOTE: this code is somewhat clunky and would probably benifit from streamlining
-        lf = alt.SpeedLimitTrainSim.from_pydict(slts).to_dataframe().lazy()
-        if ("history.time_seconds" not in lf.collect_schema()) or (
-            "history.speed_meters_per_second" not in lf.collect_schema()
-        ):
-            print(
-                "SpeedLimitTrainSim history doesn't include time and/or speed, so meet pass events cannot be counted."
-            )
-            return metric("Meet_Pass_Events", units, None)
-
-        df = lf.select(
-            "history.time_seconds", "history.speed_meters_per_second"
+        df = pl.LazyFrame(
+            {
+                "history.time_seconds": time_seconds,
+                "history.speed_meters_per_second": speed_meters_per_second,
+            }
         ).with_columns(pl.lit(i).alias("train_idx"))
-        if df.height > 0:
-            slts_results.append(df)
+        slts_results.append(df)
         i += 1
     all = pl.concat(slts_results, how="diagonal_relaxed")
     val = (
@@ -1522,14 +1521,229 @@ def calculate_meet_pass_events(info: ScenarioInfo, units: str) -> MetricType:
         # .get_column("meet_pass_stops")
         # .sum()
         .select(pl.col("meet_pass_stops").sum())
-        .collect(engine="streaming")
+        .collect()
         .item()
     )
     return metric("Meet_Pass_Events", units, val)
 
 
+def calculate_dwell_time(info: ScenarioInfo, units: str) -> MetricType:
+    slts_results = []
+    i = 0
+    for slts in info.sims.to_pydict():
+        history = slts["history"]
+        time_seconds = history.get("time_seconds", [])
+        speed_meters_per_second = history.get("speed_meters_per_second", [])
+        if not time_seconds or not speed_meters_per_second:
+            print(
+                "No SpeedLimitTrainSim history was saved, so dwell time cannot be calculated."
+            )
+            return metric("Dwell_Time", units, None)
+
+        df = pl.LazyFrame(
+            {
+                "history.time_seconds": time_seconds,
+                "history.speed_meters_per_second": speed_meters_per_second,
+            }
+        ).with_columns(pl.lit(i).alias("train_idx"))
+        slts_results.append(df)
+        i += 1
+    all = pl.concat(slts_results, how="diagonal_relaxed")
+    val = (
+        all.sort("train_idx", "history.time_seconds")
+        .with_columns(
+            (
+                pl.col("history.time_seconds")
+                .shift(-1)
+                .over("train_idx")
+                - pl.col("history.time_seconds")
+            )
+            .fill_null(0.0)
+            .alias("interval_seconds")
+        )
+        .with_columns(
+            pl.when(pl.col("history.speed_meters_per_second") == 0)
+            .then(pl.col("interval_seconds"))
+            .otherwise(0.0)
+            .alias("dwell_seconds")
+        )
+        .select(pl.col("dwell_seconds").sum())
+        .collect()
+        .item()
+    )
+    return metric("Dwell_Time", units, val)
+
+
+def calculate_dwell_fuel_energy(info: ScenarioInfo, units: str) -> MetricType:
+    if units == "J":
+        conversion_from_joule = 1.0
+    elif units == "MJ":
+        conversion_from_joule = 1e-6
+    elif units == "MWh":
+        conversion_from_joule = utilities.KWH_PER_MJ / 1e9
+    elif units == "kWh":
+        conversion_from_joule = utilities.KWH_PER_MJ / 1e6
+    else:
+        print(f"Units of {units} not supported for dwell fuel energy calculation.")
+        return metric("Dwell_Fuel_Energy", units, None)
+
+    slts_results = []
+    i = 0
+    for slts in info.sims.to_pydict():
+        history = slts["history"]
+        time_seconds = history.get("time_seconds", [])
+        speed_meters_per_second = history.get("speed_meters_per_second", [])
+        fuel_power_watts = slts["loco_con"]["history"].get("pwr_fuel_watts", [])
+        if (
+            not time_seconds
+            or not speed_meters_per_second
+            or not fuel_power_watts
+        ):
+            print(
+                "No SpeedLimitTrainSim history was saved, so dwell fuel energy cannot be calculated."
+            )
+            return metric("Dwell_Fuel_Energy", units, None)
+
+        df = pl.LazyFrame(
+            {
+                "history.time_seconds": time_seconds,
+                "history.speed_meters_per_second": speed_meters_per_second,
+                "loco_con.history.pwr_fuel_watts": fuel_power_watts,
+            }
+        ).with_columns(pl.lit(i).alias("train_idx"))
+        slts_results.append(df)
+        i += 1
+    all = pl.concat(slts_results, how="diagonal_relaxed")
+    val = (
+        all.sort("train_idx", "history.time_seconds")
+        .with_columns(
+            (
+                pl.col("history.time_seconds")
+                .shift(-1)
+                .over("train_idx")
+                - pl.col("history.time_seconds")
+            )
+            .fill_null(0.0)
+            .alias("interval_seconds")
+        )
+        .with_columns(
+            pl.when(pl.col("history.speed_meters_per_second") == 0)
+            .then(
+                pl.col("loco_con.history.pwr_fuel_watts")
+                * pl.col("interval_seconds")
+            )
+            .otherwise(0.0)
+            .alias("dwell_fuel_energy_joules")
+        )
+        .select(pl.col("dwell_fuel_energy_joules").sum())
+        .collect()
+        .item()
+    )
+    return metric("Dwell_Fuel_Energy", units, val * conversion_from_joule)
+
+
+def calculate_apu_fuel_consumption(info: ScenarioInfo, units: str) -> MetricType:
+    if units == "J":
+        conversion_from_joule = 1.0
+    elif units == "MJ":
+        conversion_from_joule = 1e-6
+    elif units == "MWh":
+        conversion_from_joule = utilities.KWH_PER_MJ / 1e9
+    elif units == "kWh":
+        conversion_from_joule = utilities.KWH_PER_MJ / 1e6
+    else:
+        print(f"Units of {units} not supported for APU fuel consumption calculation.")
+        return metric("APU_Fuel_Consumption", units, None)
+
+    diesel_emissions_factors = emissions_factors_greet.filter(
+        pl.col("Name") == pl.lit("ultra low sulfur diesel")
+    )
+    lhv_kj_per_kg = diesel_emissions_factors.get_column("LowHeatingValue")[0] * 1e3
+    rho_fuel_g_per_gallon = diesel_emissions_factors.get_column("Density")[0]
+    joules_per_gallon = lhv_kj_per_kg * rho_fuel_g_per_gallon
+
+    slts_results = []
+    i = 0
+    for slts in info.sims.to_pydict():
+        history = slts["history"]
+        time_seconds = history.get("time_seconds", [])
+        speed_meters_per_second = history.get("speed_meters_per_second", [])
+        locomotive_aux_power_watts = [
+            locomotive["history"].get("pwr_aux_watts", [])
+            for locomotive in slts["loco_con"]["loco_vec"]
+        ]
+        if (
+            not time_seconds
+            or not speed_meters_per_second
+            or not locomotive_aux_power_watts
+            or any(not power for power in locomotive_aux_power_watts)
+        ):
+            print(
+                "No SpeedLimitTrainSim history was saved, so APU fuel consumption cannot be calculated."
+            )
+            return metric("APU_Fuel_Consumption", units, None)
+
+        required_power_watts = [
+            sum(power_by_locomotive)
+            for power_by_locomotive in zip(*locomotive_aux_power_watts)
+        ]
+        if len(required_power_watts) != len(time_seconds):
+            print(
+                "Locomotive auxiliary-power history does not align with train history, so APU fuel consumption cannot be calculated."
+            )
+            return metric("APU_Fuel_Consumption", units, None)
+
+        df = pl.LazyFrame(
+            {
+                "history.time_seconds": time_seconds,
+                "history.speed_meters_per_second": speed_meters_per_second,
+                "required_power_watts": required_power_watts,
+            }
+        ).with_columns(pl.lit(i).alias("train_idx"))
+        slts_results.append(df)
+        i += 1
+    all = pl.concat(slts_results, how="diagonal_relaxed")
+    val = (
+        all.sort("train_idx", "history.time_seconds")
+        .with_columns(
+            (
+                pl.col("history.time_seconds")
+                .shift(-1)
+                .over("train_idx")
+                - pl.col("history.time_seconds")
+            )
+            .fill_null(0.0)
+            .alias("interval_seconds")
+        )
+        .with_columns(
+            pl.when(pl.col("history.speed_meters_per_second") == 0)
+            .then(
+                (
+                    0.063 * pl.col("required_power_watts") / 1_000.0
+                    + 0.4115
+                )
+                * pl.col("interval_seconds")
+                / 3_600.0
+            )
+            .otherwise(0.0)
+            .alias("apu_fuel_gallons")
+        )
+        .select(pl.col("apu_fuel_gallons").sum())
+        .collect()
+        .item()
+    )
+    return metric(
+        "APU_Fuel_Consumption",
+        units,
+        val * joules_per_gallon * conversion_from_joule,
+    )
+
+
 function_mappings = {
     "Meet_Pass_Events": calculate_meet_pass_events,
+    "Dwell_Time": calculate_dwell_time,
+    "Dwell_Fuel_Energy": calculate_dwell_fuel_energy,
+    "APU_Fuel_Consumption": calculate_apu_fuel_consumption,
     "Energy_Costs": calculate_energy_cost,
     "Freight_Moved": calculate_freight_moved,
     "Energy_Per_Freight_Moved": calculate_energy_per_freight,
