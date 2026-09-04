@@ -1,6 +1,6 @@
 # %%
 import altrios as alt
-from altrios import rollout, defaults
+from altrios import defaults, metric_calculator, rollout
 from altrios.train_planner import planner_config
 import numpy as np
 import matplotlib.pyplot as plt
@@ -10,7 +10,7 @@ from pathlib import Path
 sns.set_theme()
 
 SHOW_PLOTS = alt.utils.show_plots()
-SAVE_INTERVAL = 1 if SHOW_PLOTS else None
+SAVE_INTERVAL = 30
 # %
 
 # %%
@@ -41,6 +41,47 @@ for target in targets:
         write_metrics=True,
         network_filename_path=alt.resources_root() / "networks/Taconite-NoBalloon.yaml",
     )
+    print(len(scenario_infos),len(metrics))
+    for scenario_info in scenario_infos:
+        meet_pass_events = metric_calculator.calculate_meet_pass_events(
+            scenario_info, "count"
+        )
+        meet_pass_event_count = metric_calculator.value_from_metrics(meet_pass_events)
+        if meet_pass_event_count is None:
+            print(f"Meet/pass events in {scenario_info.scenario_year}: unavailable")
+        else:
+            print(
+                f"Meet/pass events in {scenario_info.scenario_year}: "
+                f"{meet_pass_event_count:.0f}"
+            )
+
+        dwell_fuel_energy = metric_calculator.calculate_dwell_fuel_energy(
+            scenario_info, "MJ"
+        )
+        dwell_fuel_energy_mj = metric_calculator.value_from_metrics(
+            dwell_fuel_energy
+        )
+        if dwell_fuel_energy_mj is None:
+            print(f"Dwell fuel energy in {scenario_info.scenario_year}: unavailable")
+        else:
+            print(
+                f"Dwell fuel energy in {scenario_info.scenario_year}: "
+                f"{dwell_fuel_energy_mj:.3f} MJ"
+            )
+
+        apu_fuel_consumption = metric_calculator.calculate_apu_fuel_consumption(
+            scenario_info, "MJ"
+        )
+        apu_fuel_energy_mj = metric_calculator.value_from_metrics(
+            apu_fuel_consumption
+        )
+        if apu_fuel_energy_mj is None:
+            print(f"APU fuel energy in {scenario_info.scenario_year}: unavailable")
+        else:
+            print(
+                f"APU fuel energy in {scenario_info.scenario_year}: "
+                f"{apu_fuel_energy_mj:.3f} MJ"
+            )
 
 # %%
 # Plotting code currently just plots the first year of a multi-year simulation.
@@ -97,8 +138,8 @@ for idx, sim_dict in enumerate(to_plot[:10]):
 
     plt.tight_layout()
 
-    if SHOW_PLOTS:
-        plt.show()
+    # if SHOW_PLOTS:
+    #     plt.show()
 
 
 # %%

@@ -76,19 +76,19 @@ loco_con = alt.Consist(loco_vec)
 # Instantiate the intermediate `TrainSimBuilder`
 tsb = alt.TrainSimBuilder(
     train_id="0",
-    origin_id="A",
-    destination_id="B",
+    origin_id="Toronto",
+    destination_id="Battle_Creek",
     train_config=train_config,
     loco_con=loco_con,
 )
 
 # Load the network and construct the timed link path through the network.
 network = alt.Network.from_file(
-    alt.resources_root() / "networks/simple_corridor_network.yaml"
+    alt.resources_root() / "networks/Toronto_Battle Creek.yaml"
 )
 
 location_map = alt.import_locations(
-    alt.resources_root() / "networks/simple_corridor_locations.csv"
+    alt.resources_root() / "networks/Toronto_Battle Creek_locations.csv"
 )
 train_sim: alt.SetSpeedTrainSim = tsb.make_speed_limit_train_sim(
     location_map=location_map,
