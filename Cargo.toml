@@ -8,7 +8,7 @@ resolver = "2"
 
 [workspace.package]
 authors = [
-    "ALTRIOS Team <altrios@nrel.gov>",
+    "ALTRIOS Team <altrios@nlr.gov>",
     "Chad Baker, Lead Developer",
     "Nick Reinicke, Developer",
     "Matt Bruchon, Developer",
@@ -24,8 +24,8 @@ authors = [
 ]
 license = "BSD-3-Clause"
 edition = "2021"
-homepage = "https://www.nrel.gov/transportation/altrios.html"
-repository = "https://github.com/NREL/altrios"
+homepage = "https://www.nlr.gov/transportation/altrios"
+repository = "https://github.com/NatLabRockies/altrios"
 rust-version = "1.83"
 
 [profile.dev]

@@ -30,7 +30,7 @@ wheels = [
 
 [[package]]
 name = "altrios"
-version = "0.3.0"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "executing" },
@@ -133,6 +133,7 @@ requires-dist = [
     { name = "typing-extensions" },
     { name = "xlrd" },
 ]
+
 provides-extras = ["networkbuilder", "mapping", "dev"]
 
 [package.metadata.requires-dev]

@@ -5,7 +5,7 @@ edition = { workspace = true }
 license = { workspace = true }
 homepage = { workspace = true }
 repository = { workspace = true }
-version = "0.2.3"
+version = "1.0.1"
 description = "ALTRIOS Core model for train simulation"
 readme = "README.md"
 rust-version = { workspace = true }

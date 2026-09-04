@@ -14,8 +14,6 @@ use crate::track::link::network::Network;
 use crate::track::LocationMap;
 
 #[allow(unused_imports)]
-use polars_lazy::prelude::*;
-#[allow(unused_imports)]
 use rayon::prelude::*;
 
 #[serde_api]
