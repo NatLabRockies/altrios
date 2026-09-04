@@ -1,5 +1,4 @@
 version = 1
-revision = 2
 requires-python = ">=3.10, <3.12"
 resolution-markers = [
     "python_full_version >= '3.11'",
@@ -30,7 +29,7 @@ wheels = [
 
 [[package]]
 name = "altrios"
-version = "0.3.0"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "executing" },
@@ -111,6 +110,7 @@ requires-dist = [
     { name = "typing-extensions" },
     { name = "xlrd" },
 ]
+
 provides-extras = ["networkbuilder", "dev"]
 
 [package.metadata.requires-dev]

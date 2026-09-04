@@ -179,7 +179,7 @@ impl SpeedLimitTrainSim {
     ) -> anyhow::Result<()> {
         let network = Vec::<Link>::from_file(network_file_path, false).unwrap();
 
-        self.extend_path(&network, &link_path)?;
+        self.extend_path_tpc(&network, &link_path)?;
         Ok(())
     }
 
@@ -451,7 +451,11 @@ impl SpeedLimitTrainSim {
         self.save_interval
     }
 
-    pub fn extend_path(&mut self, network: &[Link], link_path: &[LinkIdx]) -> anyhow::Result<()> {
+    pub fn extend_path_tpc(
+        &mut self,
+        network: &[Link],
+        link_path: &[LinkIdx],
+    ) -> anyhow::Result<()> {
         self.path_tpc
             .extend(network, link_path)
             .with_context(|| format_dbg!())?;
@@ -597,20 +601,31 @@ impl SpeedLimitTrainSim {
                 idx_next += 1;
             }
             let time_extend = timed_path[idx_next - 1].time;
-            self.extend_path(
+            self.extend_path_tpc(
                 network,
                 &timed_path[idx_prev..idx_next]
                     .iter()
                     .map(|x| x.link_idx)
                     .collect::<Vec<LinkIdx>>(),
-            )?;
+            )
+            .with_context(|| format!("{}\nidx_prev: {idx_prev}", format_dbg!()))?;
             idx_prev = idx_next;
             while *self.state.time.get_fresh(|| format_dbg!())? < time_extend {
-                self.step(|| format_dbg!())?;
+                self.step(|| format_dbg!()).with_context(|| {
+                    format!(
+                        "{}\n`self.state.time`: {:?}\n`time_extend`: {:?}",
+                        format_dbg!(),
+                        self.state.time,
+                        time_extend
+                    )
+                })?;
             }
         }
 
-        self.walk_internal()
+        // Chad thinks this finishes up the last stretch of the timed path but
+        // does not rerun the whole thing
+        self.walk_internal().with_context(|| format_dbg!())?;
+        Ok(())
     }
 
     /// Sets power requirements based on:

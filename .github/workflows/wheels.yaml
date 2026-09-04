@@ -9,7 +9,7 @@ on:
 # run tests, build, upload
 jobs:
   call-tests:
-    uses: nrel/altrios/.github/workflows/py-tests.yaml@main
+    uses: natlabrockies/altrios/.github/workflows/py-tests.yaml@main
   build:
     name: build py3.${{ matrix.python-version }} on ${{ matrix.platform || matrix.os }}
     needs: call-tests
@@ -81,7 +81,7 @@ jobs:
           path: dist
 
   upload:
-    if: github.repository == 'nrel/altrios' || github.repository == 'nrel/altrios-private'
+    if: github.repository == 'natlabrockies/altrios' || github.repository == 'natlabrockies/altrios-private' || github.repository == 'natlabrockies/altrios-applied'
     needs: build
     runs-on: ubuntu-latest
     environment:

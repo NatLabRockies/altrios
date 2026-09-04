@@ -23,7 +23,7 @@ liquid_fuel_prices_eia = (
     .select(["Year", "   Diesel Fuel (distillate fuel oil) 6/"])
     .rename({"   Diesel Fuel (distillate fuel oil) 6/": "Price"})
 )
-battery_prices_nrel_atb = (pl.read_csv(source=defaults.BATTERY_PRICE_FILE)).filter(
+battery_prices_nlr_atb = (pl.read_csv(source=defaults.BATTERY_PRICE_FILE)).filter(
     pl.col("Scenario") == "Moderate"
 )
 
@@ -125,20 +125,21 @@ def value_from_metrics(
 
 
 def main(
-    scenario_infos: Union[ScenarioInfo, List[ScenarioInfo]],
-    annual_metrics: Union[Tuple[str, str], List[Tuple[str, str]]] = [
-        ("Meet_Pass_Events", "count"),
-        ("Freight_Moved", "million tonne-mi"),
-        ("Freight_Moved", "car-miles"),
-        ("Freight_Moved", "cars"),
-        ("Freight_Moved", "detailed"),
-        ("GHG", "tonne CO2-eq"),
-        ("Count_Locomotives", "assets"),
-        ("Count_Refuelers", "assets"),
-        ("Energy_Costs", "USD"),
-        ("Energy_Per_Freight_Moved", "kWh per car-mile"),
-    ],
-    calculate_multiyear_metrics: bool = True,
+        scenario_infos: Union[ScenarioInfo, List[ScenarioInfo]],
+        annual_metrics: Union[Tuple[str, str],
+                              List[Tuple[str, str]]] = [
+            ('Freight_Moved', 'million tonne-mi'),
+            ('Freight_Moved', 'million tonne-km'),
+            ('Freight_Moved', 'car-miles'),
+            ('Freight_Moved', 'cars'),
+            ('Freight_Moved', 'detailed car counts'),
+            ('GHG', 'tonne CO2-eq'),
+            ('Count_Locomotives', 'assets'),
+            ('Count_Refuelers', 'assets'),
+            ('Energy_Costs', 'USD'),
+            ('Energy_Per_Freight_Moved', 'kWh per car-mile')
+        ],
+        calculate_multiyear_metrics: bool = True,
 ) -> pl.DataFrame:
     """
     Given a set of simulation results and the associated consist plans, computes economic and environmental metrics.
@@ -220,40 +221,33 @@ def calculate_rollout_lcotkm(values: MetricType) -> MetricType:
     DataFrame of LCOTKM result (metric name, units, value, and scenario year)
     """
 
-    cost_timeseries = (
-        values.filter(
-            (pl.col("Metric") == pl.lit("Cost_Total")) & (pl.col("Subset") == "All")
+    cost_timeseries = (values
+        .filter(
+            pl.col("Metric")==pl.lit("Cost_Total"),
+            pl.col("Subset")=="All"
+        )
+        .select(["Year","Value"])
+        .rename({"Value": "Cost_Total"}))
+    tkm_timeseries = (values
+        .filter(
+            pl.col("Metric")==pl.lit("Freight_Moved"),
+            pl.col("Units")==pl.lit("million tonne-km")
         )
         .select(["Year", "Value"])
-        .rename({"Value": "Cost_Total"})
-    )
-    tkm_timeseries = (
-        values.filter(pl.col("Metric") == pl.lit("Mt-km"))
-        .select(["Year", "Value"])
-        .rename({"Value": "Mt-km"})
-    )
+        .rename({"Value": "Mt-km"}))
     timeseries = cost_timeseries.join(tkm_timeseries, on="Year", how="outer")
-    timeseries = (
-        timeseries.with_columns(
-            (pl.col("Year") - pl.col("Year").min()).alias("Year_Offset")
-        )
-        .with_columns(
-            ((1 + defaults.DISCOUNT_RATE) ** pl.col("Year_Offset")).alias(
-                "Discounting_Factor"
-            )
-        )
-        .with_columns(
-            (pl.col("Cost_Total") / pl.col("Discounting_Factor")).alias(
-                "Cost_Total_Discounted"
-            ),
-            (pl.col("Mt-km") / pl.col("Discounting_Factor")).alias("Mt-km_Discounted"),
-        )
-        .with_columns(pl.col("Year").cast(pl.Utf8))
-    )
+    timeseries = (timeseries
+                  .with_columns((pl.col("Year") - pl.col("Year").min()).alias("Year_Offset"))
+                  .with_columns(((1+defaults.DISCOUNT_RATE)**pl.col("Year_Offset")).alias("Discounting_Factor"))
+                  .with_columns(
+                    (pl.col("Cost_Total") / pl.col("Discounting_Factor")).alias("Cost_Total_Discounted"),
+                    (pl.col("Mt-km") / pl.col("Discounting_Factor")).alias("Mt-km_Discounted"))
+                  .with_columns(pl.col("Year").cast(pl.Utf8)))           
     cost_total = timeseries.get_column("Cost_Total_Discounted").sum()
-    starting_residual_value_to_subtract = values.filter(
-        pl.col("Metric") == pl.lit("Asset_Value_Initial")
-    ).get_column("Value")[0]
+    starting_residual_value_to_subtract = (values
+        .filter(pl.col("Metric")==pl.lit("Asset_Value_Initial"))
+        .get_column("Value")[0]
+    )
     cost_minus_residual_baseline = (
         cost_total
         + starting_residual_value_to_subtract
@@ -607,7 +601,7 @@ def calculate_freight_moved(info: ScenarioInfo, units: str) -> MetricType:
             pl.DataFrame(
                 data={
                     "car-km": [
-                        sim.get_kilometers(annualize=info.annualize)
+                        alt.SpeedLimitTrainSim.from_pydict(sim).get_kilometers(annualize=info.annualize)
                         for sim in info.sims.to_pydict()
                     ]
                 }
@@ -615,7 +609,7 @@ def calculate_freight_moved(info: ScenarioInfo, units: str) -> MetricType:
             .with_row_index("idx")
             .with_columns(pl.col("car-km").mul(utilities.MI_PER_KM).alias("car-miles"))
         )
-        all_n_cars_by_type = [sim.n_cars_by_type for sim in info.sims.to_pydict()]
+        all_n_cars_by_type = [sim['n_cars_by_type'] for sim in info.sims.to_pydict()]
         car_counts = (
             pl.concat(
                 [pl.from_dict(item) for item in all_n_cars_by_type],
@@ -1437,7 +1431,7 @@ def import_energy_prices_eia(
 
 
 def add_battery_costs(loco_info: pd.DataFrame, year: int) -> pd.DataFrame:
-    prices_to_use = battery_prices_nrel_atb.filter(
+    prices_to_use = battery_prices_nlr_atb.filter(
         (pl.col("Year") - pl.lit(year)).abs().min()
         == (pl.col("Year") - pl.lit(year)).abs()
     )

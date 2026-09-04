@@ -42,10 +42,10 @@ print(
 )
 
 train_planner_config = planner_config.TrainPlannerConfig(
-    cars_per_locomotive={"Default": 50},
-    target_cars_per_train={"Default": 90},
-    require_diesel=True,
-)
+            cars_per_locomotive={"Default": 50},
+            target_cars_per_train={"Default": 90},
+            loco_type_shares={'BEL': 0.5, 'Diesel_Large': 0.5},
+            require_diesel=True)
 
 t0_main = time.perf_counter()
 

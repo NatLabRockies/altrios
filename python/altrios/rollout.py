@@ -41,8 +41,13 @@ def simulate_prescribed_rollout(
             else:
                 target_bel_shares[idx] = ((idx) / (len(years) - 1)) * max_bel_share
 
-    save_dir = Path(results_folder)  # make sure it's a path
-    save_dir.mkdir(exist_ok=True, parents=True)
+    loco_type_shares = []
+    for target_bel_share in target_bel_shares:
+        annual_loco_type_shares = {"BEL": target_bel_share, "Diesel_Large": 1 - target_bel_share}
+        loco_type_shares.append(annual_loco_type_shares)
+
+    save_dir = Path(results_folder) # make sure it's a path
+    save_dir.mkdir(exist_ok=True, parents=True) 
     with open(save_dir / "README.md", "w") as file:
         file.writelines(
             [
@@ -86,6 +91,7 @@ def simulate_prescribed_rollout(
     sim_days = defaults.SIMULATION_DAYS
     scenarios = []
     for idx, scenario_year in enumerate(years):
+        train_planner_config.loco_type_shares = loco_type_shares[idx]
         t0 = time.perf_counter()
         (
             train_consist_plan,
@@ -102,7 +108,6 @@ def simulate_prescribed_rollout(
             location_map=location_map,
             simulation_days=sim_days,
             scenario_year=scenario_year,
-            target_bel_share=target_bel_shares[idx],
             debug=True,
             train_planner_config=train_planner_config,
             demand_file=demand_paths[idx],

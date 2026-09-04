@@ -638,7 +638,7 @@ pub fn make_est_times<N: AsRef<[Link]>>(
             train_sim: {
                 let mut train_sim = Box::new(speed_limit_train_sim.clone());
                 train_sim
-                    .extend_path(network, &[orig.link_idx])
+                    .extend_path_tpc(network, &[orig.link_idx])
                     .with_context(|| format_dbg!())?;
                 train_sim
             },
@@ -771,7 +771,7 @@ pub fn make_est_times<N: AsRef<[Link]>>(
                         let mut new_sim = sim.clone();
                         if let Err(err) = new_sim
                             .train_sim
-                            .extend_path(network, &[link_idx_next_alt])
+                            .extend_path_tpc(network, &[link_idx_next_alt])
                             .with_context(|| format_dbg!())
                         {
                             if let Some(save_path) = path_for_failed_sim {
@@ -794,7 +794,7 @@ pub fn make_est_times<N: AsRef<[Link]>>(
                 };
                 // Extend the path for the current sim with the chosen next link.
                 sim.train_sim
-                    .extend_path(network, &[link_idx_next])
+                    .extend_path_tpc(network, &[link_idx_next])
                     .with_context(|| format_dbg!())?;
                 sim.check_dests(dests);
             }

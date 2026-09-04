@@ -99,6 +99,7 @@ class TrainPlannerConfig:
             "Lifespan_Years": defaults.LOCO_LIFESPAN
         }
     }).transpose().reset_index(names='Refueler_Type'))
+    loco_type_shares: Optional[Dict] = None
     drag_coeff_function: Optional[Callable]= None
     dispatch_scheduler: Optional[Callable] = None
     return_demand_generators: Optional[Dict] = None #default defined in train_demand_generators.py

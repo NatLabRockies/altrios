@@ -4,9 +4,9 @@ build-backend = "maturin"
 
 [project]
 name = "altrios"
-version = "0.3.0"
+version = "1.1.0"
 authors = [
-    { name = "ALTRIOS Team", email = "altrios@nrel.gov" },
+    { name = "ALTRIOS Team", email = "altrios@nlr.gov" },
     { name = "Chad Baker, Lead Developer" },
     { name = "Nick Reinicke, Developer" },
     { name = "Matt Bruchon, Developer" },
@@ -54,8 +54,8 @@ dependencies = [
 ]
 
 [project.urls]
-homepage = "https://www.nrel.gov/transportation/altrios.html"
-source = "https://github.com/NREL/altrios"
+homepage = "https://www.nlr.gov/transportation/altrios"
+source = "https://github.com/NatLabRockies/altrios"
 
 [project.optional-dependencies]
 # Deps for applications/network_builder (OSM -> ALTRIOS network pipeline)
@@ -91,8 +91,8 @@ include = [
     { format = "sdist", path = "altrios-core/src/*" },
     { format = "sdist", path = "altrios-py/Cargo.toml" },
     { format = "sdist", path = "altrios-py/src/*" },
-    { format = "sdist", path = "altrios-core/proc-macros/Cargo.toml" },
-    { format = "sdist", path = "altrios-core/proc-macros/src/*" },
+    { format = "sdist", path = "altrios-core/altrios-proc-macros/Cargo.toml" },
+    { format = "sdist", path = "altrios-core/altrios-proc-macros/src/*" },
 ]
 
 [tool.pixi.project]

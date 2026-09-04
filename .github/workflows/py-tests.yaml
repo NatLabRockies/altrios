@@ -18,10 +18,10 @@ on:
 
 jobs:
   call-rust-tests:
-    uses: nrel/altrios/.github/workflows/rust-tests.yaml@main
+    uses: natlabrockies/altrios/.github/workflows/rust-tests.yaml@main
   test:
     needs: call-rust-tests
-    if: github.repository == 'nrel/altrios' || github.repository == 'nrel/altrios-private'
+    if: github.repository == 'natlabrockies/altrios' || github.repository == 'natlabrockies/altrios-private' || github.repository == 'natlabrockies/altrios-applied'
 
     runs-on: ubuntu-latest
 

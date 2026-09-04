@@ -20,7 +20,6 @@ def main(
     simulation_days: int = defaults.SIMULATION_DAYS,
     warm_start_days: int = defaults.WARM_START_DAYS,
     scenario_year: int = defaults.BASE_ANALYSIS_YEAR,
-    target_bel_share: float = 0.5,
     debug: bool = False,
     loco_pool: Optional[pl.DataFrame] = None,
     refuelers: Optional[pl.DataFrame] = None,
@@ -74,15 +73,6 @@ def main(
         train_planner_config.loco_info, scenario_year
     )
     train_planner_config.simulation_days = simulation_days + 2 * warm_start_days
-
-    # TODO mbruchon: un-comment this and move it out into rollout.py so rollouts still work
-    # if loco_pool is None: loco_pool = planner.data_prep.build_locopool(
-    #        config = train_planner_config,
-    #       method="shares_twoway",
-    #        shares=[1-target_bel_share, target_bel_share],
-    #        demand_file=demand_file
-    #       )
-
     t0_ptc = time.perf_counter()
     (
         train_consist_plan,
