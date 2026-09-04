@@ -7,10 +7,9 @@ import os
 from copy import copy
 
 import altrios as alt
-from altrios import metric_calculator
 from altrios.demos import plot_util
 sns.set_theme()
-altrios_local_location = "C:/Users/fdste/OneDrive/Documents/GitHub/altrios-applied/python/altrios/resources/"
+
 
 SHOW_PLOTS = alt.utils.show_plots()
 
@@ -19,10 +18,10 @@ SAVE_INTERVAL = 1
 # Build the train config
 print("Loading rail vehicles")
 rail_vehicle_loaded = alt.RailVehicle.from_file(
-    altrios_local_location + "rolling_stock/Manifest_Loaded.yaml"
+    alt.resources_root() / "rolling_stock/Manifest_Loaded.yaml"
 )
 rail_vehicle_empty = alt.RailVehicle.from_file(
-    altrios_local_location + "rolling_stock/Manifest_Empty.yaml"
+    alt.resources_root() / "rolling_stock/Manifest_Empty.yaml"
 )
 
 # https://docs.rs/altrios-core/latest/altrios_core/train/struct.TrainConfig.html
@@ -41,7 +40,8 @@ train_config = alt.TrainConfig(
 # instantiate battery model
 # https://docs.rs/altrios-core/latest/altrios_core/consist/locomotive/powertrain/reversible_energy_storage/struct.ReversibleEnergyStorage.html#
 res = alt.ReversibleEnergyStorage.from_file(
-    altrios_local_location + "powertrains/reversible_energy_storages/Kokam_NMC_75Ah_flx_drive.yaml"
+    alt.resources_root()
+    / "powertrains/reversible_energy_storages/Kokam_NMC_75Ah_flx_drive.yaml"
 )
 # instantiate electric drivetrain (motors and any gearboxes)
 # https://docs.rs/altrios-core/latest/altrios_core/consist/locomotive/powertrain/electric_drivetrain/struct.ElectricDrivetrain.html
@@ -129,10 +129,8 @@ loco_con_sans_buffers = alt.Consist(
 # Instantiate the intermediate `TrainSimBuilder`
 tsb = alt.TrainSimBuilder(
     train_id="0",
-    # origin_id="Toronto",
-    # destination_id="Battle_Creek",
-    origin_id="Allouez",
-    destination_id="Hibbing",
+    origin_id="Minneapolis",
+    destination_id="Superior",
     train_config=train_config,
     loco_con=loco_con,
 )
@@ -140,10 +138,8 @@ tsb = alt.TrainSimBuilder(
 # Instantiate the intermediate `TrainSimBuilder`
 tsb_sans_buffers = alt.TrainSimBuilder(
     train_id="0",
-    # origin_id="Toronto",
-    # destination_id="Battle_Creek",
-    origin_id="Allouez",
-    destination_id="Hibbing",
+    origin_id="Minneapolis",
+    destination_id="Superior",
     train_config=train_config,
     loco_con=loco_con_sans_buffers,
 )
@@ -151,18 +147,13 @@ tsb_sans_buffers = alt.TrainSimBuilder(
 # Load the network and construct the timed link path through the network.
 print("Loading `Network`")
 network = alt.Network.from_file(
-    altrios_local_location + "networks/Taconite-NoBalloon.yaml"
+    alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
 )
-# network = alt.Network.from_file(
-#     altrios_local_location + "networks/Toronto_Battle Creek.yaml"
-# )
 
 location_map = alt.import_locations(
-    altrios_local_location + "networks/default_locations.csv"
+    alt.resources_root() / "networks/default_locations.csv"
 )
-# location_map = alt.import_locations(
-#     altrios_local_location + "networks/Toronto_Battle Creek_locations.csv"
-# )
+
 train_sim: alt.SpeedLimitTrainSim = tsb.make_speed_limit_train_sim(
     location_map=location_map,
     save_interval=SAVE_INTERVAL,
@@ -259,31 +250,6 @@ print(
     f"Total SOC-corrected fuel used with BEL and HEL buffers inactive: {corrected_fuel_sans_buffers_gigajoules:.6g} GJ"
 )
 assert len(train_sim_sans_buffers.to_pydict()["history"]) > 1
-
-meet_pass_events = metric_calculator.calculate_meet_pass_events(
-    metric_calculator.ScenarioInfo(
-        sims=alt.SpeedLimitTrainSimVec([train_sim]),
-        simulation_days=1,
-        annualize=False,
-    ),
-    "count",
-)
-meet_pass_events_sans_buffers = metric_calculator.calculate_meet_pass_events(
-    metric_calculator.ScenarioInfo(
-        sims=alt.SpeedLimitTrainSimVec([train_sim_sans_buffers]),
-        simulation_days=1,
-        annualize=False,
-    ),
-    "count",
-)
-print(
-    "Meet/pass events with buffers active: "
-    f"{metric_calculator.value_from_metrics(meet_pass_events):.0f}"
-)
-print(
-    "Meet/pass events with buffers inactive: "
-    f"{metric_calculator.value_from_metrics(meet_pass_events_sans_buffers):.0f}"
-)
 
 savings_raw = (
     -(raw_fuel_gigajoules - raw_fuel_sans_buffers_gigajoules)
