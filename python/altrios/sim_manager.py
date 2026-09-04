@@ -20,7 +20,6 @@ def main(
     simulation_days: int = defaults.SIMULATION_DAYS,
     warm_start_days: int = defaults.WARM_START_DAYS,
     scenario_year: int = defaults.BASE_ANALYSIS_YEAR,
-    target_bel_share: float = 0.5,
     walk_timed_paths = False,
     debug: bool = False,
     loco_pool: Optional[pl.DataFrame] = None,

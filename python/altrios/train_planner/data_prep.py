@@ -1,4 +1,4 @@
-from typing import Union, List, Tuple, Dict
+from typing import Union, List, Tuple, Dict, Optional
 from pathlib import Path
 import polars as pl
 import polars.selectors as cs
@@ -270,7 +270,7 @@ def build_locopool(
     demand_file: Union[pl.DataFrame, pl.LazyFrame, Path, str],
     dispatch_schedule: Union[pl.DataFrame, pl.LazyFrame] | None = None,
     method: str = "tile",
-    shares: List[float] = [],
+    shares: Optional[List[float]] = None,
     locomotives_per_node: int | None = None,
 ) -> pl.DataFrame:
     """
@@ -279,13 +279,30 @@ def build_locopool(
     ----------
     demand_file: Path to a file with origin-destination demand
     method: Method to determine each locomotive's type ("tile" or "shares_twoway" currently implemented)
-    shares: List of shares for each locomotive type in loco_info (implemented for two-way shares only)
+    shares: List of shares for each locomotive type in loco_info (implemented for two-way shares only).
+        If not provided and `config.loco_type_shares` is set, shares are derived from it (requires
+        exactly 2 locomotive types in `config.loco_info`, keyed by `Locomotive_Type`) and `method` is
+        forced to "shares_twoway".
     Outputs:
     ----------
     loco_pool: Locomotive pool containing all locomotives' information that are within the system
     """
     config.loco_info = append_loco_info(config.loco_info)
     loco_types = list(config.loco_info.loc[:, "Locomotive_Type"])
+    shares = shares or []
+    if not shares and config.loco_type_shares is not None:
+        if set(config.loco_type_shares) != set(loco_types):
+            raise ValueError(
+                f"`config.loco_type_shares` keys {sorted(config.loco_type_shares)} do not match "
+                f"`config.loco_info` locomotive types {sorted(loco_types)}."
+            )
+        if len(loco_types) != 2:
+            raise ValueError(
+                "`config.loco_type_shares` is only supported for exactly 2 locomotive types "
+                f"(got {len(loco_types)}: {loco_types})."
+            )
+        shares = [config.loco_type_shares[t] for t in loco_types]
+        method = "shares_twoway"
     demand, node_list = load_freight_demand(demand_file, config)
     # TODO: handle different train types (or mixed train types?)
 
@@ -307,7 +324,7 @@ def build_locopool(
                 .mean()
             ) / config.containers_per_car
         else:
-            raise Exception("No valid columns in demand DataFrame")
+            raise ValueError("No valid columns in demand DataFrame")
         if config.single_train_mode:
             initial_size = math.ceil(
                 cars_per_od / min(config.cars_per_locomotive.values())
@@ -555,10 +572,12 @@ def append_charging_guidelines(
         loco_pool = loco_pool.with_columns(pl.lit(0.0).alias("Battery_Headroom_J"))
         return refuelers, loco_pool
     
-    network_charging_guidelines = (
-        network_charging_guidelines.join(
+    if active_ods is not None:
+        network_charging_guidelines = network_charging_guidelines.join(
             active_ods, on=["Origin", "Destination"], how="inner"
         )
+    network_charging_guidelines = (
+        network_charging_guidelines
         .group_by(pl.col("Origin"))
         .agg(
             pl.col("Allowable_Battery_Headroom_MWh").min() * 1e6 / utilities.MWH_PER_MJ
@@ -604,7 +623,7 @@ def get_freight_to_car_mapping(rail_vehicles: list[alt.RailVehicle]) -> dict[str
         rv_dict = rv.to_pydict()
         # Check for duplicate mappings (should not happen)
         if rv_dict["freight_type"] in freight_type_to_car_type:
-            raise Exception(
+            raise ValueError(
                 f"More than one rail vehicle car type for freight type {rv_dict['freight_type']}"
             )
         else:
@@ -629,7 +648,7 @@ def configure_rail_vehicles(
         if freight_type in freight_type_to_car_type:
             car_type = freight_type_to_car_type[freight_type]
         else:
-            raise Exception(f"Rail vehicle car type not found for freight type {freight_type}.")
+            raise ValueError(f"Rail vehicle car type not found for freight type {freight_type}.")
         n_cars_by_type[car_type] = int(cars_loaded)
     if cars_empty > 0:
         freight_type = f"{this_train_type}_Empty"
@@ -637,7 +656,7 @@ def configure_rail_vehicles(
         if freight_type in freight_type_to_car_type:
             car_type = freight_type_to_car_type[freight_type]
         else:
-            raise Exception(f"Rail vehicle car type not found for freight type {freight_type}.")
+            raise ValueError(f"Rail vehicle car type not found for freight type {freight_type}.")
         n_cars_by_type[car_type] = int(cars_empty)
 
     assert len(n_cars_by_type) > 0, \
@@ -683,6 +702,7 @@ def scale_rv_mass_and_length(
 
     rv_freight_mass_scaler = 1.0
     rv_base_mass_scaler = 1.0
+    rv_length_scaler = 1.0
     if total_mass_kilograms is not None:
         this_train_kilograms = total_mass_kilograms
         # Only adjust freight mass if that is sufficient to equalize

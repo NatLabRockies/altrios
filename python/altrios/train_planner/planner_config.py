@@ -32,6 +32,9 @@ class TrainPlannerConfig:
     - `loco_info`: `Dict`
     - `refueler_info`: `Dict`
     - `return_demand_generators`: `Dict`
+    - `loco_type_shares`: Optional `Dict` mapping each `Locomotive_Type` in `loco_info` to its target
+      share (e.g. `{"BEL": 0.5, "Diesel_Large": 0.5}`) of the auto-built locomotive pool. Requires
+      exactly 2 locomotive types in `loco_info`; consumed by `data_prep.build_locopool`.
     """
     simulation_days: int = 21
     single_train_mode: bool = False

@@ -601,14 +601,6 @@ def run_train_planner(
                         freight_type_to_car_type = freight_type_to_car_type
                     )
 
-                    # Create train configuration
-                    train_config = alt.TrainConfig(
-                        rail_vehicles=rv_to_use,
-                        n_cars_by_type=n_cars_by_type,
-                        train_type=train_type,
-                        cd_area_vec=cd_area_vec,
-                    )
-
                     # Get initial state of charge for selected locomotives
                     loco_start_soc_j = dispatched.get_column("SOC_J")
 
@@ -639,14 +631,25 @@ def run_train_planner(
                         for loco_type in dispatched.get_column("Locomotive_Type")
                     ]
 
-                    if ("Train_Weight_tons" in this_train) or ("Train_Length_meters" in this_train):
+                    train_weight_tons = this_train.get("Train_Weight_tons")
+                    train_length_meters = this_train.get("Train_Length_meters")
+                    if (train_weight_tons is not None) or (train_length_meters is not None):
                         rv_to_use = data_prep.scale_rv_mass_and_length(
                             rv_to_use,
                             n_cars_by_type,
                             locos,
-                            this_train["Train_Weight_tons"] * alt.utilities.KG_PER_TON,
-                            this_train["Train_Length_meters"],
+                            train_weight_tons * alt.utilities.KG_PER_TON
+                            if train_weight_tons is not None else None,
+                            train_length_meters,
                         )
+
+                    # Create train configuration (after any mass/length scaling of rv_to_use above)
+                    train_config = alt.TrainConfig(
+                        rail_vehicles=rv_to_use,
+                        n_cars_by_type=n_cars_by_type,
+                        train_type=train_type,
+                        cd_area_vec=cd_area_vec,
+                    )
 
                     # Set state of charge for electric locomotives
                     for i, loco in enumerate(locos):
