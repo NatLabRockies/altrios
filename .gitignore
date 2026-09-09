@@ -1241,3 +1241,4 @@ applications/corridor/
 !/networks/spokane_lethbridge_local.osm.xml
 /.venv311
 /applications/catenary_optimization/outputs/
+CLAUDE.md

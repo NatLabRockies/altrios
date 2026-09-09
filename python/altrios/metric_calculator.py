@@ -1755,9 +1755,14 @@ def add_battery_costs(loco_info: pd.DataFrame, year: int) -> pd.DataFrame:
 
 
 def calculate_meet_pass_events(info: ScenarioInfo, units: str) -> MetricType:
+    """Count meet/pass events as the number of unscheduled stops each train makes.
+
+    A stop is a sample where speed first becomes zero after having been
+    positive; the last such stop per train is its arrival at the destination and
+    is not a meet/pass, so one stop per train is discounted.
+    """
     slts_results = []
-    i = 0
-    for slts in info.sims.to_pydict():
+    for i, slts in enumerate(info.sims.to_pydict()):
         history = slts["history"]
         time_seconds = history.get("time_seconds", [])
         speed_meters_per_second = history.get("speed_meters_per_second", [])
@@ -1767,42 +1772,43 @@ def calculate_meet_pass_events(info: ScenarioInfo, units: str) -> MetricType:
             )
             return metric("Meet_Pass_Events", units, None)
 
-        # NOTE: this code is somewhat clunky and would probably benifit from streamlining
-        df = pl.LazyFrame(
-            {
-                "history.time_seconds": time_seconds,
-                "history.speed_meters_per_second": speed_meters_per_second,
-            }
-        ).with_columns(pl.lit(i).alias("train_idx"))
-        slts_results.append(df)
-        i += 1
-    all = pl.concat(slts_results, how="diagonal_relaxed")
+        slts_results.append(
+            pl.LazyFrame(
+                {
+                    "history.time_seconds": time_seconds,
+                    "history.speed_meters_per_second": speed_meters_per_second,
+                }
+            ).with_columns(pl.lit(i).alias("train_idx"))
+        )
+
+    if len(slts_results) == 0:
+        return metric("Meet_Pass_Events", units, None)
+
+    # Speed is snapped exactly to the target when the solver brings a train to a
+    # stand, but compare against a small tolerance so a residual float value
+    # still reads as stopped.
+    stopped_tol = 1e-6
     val = (
-        all.sort("train_idx", "history.speed_meters_per_second")
+        pl.concat(slts_results, how="diagonal_relaxed")
+        # NOTE: must be sorted by time -- the stop detection below relies on
+        # consecutive rows being consecutive in time within each train.
+        .sort("train_idx", "history.time_seconds")
         .with_columns(
-            (
-                pl.col("history.speed_meters_per_second")
-                - pl.col("history.speed_meters_per_second")
-                .shift(1)
-                .over("train_idx")
-                .fill_null(0.0)
-            ).alias("speed_change")
+            (pl.col("history.speed_meters_per_second") <= stopped_tol).alias("stopped")
         )
         .with_columns(
-            pl.when(
-                pl.col("speed_change") < 0,
-                pl.col("history.speed_meters_per_second") == 0,
+            # A stop is the transition from moving to stopped. The first sample
+            # of each train is excluded (`fill_null(True)`) because trains
+            # start from rest.
+            (
+                pl.col("stopped")
+                & ~pl.col("stopped").shift(1).over("train_idx").fill_null(True)
             )
-            .then(1)
-            .otherwise(0)
+            .cast(pl.Int64)
             .alias("stop")
         )
         .group_by("train_idx")
-        .agg(
-            (pl.max_horizontal([0, pl.col("stop").sum() - 1]).alias("meet_pass_stops"))
-        )
-        # .get_column("meet_pass_stops")
-        # .sum()
+        .agg(pl.max_horizontal([0, pl.col("stop").sum() - 1]).alias("meet_pass_stops"))
         .select(pl.col("meet_pass_stops").sum())
         .collect()
         .item()
