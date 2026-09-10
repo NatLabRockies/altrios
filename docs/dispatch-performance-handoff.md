@@ -1,7 +1,18 @@
 # Handoff: speed up meet-pass dispatch (`altrios-core/src/meet_pass/`)
 
-Status: investigation done, no code changed yet. This document is the spec for the
-implementation. Read `CLAUDE.md` first (build commands, conventions, docstring rules).
+Status: **deliverables 1 and 2 are implemented and merged.** What remains open is the
+optional inverted index, the minor `train_idx_begin` cleanup, and the out-of-scope
+deferred-re-planning project. Read `CLAUDE.md` first (build commands, conventions,
+docstring rules).
+
+Measured on the committed benchmark (Taconite, 30 min spacing, release, best of 3), with
+checksums bit-identical to the baseline at every N:
+
+| N trains | before | after |
+|---|---|---|
+| 32  | 0.161 s | 0.061 s |
+| 64  | 1.546 s | 0.566 s |
+| 128 | 13.85 s | 5.27 s  |
 
 ## Goal
 
@@ -38,7 +49,7 @@ core and is *not* changed by the two deliverables below.
 Negative result: parallelizing the per-train loop in `check_deadlock` with rayon was
 2–4x **slower** (per-call work < 1 µs, 180k invocations). Do not do this.
 
-## Deliverable 1: gate `validate_free_path` to debug builds
+## Deliverable 1: gate `validate_free_path` to debug builds — DONE
 
 File: `altrios-core/src/meet_pass/train_disp/free_path.rs`, end of `update_free_path`:
 
@@ -63,7 +74,12 @@ fn, or `#[cfg_attr(not(debug_assertions), allow(dead_code))]`). A cargo feature
 switchable in release builds; pick one and document it in the module doc of
 `meet_pass/mod.rs`.
 
-## Deliverable 2: skip trains that cannot be affected
+Implemented with `debug_assertions` (no new cargo feature): `#[cfg(debug_assertions)]` on
+both the call site and the function itself, documented under "Dispatch path validation" in
+the `meet_pass` module doc. Release and debug builds both still emit the same 6
+pre-existing crate warnings, so nothing was left dead.
+
+## Deliverable 2: skip trains that cannot be affected — DONE
 
 `update_free_path` is a no-op when (a) none of the moved train's blocking links are on this
 train's path **and** (b) no diverge node references the moved train. (With
@@ -130,71 +146,13 @@ separate, validated project.
    baseline checksums) are bit-identical. Delete the benchmark file afterwards or commit
    it as an `#[ignore]`d test — your call.
 
-### Benchmark harness (put at `altrios-core/tests/dispatch_bench_tmp.rs`)
+### Benchmark harness
 
-Run with:
+Committed as an `#[ignore]`d integration test at `altrios-core/tests/dispatch_bench.rs`,
+with the reference checksums recorded in its module doc. Run with:
 ```
 cd altrios-core
-BENCH_NS=32,64,128 cargo test --release -p altrios-core --test dispatch_bench_tmp bench_dispatch_scaling -- --ignored --nocapture
-```
-
-```rust
-use altrios_core::meet_pass::dispatch::run_dispatch;
-use altrios_core::prelude::*;
-use altrios_core::traits::*;
-use altrios_core::train::{speed_limit_train_sim_fwd, speed_limit_train_sim_rev};
-use altrios_core::uc;
-use std::time::Instant;
-
-fn taconite() -> Network {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../python/altrios/resources/networks/Taconite.yaml");
-    Network::from_file(path, false).unwrap()
-}
-
-/// n trains alternating fwd/rev, departures spaced `spacing_min` apart.
-/// Dispatch never reads `time_sched`, so one est-time net per direction is reused.
-fn build(network: &Network, n: usize, spacing_min: f64) -> (Vec<SpeedLimitTrainSim>, Vec<EstTimeNet>) {
-    let base_fwd = speed_limit_train_sim_fwd();
-    let base_rev = speed_limit_train_sim_rev();
-    let est_fwd = make_est_times(base_fwd.clone(), network, None).unwrap().0;
-    let est_rev = make_est_times(base_rev.clone(), network, None).unwrap().0;
-    let (mut sims, mut ests) = (Vec::with_capacity(n), Vec::with_capacity(n));
-    for i in 0..n {
-        let mut s = if i % 2 == 0 { base_fwd.clone() } else { base_rev.clone() };
-        s.state.time.update_unchecked((i as f64) * spacing_min * uc::MIN, || String::new()).unwrap();
-        sims.push(s);
-        ests.push(if i % 2 == 0 { est_fwd.clone() } else { est_rev.clone() });
-    }
-    (sims, ests)
-}
-
-fn run_case(network: &Network, n: usize, spacing_min: f64) {
-    let (sims, ests) = build(network, n, spacing_min);
-    let reps: usize = std::env::var("BENCH_REPS").ok().and_then(|s| s.parse().ok()).unwrap_or(3);
-    let mut best = f64::INFINITY;
-    let mut chk = String::new();
-    for _ in 0..reps {
-        let t0 = Instant::now();
-        let out = run_dispatch(network, &sims, ests.clone(), false, false).unwrap();
-        best = best.min(t0.elapsed().as_secs_f64());
-        let (mut sl, mut st) = (0u64, 0f64);
-        for p in &out { for x in p { sl += x.link_idx.idx() as u64; st += x.time.value; } }
-        chk = format!("links={sl} time_sum={st:.1}");
-    }
-    println!("BENCH n={n:4} spacing_min={spacing_min:6.1} min_s={best:9.3} chk[{chk}]");
-}
-
-#[test]
-#[ignore]
-fn bench_dispatch_scaling() {
-    let network = taconite();
-    let spacing: f64 = std::env::var("BENCH_SPACING_MIN").ok().and_then(|s| s.parse().ok()).unwrap_or(30.0);
-    let ns: Vec<usize> = std::env::var("BENCH_NS").ok()
-        .map(|s| s.split(',').map(|x| x.parse().unwrap()).collect())
-        .unwrap_or_else(|| vec![2, 4, 8, 16, 32, 64]);
-    for n in ns { run_case(&network, n, spacing); }
-}
+BENCH_NS=32,64,128 cargo test --release --test dispatch_bench -- --ignored --nocapture
 ```
 
 Timing pitfalls seen during investigation: right after editing Rust sources,

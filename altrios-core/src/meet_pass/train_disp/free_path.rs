@@ -248,6 +248,33 @@ pub enum FreePathStatus {
 }
 
 impl TrainDisp {
+    /// Check whether `update_free_path` could change anything for this train.
+    ///
+    /// `update_free_path` can only change something if one of the moved train's blocking
+    /// links lies on this train's path, or if this train has already diverged because of
+    /// the moved train. When neither holds, `LinkOptType::new` yields `LinkOptType::None`
+    /// so no dispatch path search runs, and no interior diverge node stops the walk short
+    /// of the ending sentinel, so the walk jumps straight past the end of `disp_path` and
+    /// returns `UpdateSuccess`. Its only side effect on that route is overwriting the
+    /// ending sentinel's `train_idx`, which `update_free_path` rewrites at the top of
+    /// every call before reading it.
+    ///
+    /// # Arguments
+    /// - `train_idx_moved`: the train that was just advanced or rewound
+    /// - `link_idxs_blocking`: links currently blocked by the moved train
+    pub fn may_be_affected(
+        &self,
+        train_idx_moved: TrainIdx,
+        link_idxs_blocking: &[LinkIdx],
+    ) -> bool {
+        link_idxs_blocking
+            .iter()
+            .any(|link_idx| self.links_on_path.contains(link_idx))
+            || self.div_nodes[..self.div_nodes.len() - 1]
+                .iter()
+                .any(|div_node| div_node.train_idx == train_idx_moved)
+    }
+
     /// Update this train's free path to navigate around the train_idx_moved
     pub fn update_free_path(
         &mut self,
@@ -633,6 +660,8 @@ impl TrainDisp {
             }
         }
 
+        // Debug-only consistency check; see the `meet_pass` module docs.
+        #[cfg(debug_assertions)]
         self.validate_free_path(links_blocked)?;
         Ok(FreePathStatus::UpdateSuccess)
     }
@@ -745,6 +774,16 @@ impl TrainDisp {
         }
     }
 
+    /// Check that this train's dispatch path is internally consistent: that offsets agree
+    /// with the estimated-time network linking, that every node on the path is marked as
+    /// being on the path, and that no free-path node sits on a link another train blocks.
+    ///
+    /// Only ever reports errors, so it is compiled out of release builds. See the
+    /// `meet_pass` module docs.
+    ///
+    /// # Arguments
+    /// - `links_blocked`: the train blocking each link, indexed by link idx
+    #[cfg(debug_assertions)]
     fn validate_free_path(&self, links_blocked: &[TrainIdx]) -> ValidationResults {
         let mut errors = ValidationErrors::new();
 

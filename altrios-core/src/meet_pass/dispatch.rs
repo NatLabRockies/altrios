@@ -60,7 +60,11 @@ fn check_deadlock(
     #[warn(clippy::mut_range_bound)]
     for (idx, train_disp) in train_disps.iter_mut().enumerate().skip(train_idx_begin) {
         if !train_disp.is_finished() {
-            if idx != train_idx_moved.idx() {
+            // Skipping trains the moved train cannot reach is what keeps this loop from
+            // being O(steps x trains) of real path-search work.
+            if idx != train_idx_moved.idx()
+                && train_disp.may_be_affected(train_idx_moved, &link_idxs_blocked)
+            {
                 match train_disp.update_free_path(
                     train_idx_moved,
                     &link_idxs_blocked,
