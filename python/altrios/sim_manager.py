@@ -118,26 +118,27 @@ def main(
         origins.append(slts.to_pydict()['origs'][0]['Location ID'])
     
     t0_disp = time.perf_counter()
-    timed_paths = []
-    for i in range(len(speed_limit_train_sims)):
-        this_timed_path = alt.run_dispatch(
-            network,
-            alt.SpeedLimitTrainSimVec([speed_limit_train_sims[i]]),
-            [est_time_nets[i]],
-            False,
-            False,
-        )[0]
-        timed_paths.append(this_timed_path)
-        if walk_timed_paths:
+    # All trains go into a single `run_dispatch` call so meet-pass conflict resolution
+    # actually runs. Dispatching one train per call bypasses meet-pass entirely.
+    timed_paths = alt.run_dispatch(
+        network,
+        alt.SpeedLimitTrainSimVec(speed_limit_train_sims),
+        est_time_nets,
+        False,
+        False,
+    )
+    if walk_timed_paths:
+        for i in range(len(speed_limit_train_sims)):
             speed_limit_train_sims[i].set_save_interval(60)
             speed_limit_train_sims[i].walk_timed_path(
                 network=network,
-                timed_path=this_timed_path,
+                timed_path=timed_paths[i],
             )
 
     timed_paths: List[List[alt.LinkIdxTime]] = [  # type: ignore[no-redef]
         tp.to_pydict() for tp in timed_paths
     ]
+
 
     t1_disp = time.perf_counter()
     if debug:
