@@ -18,7 +18,7 @@ pub trait ResMethod {
 
 #[serde_api]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Wrapper for `TrainRes` to enable exposing contents of enum variants in python
 pub struct TrainResWrapper(pub TrainRes);
 

@@ -6,7 +6,7 @@ use crate::track::{LinkPoint, Location};
 
 #[serde_api]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct LinkIdxTime {
     pub link_idx: LinkIdx,
     pub time: si::Time,
@@ -31,7 +31,7 @@ impl LinkIdxTime {
 
 #[serde_api]
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Struct that contains a `Vec<LinkIdxTime>` for the purpose of providing `SerdeAPI` for
 /// `Vec<LinkIdxTime>` in Python
 pub struct TimedLinkPath(pub Vec<LinkIdxTime>);
@@ -63,7 +63,7 @@ impl From<&Vec<LinkIdxTime>> for TimedLinkPath {
 
 #[serde_api]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Train simulation in which speed is allowed to vary according to train capabilities and speed
 /// limit.  Note that this is not guaranteed to produce identical results to [super::SetSpeedTrainSim]
 /// because of differences in braking controls but should generally be very close (i.e. error in cumulative

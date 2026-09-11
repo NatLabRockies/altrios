@@ -10,7 +10,7 @@ use crate::imports::*;
 /// model.
 #[serde_api]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct PathTpc {
     link_points: Vec<LinkPoint>,
     grades: Vec<PathResCoeff>,
@@ -380,7 +380,7 @@ fn extract_speed_set<'a>(
     speed_sets: &'a HashMap<TrainType, SpeedSet>,
     speed_set: &'a Option<SpeedSet>,
     train_params: &'a TrainParams,
-) -> Result<&'a SpeedSet, argmin::prelude::Error> {
+) -> Result<&'a SpeedSet, anyhow::Error> {
     let speed_set = match speed_set {
         Some(s) => s,
         None => {

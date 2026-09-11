@@ -11,7 +11,7 @@ use super::locomotive::HybridLoco;
 
 #[serde_api]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Container
 pub struct PowerTrace {
     /// simulation time
@@ -153,7 +153,7 @@ pub struct PowerTraceElement {
 
 #[serde_api]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Struct for simulating operation of a standalone locomotive.
 pub struct LocomotiveSimulation {
     pub loco_unit: Locomotive,
@@ -378,7 +378,7 @@ impl Default for LocomotiveSimulation {
 
 #[serde_api]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct LocomotiveSimulationVec(pub Vec<LocomotiveSimulation>);
 impl LocomotiveSimulationVec {
     pub fn new(value: Vec<LocomotiveSimulation>) -> Self {

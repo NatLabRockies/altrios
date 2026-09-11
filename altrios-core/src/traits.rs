@@ -7,8 +7,13 @@ pub trait Idx {
     fn idx(self) -> usize;
 }
 
-#[duplicate_item(Self; [u8]; [u16])]
-impl Idx for Self {
+impl Idx for u8 {
+    fn idx(self) -> usize {
+        self.into()
+    }
+}
+
+impl Idx for u16 {
     fn idx(self) -> usize {
         self.into()
     }

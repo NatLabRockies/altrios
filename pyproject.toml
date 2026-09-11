@@ -24,7 +24,7 @@ authors = [
 description = "Tool for modeling and optimization of advanced locomotive powertrains for freight rail decarbonization."
 readme = "README.md"
 license = { file = "LICENSE.md" }
-requires-python = ">=3.10, <3.12"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: BSD License",

@@ -22,12 +22,10 @@ uom = { workspace = true, features = ["use_serde"] }
 paste = "1.0.7"
 easy-ext = "1.0.0"
 altrios-proc-macros = { workspace = true }
-argmin = "0.5.1"
 rayon = "1.5.3"
 document-features = { workspace = true }
 anyhow = { workspace = true }
 readonly = "0.2.3"
-duplicate = "0.4.1"
 nohash-hasher = "0.2.0"
 
 # optional

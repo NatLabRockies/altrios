@@ -18,7 +18,7 @@ use rayon::prelude::*;
 
 #[serde_api]
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// User-defined train configuration used to generate
 /// [crate::prelude::TrainParams]. Any optional fields will be populated later
 /// in [TrainSimBuilder::make_train_sim_parts]
@@ -235,7 +235,7 @@ impl Valid for TrainConfig {
 
 #[serde_api]
 #[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct TrainSimBuilder {
     /// Unique, user-defined identifier for the train
     pub train_id: String,
@@ -790,7 +790,7 @@ impl TrainSimBuilder {
 // This MUST remain a unit struct to trigger correct tolist() behavior
 #[serde_api]
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct SpeedLimitTrainSimVec(pub Vec<SpeedLimitTrainSim>);
 
 #[pyo3_api]

@@ -5,7 +5,7 @@ use crate::pyo3::*;
 
 #[serde_api]
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, StateMethods, SetCumulative)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Struct for modeling onboard components between (and including) catenary to the electric drivetrain of a locomotive. 
 pub struct CatenaryInterface {
     #[serde(default)]
@@ -178,7 +178,7 @@ impl ElectricMachine for CatenaryInterface {
     StateMethods,
     SetCumulative,
 )]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct CatenaryInterfaceState {
     /// index
     pub i: TrackedState<usize>,

@@ -19,7 +19,6 @@ pub(crate) use altrios_proc_macros::{
 };
 pub(crate) use anyhow::{anyhow, bail, ensure, Context};
 pub(crate) use derive_more::{From, IsVariant, TryInto};
-pub(crate) use duplicate::duplicate_item;
 pub(crate) use easy_ext::ext;
 pub(crate) use eng_fmt::FormatEng;
 pub(crate) use lazy_static::lazy_static;

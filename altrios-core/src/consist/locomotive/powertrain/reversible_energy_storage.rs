@@ -10,7 +10,7 @@ const TOL: f64 = 1e-3;
 #[serde_api]
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, StateMethods, SetCumulative)]
 /// Struct for modeling technology-naive Reversible Energy Storage (e.g. battery, flywheel).
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct ReversibleEnergyStorage {
     /// struct for tracking current state
     #[serde(default)]
@@ -920,7 +920,7 @@ impl ReversibleEnergyStorage {
 #[derive(
     Clone, Deserialize, Serialize, Debug, PartialEq, HistoryVec, StateMethods, SetCumulative,
 )]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 // component limits
 /// ReversibleEnergyStorage state variables
 pub struct ReversibleEnergyStorageState {

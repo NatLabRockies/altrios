@@ -2,7 +2,7 @@ use super::*;
 
 #[serde_api]
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, SetCumulative, StateMethods)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Struct for simulating power distribution controls and energy usage of locomotive consist.
 pub struct Consist {
     // pretty sure these won't get automatically generated correctly
@@ -836,7 +836,7 @@ impl Mass for Consist {
     StateMethods,
     SetCumulative,
 )]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct ConsistState {
     /// current time index
     pub i: TrackedState<usize>,

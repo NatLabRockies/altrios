@@ -13,7 +13,7 @@ fn calc_res_val(res_coeff: si::Ratio, state: &TrainState) -> anyhow::Result<si::
 
 #[serde_api]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct Point {
     /// index within corresponding [PathResCoeff]
     idx: usize,
@@ -93,7 +93,7 @@ impl [PathResCoeff] {
 
 #[serde_api]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct Strap {
     /// index of front of train within corresponding [PathResCoeff]
     idx_front: usize,

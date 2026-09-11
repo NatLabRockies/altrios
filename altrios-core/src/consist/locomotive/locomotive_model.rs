@@ -244,7 +244,7 @@ impl std::string::ToString for PowertrainType {
 
 #[serde_api]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Struct to facilitate passing several parameters to builder
 pub struct LocoParams {
     /// [Locomotive::pwr_aux_offset]
@@ -357,7 +357,7 @@ impl Default for LocoParams {
 
 #[serde_api]
 #[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// DummyLoco locomotive with infinite power and free energy, used for
 /// working with train performance calculator with
 /// [crate::train::SetSpeedTrainSim] with no effort to ensure loads
@@ -408,7 +408,7 @@ impl CheckAndResetState for DummyLoco {
 
 #[serde_api]
 #[derive(PartialEq, Clone, Debug, Serialize, Deserialize, StateMethods, SetCumulative)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Struct for simulating any type of locomotive
 pub struct Locomotive {
     /// type of locomotive including contained type-specific parameters
@@ -1573,7 +1573,7 @@ impl LocoTrait for Locomotive {
     StateMethods,
     SetCumulative,
 )]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct LocomotiveState {
     pub i: TrackedState<usize>,
     /// maximum forward propulsive power locomotive can produce

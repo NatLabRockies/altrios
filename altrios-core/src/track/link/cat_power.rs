@@ -2,7 +2,7 @@ use crate::imports::*;
 
 #[serde_api]
 #[derive(Clone, Default, Debug, PartialEq, PartialOrd, Deserialize, Serialize)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Struct representing local train-level power limits for catenary charging
 pub struct CatPowerLimit {
     /// start of current power limit

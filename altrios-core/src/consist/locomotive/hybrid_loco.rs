@@ -11,7 +11,7 @@ use crate::imports::*;
 
 #[serde_api]
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, StateMethods, SetCumulative)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Hybrid locomotive with both engine and reversible energy storage (aka battery)  
 /// This type of locomotive is not likely to be widely prevalent due to modularity of consists.
 pub struct HybridLoco {
@@ -563,7 +563,7 @@ fn get_pwr_gen_elec_out_for_eff_fc(
 /// default values.
 #[serde_api]
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default, StateMethods, SetCumulative)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 #[non_exhaustive]
 pub struct RESGreedyWithDynamicBuffers {
     /// RES energy delta from minimum SOC corresponding to kinetic energy of
@@ -733,7 +733,7 @@ impl SerdeAPI for RESGreedyWithDynamicBuffers {}
     SetCumulative,
 )]
 #[serde(default)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// State for [RESGreedyWithDynamicBuffers ]
 pub struct RGWDBState {
     /// time step index

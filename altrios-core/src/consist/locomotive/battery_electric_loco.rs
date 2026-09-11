@@ -8,7 +8,7 @@ use crate::imports::*;
 
 #[serde_api]
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize, StateMethods, SetCumulative)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Battery electric locomotive
 pub struct BatteryElectricLoco {
     #[has_state]
@@ -348,7 +348,7 @@ impl StateMethods for BatteryPowertrainControls {}
 /// default values.
 #[serde_api]
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default, StateMethods, SetCumulative)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 #[non_exhaustive]
 pub struct RESGreedyWithDynamicBuffersBEL {
     /// RES energy delta from minimum SOC corresponding to kinetic energy of
@@ -396,7 +396,7 @@ impl SerdeAPI for RESGreedyWithDynamicBuffersBEL {}
     SetCumulative,
 )]
 #[serde(default)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// State for [RESGreedyWithDynamicBuffers ]
 pub struct RGWDBStateBEL {
     /// time step index

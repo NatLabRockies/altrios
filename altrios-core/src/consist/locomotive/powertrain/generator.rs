@@ -6,7 +6,7 @@ use crate::pyo3::*;
 
 #[serde_api]
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, StateMethods, SetCumulative)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Struct for modeling generator/alternator.
 pub struct Generator {
     /// Generator mass
@@ -453,7 +453,7 @@ impl ElectricMachine for Generator {
     StateMethods,
     SetCumulative,
 )]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct GeneratorState {
     /// iteration counter
     pub i: TrackedState<usize>,

@@ -40,7 +40,7 @@ impl SimpleState {
 
 #[serde_api]
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct SavedSim {
     pub train_sim: Box<SpeedLimitTrainSim>,
     pub join_paths: Vec<EstJoinPath>,

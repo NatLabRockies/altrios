@@ -7,7 +7,7 @@ use crate::imports::*;
 
 #[serde_api]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct ConsistSimulation {
     pub loco_con: Consist,
     pub power_trace: PowerTrace,

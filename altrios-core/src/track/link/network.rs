@@ -14,7 +14,7 @@ struct OldSpeedSets(Vec<OldSpeedSet>);
 
 #[serde_api]
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// An arbitrary unit of single track that does not include turnouts
 pub struct Link {
     /// Index of current link
@@ -367,7 +367,7 @@ impl ObjState for Link {
 
 #[serde_api]
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Struct that contains a `Vec<Link>`, and optional parameters for setting
 /// error tolerances in checks performed by [Init::init]
 pub struct Network(pub NetworkErrTol, pub Vec<Link>);
@@ -386,7 +386,7 @@ impl Network {
 
 #[serde_api]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Network error tolerances used in [Network::init]
 pub struct NetworkErrTol {
     /// Maximum absolute grade allowed at any point in the network
@@ -589,7 +589,7 @@ impl From<NetworkUnchecked> for Network {
 
 #[serde_api]
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Deprecated Struct that contains a `Vec<Link>` for the purpose of providing
 /// `SerdeAPI` for `Vec<Link>` in Python.  This is used solely to enable
 /// backwards compatibility.
@@ -603,7 +603,7 @@ impl SerdeAPI for NetworkUnchecked {}
 
 #[serde_api]
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Struct that contains a `Vec<LinkOld>` for the purpose of providing `SerdeAPI` for `Vec<Link>` in
 /// Python
 ///

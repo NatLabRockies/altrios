@@ -2,7 +2,7 @@ use super::{friction_brakes::FricBrake, train_imports::*};
 
 #[serde_api]
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct BrakingPoint {
     pub offset: si::Length,
     pub speed_limit: si::Velocity,
@@ -27,7 +27,7 @@ impl ObjState for BrakingPoint {
 
 #[serde_api]
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct BrakingPoints {
     points: Vec<BrakingPoint>,
     /// index within [Self::points]

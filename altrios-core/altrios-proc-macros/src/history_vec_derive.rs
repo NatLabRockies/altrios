@@ -55,7 +55,7 @@ pub(crate) fn history_vec_derive(input: TokenStream) -> TokenStream {
     generated.append_all(quote! {
         #[serde_api]
         #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-        #[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+        #[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
         #struct_doc
         pub struct #new_name {
             #vec_fields

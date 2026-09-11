@@ -63,7 +63,7 @@ impl Default for EstTime {
 
 #[serde_api]
 #[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct EstTimeNet {
     pub val: Vec<EstTime>,
 }
@@ -987,7 +987,7 @@ pub fn make_est_times_py(
     };
 
     let path_for_failed_sim = match path_for_failed_sim {
-        Some(pffs) => Some(PathBuf::extract_bound(pffs)?),
+        Some(pffs) => Some(pffs.extract::<PathBuf>()?),
         None => None,
     };
 

@@ -4,7 +4,7 @@ use crate::imports::*;
 
 #[serde_api]
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct SpeedLimitPoint {
     pub offset: si::Length,
     pub speed_limit: si::Velocity,
