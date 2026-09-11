@@ -1579,13 +1579,18 @@ def import_emissions_factors_cambium(
 def import_energy_prices_eia(
     location_map: Dict[str, List[alt.Location]],
     scenario_year: int,
-    reference_year: int = 2022,
-    reference_year_values: Dict[str, List] = {
-        "Fuel": ["Diesel", "Electricity"],
-        "Region": ["MN", "MN"],
-        "Price": [3.616, 9.19],
-    },
+    reference_year: int = defaults.EIA_PRICE_REFERENCE_YEAR,
+    reference_year_values: Optional[Dict[str, List]] = None,
 ) -> pl.DataFrame:
+    if reference_year_values is None:
+        reference_year_values = {
+            "Fuel": ["Diesel", "Electricity"],
+            "Region": [defaults.EIA_REFERENCE_PRICE_REGION] * 2,
+            "Price": [
+                defaults.EIA_REFERENCE_DIESEL_PRICE,
+                defaults.EIA_REFERENCE_ELECTRICITY_PRICE,
+            ],
+        }
     reference_year_values = pl.DataFrame(reference_year_values)
     location_ids = [
         loc.to_pydict()["Location ID"]

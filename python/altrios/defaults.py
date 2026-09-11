@@ -53,3 +53,15 @@ GRID_EMISSIONS_FILE = alt.resources_root() / "metrics_inputs" / "Cambium24_allSc
 ELECTRICITY_PRICE_FILE = alt.resources_root() / "metrics_inputs" / "EIA_Electricity_Prices.csv"
 LIQUID_FUEL_PRICE_FILE = alt.resources_root() / "metrics_inputs" / "EIA_Liquid_Fuel_Prices.csv"
 BATTERY_PRICE_FILE = alt.resources_root() / "metrics_inputs" / "NLR_ATB_Battery_Cost_Forecasts.csv"
+
+# Year at which the EIA price series is normalized to 1.0 before being scaled by the
+# regional reference prices below. Must exist in ELECTRICITY_PRICE_FILE and
+# LIQUID_FUEL_PRICE_FILE; the AEO2026 tables start at 2025.
+EIA_PRICE_REFERENCE_YEAR = 2025
+# Regional (Minnesota) prices at EIA_PRICE_REFERENCE_YEAR, in the same units as the EIA
+# series they scale (diesel USD/gal, industrial electricity cents/kWh). The AEO2026 tables
+# are quoted in real 2025 dollars, so the original 2022 reference values are re-expressed
+# in 2025 dollars rather than re-sourced.
+EIA_REFERENCE_PRICE_REGION = "MN"
+EIA_REFERENCE_DIESEL_PRICE = 3.616 * utilities.USD_2022_TO_2025
+EIA_REFERENCE_ELECTRICITY_PRICE = 9.19 * utilities.USD_2022_TO_2025
