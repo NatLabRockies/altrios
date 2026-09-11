@@ -191,6 +191,29 @@ Scaling is `O(N^3)` on every corridor measured, decomposing as `O(N^2)` advance 
 factor is parallelizable, and it is also the one the affected-train precheck and any
 inverted index attack directly, so parallelism is the wrong lever here.
 
+### Negative result: memoizing the `Blocked` verdict
+
+Measured and rejected. The idea was to cache the `Blocked` verdict for not-yet-departed
+trains, keyed on the links the failed search actually consulted, and skip the re-search while
+none of those links changed occupant. A shadow implementation (recording witnesses and
+re-checking them without acting on the result) gave, per corridor:
+
+| | hit rate of eligible calls | eligible share of `SEARCH_ITERS` | savings ceiling |
+|---|---|---|---|
+| Taconite (N=64) | 17.6% | 96.8% | ~17% |
+| Winnipeg-Chicago (N=16) | 22.5% | 12% | ~2.7% |
+| Spokane-Lethbridge (N=16) | 0% | 23% | 0% |
+
+On Spokane 7,018 of 7,303 eligible calls had a memo present and every one was invalidated
+before it could be used, so the zero is real invalidation churn rather than missing state. The
+predicate itself is sound - a mispredict counter stayed at zero across ~103k hits - it simply
+does not fire often enough anywhere that matters. The one corridor where it would pay is the
+one that is not representative.
+
+This is an upper bound on the whole family: the witness used was the exact set of links the
+search read, which is the tightest possible predicate. Any coarser key (an offset range, for
+instance) can only invalidate more often.
+
 Timing pitfalls seen during investigation: right after editing Rust sources,
 rust-analyzer re-indexes and can inflate timings 3x for a minute or two. Use best-of-3
 and re-run the baseline back-to-back with the patched build.
