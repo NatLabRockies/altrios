@@ -238,6 +238,35 @@ This is an upper bound on the whole family: the witness used was the exact set o
 search read, which is the tightest possible predicate. Any coarser key (an offset range, for
 instance) can only invalidate more often.
 
+### Adjacent: `make_est_times` dominates the planner, and is not dispatch
+
+In a batched planner run of 90 trains on Taconite-NoBalloon, `make_est_times` was 9.0 s of
+the 10.3 s planner total (87.6%) while `run_dispatch` was 0.10 s. It is O(N) and dispatch is
+superlinear, so they cross over somewhere, but at the scales measured here dispatch is not
+the constraint - the est-time construction is.
+
+Per-train cost tracks link granularity the same way dispatch search depth does: ~28 ms on
+Taconite, ~450 ms on Spokane-Lethbridge, ~1085 ms on Winnipeg-Chicago.
+
+Two candidates inside it have been measured and rejected:
+
+- **Braking point recalculation.** `extend_path_tpc` calls `recalc_braking_points` on every
+  link extension, which looks quadratic because it rescans from scratch. It is not:
+  `PathTpc::speed_points` records speed *changes*, which are sparse (2.0 per call on
+  Winnipeg-Chicago, 21 on Spokane-Lethbridge), not one per link. Timed, it is 1.3% / 14.7% /
+  3.2% of `make_est_times` respectively.
+- **Sharing an immutable path prefix across branch clones.** At each two-way turnout the
+  sim is cloned and both copies call `extend_path_tpc` immediately, so they diverge on the
+  next statement; `Arc` plus copy-on-write would clone on that first write and buy nothing.
+  Making this cheap needs a persistent shared-tail path structure plus splitting the
+  immutable locomotive models from their mutable state, in a `#[pyclass]` serde-derived
+  struct.
+
+That leaves ~85-97% of `make_est_times` unattributed, most likely `update_movement` - the
+train physics, run over the whole route including every siding branch that can reach the
+destination. Anyone optimizing here should profile that first rather than trusting structural
+intuition; three hypotheses in this area have now been falsified by measurement.
+
 Timing pitfalls seen during investigation: right after editing Rust sources,
 rust-analyzer re-indexes and can inflate timings 3x for a minute or two. Use best-of-3
 and re-run the baseline back-to-back with the patched build.

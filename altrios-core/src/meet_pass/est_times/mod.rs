@@ -611,11 +611,20 @@ pub fn make_est_times<N: AsRef<[Link]>>(
         get_link_idx_options(&speed_limit_train_sim.origs, dests, network)
             .with_context(|| format_dbg!())?;
     // We'll store our estimated times and a map of link events here.
-    let mut est_times = Vec::with_capacity(network.len() * 10);
+    //
+    // Size these from the links this train can actually reach, not from the whole network.
+    // Only links in `link_idx_options` are ever traversed, and each contributes at most an
+    // Arrive and a Clear event, so twice that count bounds the distinct link events. Sizing
+    // from `network.len()` over-reserved badly on large networks: Winnipeg-Chicago (60,931
+    // links) reserved ~609k `EstTime` and a bucket array to match, per train, against tens
+    // of thousands actually used. Capacity is only a performance hint, so this cannot change
+    // results.
+    let link_event_bound = link_idx_options.len() * 2 + origs.len() * 2 + 2;
+    let mut est_times = Vec::with_capacity(link_event_bound * 4);
     let mut consist_out = None;
     let mut saved_sims: Vec<SavedSim> = vec![];
     let mut link_event_map =
-        LinkEventMap::with_capacity_and_hasher(est_times.capacity(), Default::default());
+        LinkEventMap::with_capacity_and_hasher(link_event_bound, Default::default());
     // The departure time for all initial events
     let time_depart = *speed_limit_train_sim
         .state
