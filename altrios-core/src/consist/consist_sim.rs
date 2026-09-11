@@ -79,14 +79,10 @@ impl ConsistSimulation {
     }
 
     pub fn solve_step(&mut self) -> anyhow::Result<()> {
-        self.loco_con
-            .state
-            .pwr_cat_lim
-            .mark_fresh(|| format_dbg!())?;
-        // self.loco_con.set_cat_power_limit(
-        //     &self.path_tpc,
-        //     *self.state.offset.get_fresh(|| format_dbg!())?,
-        // )?;
+        // A consist simulation has no network, so nothing energizes the
+        // catenary. De-energize it explicitly each step: an unset limit must
+        // mean zero available power, not an unresolved state.
+        self.loco_con.set_cat_power_limit(None, None)?;
         self.loco_con
             .set_pwr_aux(Some(true))
             .with_context(|| format_dbg!())?;

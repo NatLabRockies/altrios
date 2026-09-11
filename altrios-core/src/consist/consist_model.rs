@@ -257,13 +257,14 @@ impl Consist {
         }
     }
 
-    /// Set catenary charging/discharging power limit
-    pub fn set_cat_power_limit(
+    /// Look up the catenary power limit at `offset` along `path_tpc` and apply
+    /// it to this consist and its locomotives.
+    pub fn set_cat_power_limit_from_path(
         &mut self,
         path_tpc: &crate::track::PathTpc,
         offset: si::Length,
     ) -> anyhow::Result<()> {
-        let (pwr_cat_lim, loss_factor) = {
+        let (limit, loss_factor) = {
             let mut limit = si::Power::ZERO;
             let mut loss_factor = 0.0_f64;
             for cpl in path_tpc.cat_power_limits() {
@@ -282,16 +283,9 @@ impl Consist {
                     break;
                 }
             }
-            self.state.pwr_cat_lim.update(limit, || format_dbg!())?;
             (limit, loss_factor)
         };
-
-        // Propagate catenary power limit to individual locomotives
-        for loco in self.loco_vec.iter_mut() {
-            loco.set_cat_power_limit(Some(pwr_cat_lim), Some(loss_factor))?;
-        }
-        
-        Ok(())
+        self.set_cat_power_limit(Some(limit), Some(loss_factor))
     }
 
     pub fn get_energy_fuel(&self) -> anyhow::Result<si::Energy> {
@@ -626,6 +620,21 @@ impl Default for Consist {
 }
 
 impl LocoTrait for Consist {
+    /// Apply a catenary power limit to this consist and propagate it to every
+    /// locomotive. `None` de-energizes the catenary: the limit becomes zero.
+    fn set_cat_power_limit(
+        &mut self,
+        pwr_cat_lim: Option<si::Power>,
+        loss_factor: Option<f64>,
+    ) -> anyhow::Result<()> {
+        let limit = pwr_cat_lim.unwrap_or(si::Power::ZERO);
+        self.state.pwr_cat_lim.update(limit, || format_dbg!())?;
+        for loco in self.loco_vec.iter_mut() {
+            loco.set_cat_power_limit(Some(limit), loss_factor)?;
+        }
+        Ok(())
+    }
+
     fn set_curr_pwr_max_out(
         &mut self,
         pwr_aux: Option<si::Power>,

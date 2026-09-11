@@ -490,7 +490,7 @@ impl SpeedLimitTrainSim {
     pub fn solve_step(&mut self) -> anyhow::Result<()> {
         // set catenary power limit
         self.loco_con
-            .set_cat_power_limit(
+            .set_cat_power_limit_from_path(
                 &self.path_tpc,
                 *self.state.offset.get_stale(|| format_dbg!())?,
             )?;

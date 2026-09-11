@@ -359,7 +359,7 @@ impl SetSpeedTrainSim {
         // Set the catenary power limit from the position at the start of this
         // step: `offset` is not incremented until later in `solve_step`, so no
         // fresh value exists yet. Matches `SpeedLimitTrainSim::solve_step`.
-        self.loco_con.set_cat_power_limit(
+        self.loco_con.set_cat_power_limit_from_path(
              &self.path_tpc,
              *self.state.offset.get_stale(|| format_dbg!())?,
         )?;
