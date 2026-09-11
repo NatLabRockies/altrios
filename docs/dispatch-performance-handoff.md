@@ -179,17 +179,41 @@ and the cost of the offset suffix rewrite vary by orders of magnitude:
 | undeparted share of `SEARCH_ITERS` | 96.8% | 23% | 12% |
 | `OFFSET_SUFFIX_ELEMS` / `SEARCH_ITERS` | 0.09% | 12% | **52%** |
 
-Two consequences. Any optimization aimed at not-yet-departed trains is close to worthless
-off Taconite - that 96.8% is an artifact of train density against a short corridor, not a
-property of dispatch. And the offset suffix rewrite in `update_free_path_helpers`, dismissed
-as negligible at 0.09% on Taconite, is half the search work on Winnipeg-Chicago; replacing
-the eager `disp_path[idx_join_base..]` rewrite with a range-add structure is worth
-revisiting on fine-grained networks.
+The first row matters: any optimization aimed at not-yet-departed trains is close to
+worthless off Taconite, because that 96.8% is an artifact of train density against a short
+corridor rather than a property of dispatch.
+
+The last row is a trap, and is kept here as a warning. These are ratios of *counts*, and the
+two counters measure operations with very different per-unit costs - a contiguous `f64 +=`
+against a branchy random-access search loop. Timed directly (see below), the offset suffix
+rewrite is 0.01%, 0.86% and 4.25% of dispatch time respectively: the count ratio overstates
+it by 12-14x. Do not read a count ratio as a time ratio.
 
 Scaling is `O(N^3)` on every corridor measured, decomposing as `O(N^2)` advance steps
 (sequential, one train at a time) times `O(N)` trains scanned per step. Only the second
 factor is parallelizable, and it is also the one the affected-train precheck and any
 inverted index attack directly, so parallelism is the wrong lever here.
+
+### Negative result: range-add structure for the offset suffix rewrite
+
+Measured and rejected. `update_free_path_helpers` rewrites `disp_path[idx_join_base..]`
+offsets eagerly on every re-plan that shifts them, which is O(path length) per call and looks
+alarming by element count. Timed directly:
+
+| | elements | ns/element | total | share of dispatch |
+|---|---|---|---|---|
+| Taconite (N=128) | 702,375 | 1.70 | 1.2 ms | 0.01% |
+| Spokane-Lethbridge (N=16) | 5,415,085 | 1.26 | 6.8 ms | 0.86% |
+| Winnipeg-Chicago (N=16) | 12,368,245 | 3.77 | 46.7 ms | 4.25% |
+
+Replacing this with a Fenwick tree or similar would make the range-add O(log n), but would
+also make every point read of `disp_path[i].offset` O(log n) - and those reads outnumber the
+rewrites by orders of magnitude, in the search loop, `find_train_intersect` and `advance`. The
+best case recovers about 4% on a corridor nobody runs and under 1% on the one that matters, so
+the expected net is negative.
+
+Note also that only about half of successful re-plans trigger the rewrite at all; it is
+skipped when `offset_change` is zero.
 
 ### Negative result: memoizing the `Blocked` verdict
 
