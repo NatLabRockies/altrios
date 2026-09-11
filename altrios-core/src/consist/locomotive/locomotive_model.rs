@@ -970,7 +970,9 @@ impl Locomotive {
                 loco.fc.save_interval = save_interval;
                 loco.gen.save_interval = save_interval;
                 loco.edrv.save_interval = save_interval;
-                loco.cat_int.save_interval = save_interval;
+                if let Some(cat_int) = loco.cat_int.as_mut() {
+                    cat_int.save_interval = save_interval;
+                }
             }
             PowertrainType::HybridLoco(loco) => {
                 loco.fc.save_interval = save_interval;
@@ -1141,7 +1143,7 @@ impl Locomotive {
 
     pub fn catenary_interface(&self) -> Option<&CatenaryInterface> {
         match &self.loco_type {
-            PowertrainType::DualModeLoco(loco) => Some(&loco.cat_int),
+            PowertrainType::DualModeLoco(loco) => loco.cat_int.as_ref(),
             PowertrainType::BatteryElectricLoco(loco) => loco.cat_int.as_ref(),
             PowertrainType::ConventionalLoco(_) => None,
             PowertrainType::HybridLoco(_) => None,
@@ -1151,7 +1153,7 @@ impl Locomotive {
 
     pub fn catenary_interface_mut(&mut self) -> Option<&mut CatenaryInterface> {
         match &mut self.loco_type {
-            PowertrainType::DualModeLoco(loco) => Some(&mut loco.cat_int),
+            PowertrainType::DualModeLoco(loco) => loco.cat_int.as_mut(),
             PowertrainType::BatteryElectricLoco(loco) => loco.cat_int.as_mut(),
             PowertrainType::ConventionalLoco(_) => None,
             PowertrainType::HybridLoco(_) => None,
@@ -1162,7 +1164,7 @@ impl Locomotive {
     pub fn set_catenary_interface(&mut self, cat_int: CatenaryInterface) -> Result<()> {
         match &mut self.loco_type {
             PowertrainType::DualModeLoco(loco) => {
-                loco.cat_int = cat_int;
+                loco.cat_int = Some(cat_int);
                 Ok(())
             }
             PowertrainType::BatteryElectricLoco(loco) => {

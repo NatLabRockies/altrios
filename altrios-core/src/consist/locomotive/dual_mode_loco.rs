@@ -7,7 +7,7 @@ use super::LocoTrait;
 use super::*;
 use crate::imports::*;
 
-#[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize, StateMethods, SetCumulative)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, StateMethods, SetCumulative)]
 #[serde_api]
 #[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Dual-mode locomotive
@@ -20,8 +20,12 @@ pub struct DualModeLoco {
     pub gen: Generator,
     #[has_state]
     pub edrv: ElectricDrivetrain,
+    /// Optional catenary/pantograph interface. When `Some`, the locomotive can
+    /// draw traction power from the catenary in place of the engine. When
+    /// `None`, it has no pantograph and runs as a diesel-electric.
     #[has_state]
-    pub cat_int: CatenaryInterface,
+    #[serde(default)]
+    pub cat_int: Option<CatenaryInterface>,
 
 }
 
@@ -32,13 +36,13 @@ impl DualModeLoco {
         fuel_converter: FuelConverter,
         generator: Generator,
         electric_drivetrain: ElectricDrivetrain,
-        cat_int: CatenaryInterface,
+        cat_int: Option<CatenaryInterface>,
     ) -> Self {
         Self {
             fc: fuel_converter,
             gen: generator,
             edrv: electric_drivetrain,
-            cat_int: cat_int
+            cat_int,
         }
     }
 }
@@ -48,13 +52,13 @@ impl DualModeLoco {
         fuel_converter: FuelConverter,
         generator: Generator,
         electric_drivetrain: ElectricDrivetrain,
-        cat_int: CatenaryInterface,
+        cat_int: Option<CatenaryInterface>,
     ) -> Self {
         Self {
             fc: fuel_converter,
             gen: generator,
             edrv: electric_drivetrain,
-            cat_int: cat_int,
+            cat_int,
         }
     }
 
@@ -80,17 +84,15 @@ impl DualModeLoco {
             .pwr_elec_prop_in
             .get_fresh(|| format_dbg!())?;
 
-        // Tell the catenary the full electrical demand (propulsion + aux) so it
-        // can cover aux load with any surplus capacity, enabling the engine to
-        // shut off when catenary power is sufficient.
-        self.cat_int
-            .set_pwr_in_req(pwr_elec_prop_in + pwr_aux, dt)?;
-
-        let cat_pwr_out = *self
-            .cat_int
-            .state
-            .pwr_elec_out
-            .get_fresh(|| format_dbg!())?;
+        let cat_pwr_out = if let Some(cat_int) = self.cat_int.as_mut() {
+            // Tell the catenary the full electrical demand (propulsion + aux) so it
+            // can cover aux load with any surplus capacity, enabling the engine to
+            // shut off when catenary power is sufficient.
+            cat_int.set_pwr_in_req(pwr_elec_prop_in + pwr_aux, dt)?;
+            *cat_int.state.pwr_elec_out.get_fresh(|| format_dbg!())?
+        } else {
+            si::Power::ZERO
+        };
 
         // Catenary covers propulsion first, then aux with any remaining capacity.
         let cat_to_prop = cat_pwr_out.min(pwr_elec_prop_in);
@@ -140,12 +142,25 @@ impl Mass for DualModeLoco {
     }
 }
 
+impl Default for DualModeLoco {
+    fn default() -> Self {
+        Self {
+            fc: Default::default(),
+            gen: Default::default(),
+            edrv: Default::default(),
+            cat_int: Some(Default::default()),
+        }
+    }
+}
+
 impl Init for DualModeLoco {
     fn init(&mut self) -> Result<(), Error> {
         self.fc.init()?;
         self.gen.init()?;
         self.edrv.init()?;
-        self.cat_int.init()?;
+        if let Some(cat_int) = self.cat_int.as_mut() {
+            cat_int.init()?;
+        }
         Ok(())
     }
 }
@@ -157,7 +172,9 @@ impl LocoTrait for DualModeLoco {
         pwr_cat_lim: Option<si::Power>,
         loss_factor: Option<f64>,
     ) -> anyhow::Result<()> {
-        self.cat_int.set_cat_power_limit(pwr_cat_lim, loss_factor)?;
+        if let Some(cat_int) = self.cat_int.as_mut() {
+            cat_int.set_cat_power_limit(pwr_cat_lim, loss_factor)?;
+        }
         Ok(())
     }
     /// returns current max power
@@ -169,7 +186,13 @@ impl LocoTrait for DualModeLoco {
         _train_speed: Option<si::Velocity>,
         dt: si::Time,
     ) -> anyhow::Result<()> {
-        self.cat_int.set_cur_pwr_max_out(*self.cat_int.state.pwr_elec_in_max.get_fresh(|| format_dbg!())?, None)?;
+        let cat_pwr_out_max = if let Some(cat_int) = self.cat_int.as_mut() {
+            let pwr_elec_in_max = *cat_int.state.pwr_elec_in_max.get_fresh(|| format_dbg!())?;
+            cat_int.set_cur_pwr_max_out(pwr_elec_in_max, None)?;
+            *cat_int.state.pwr_elec_out_max.get_fresh(|| format_dbg!())?
+        } else {
+            si::Power::ZERO
+        };
         self.fc.set_cur_pwr_out_max(elev_and_temp, dt)?;
         self.gen.set_cur_pwr_max_out(
             *self.fc.state.pwr_out_max.get_fresh(|| format_dbg!())?,
@@ -181,11 +204,7 @@ impl LocoTrait for DualModeLoco {
                 .state
                 .pwr_elec_prop_out_max
                 .get_fresh(|| format_dbg!())?
-            + *self
-                .cat_int
-                .state
-                .pwr_elec_out_max
-                .get_fresh(|| format_dbg!())?,
+                + cat_pwr_out_max,
             None,
         )?;
         self.edrv.set_cur_pwr_regen_max(si::Power::ZERO)?;
@@ -202,10 +221,14 @@ impl LocoTrait for DualModeLoco {
     }
 
     fn get_energy_loss(&self) -> anyhow::Result<si::Energy> {
+        let cat_energy_loss = match &self.cat_int {
+            Some(cat_int) => *cat_int.state.energy_loss.get_stale(|| format_dbg!())?,
+            None => si::Energy::ZERO,
+        };
         Ok(*self.fc.state.energy_loss.get_stale(|| format_dbg!())?
             + *self.gen.state.energy_loss.get_stale(|| format_dbg!())?
             + *self.edrv.state.energy_loss.get_stale(|| format_dbg!())?
-            + *self.cat_int.state.energy_loss.get_stale(|| format_dbg!())?)
+            + cat_energy_loss)
     }
 }
 
@@ -227,6 +250,8 @@ mod tests {
 
         // Set catenary power limit well above total demand (10 MW >> 1.2 MW).
         dml.cat_int
+            .as_mut()
+            .unwrap()
             .set_cat_power_limit(Some(10_000e3 * uc::W), None)
             .unwrap();
         dml.set_curr_pwr_max_out(Some(pwr_aux), None, None, None, dt)

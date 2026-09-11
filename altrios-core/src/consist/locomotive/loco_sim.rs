@@ -239,6 +239,10 @@ impl LocomotiveSimulation {
     }
 
     pub fn solve_step(&mut self) -> anyhow::Result<()> {
+        // A standalone locomotive has no network, so nothing energizes the
+        // catenary. De-energize it explicitly each step: an unset pantograph
+        // limit must mean zero available power, not an unresolved state.
+        self.loco_unit.set_cat_power_limit(None, None)?;
         // linear aux model
         let i = *self.loco_unit.state.i.get_fresh(|| format_dbg!())?;
         let engine_on: Option<bool> = self
