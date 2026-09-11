@@ -262,10 +262,23 @@ Two candidates inside it have been measured and rejected:
   immutable locomotive models from their mutable state, in a `#[pyclass]` serde-derived
   struct.
 
-That leaves ~85-97% of `make_est_times` unattributed, most likely `update_movement` - the
-train physics, run over the whole route including every siding branch that can reach the
-destination. Anyone optimizing here should profile that first rather than trusting structural
-intuition; three hypotheses in this area have now been falsified by measurement.
+- **Caching the link path across trains.** Which links get visited is decided by
+  `get_link_idx_options` - pure backward graph reachability from the destinations - and the
+  network's own `idx_next`/`idx_next_alt` topology. No physics enters that choice, so it is
+  identical for every train sharing an O-D and looks eminently cacheable. Timed, it is
+  0.1-0.2% of `make_est_times` (19 ms to reduce Winnipeg-Chicago's 60,931 links to a 30,466
+  link reachable set, against ~1,150 ms per train overall). There is nothing to recover.
+
+That leaves ~85% or more of `make_est_times` in the branch exploration and physics itself -
+`update_movement` run over the whole route including every siding branch that can reach the
+destination, plus the DAG insert/join bookkeeping. Note the joins are *not* physics-free:
+`perform_speed_join` requires a speed match as well as a space match, so where two branches
+merge depends on the train's speed profile. That is what stops the finished est-time network
+from being cacheable on an O-D key alone; a cache would need a physics-aware key, and its
+value would hinge on how much the planner varies consists between trains - which is unmeasured.
+
+Four structural hypotheses in this area have now been falsified by measurement, each after
+looking convincing in the source. Profile before optimizing here.
 
 Timing pitfalls seen during investigation: right after editing Rust sources,
 rust-analyzer re-indexes and can inflate timings 3x for a minute or two. Use best-of-3
