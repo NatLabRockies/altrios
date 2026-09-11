@@ -57,7 +57,7 @@ def get_error(t: np.array, mod: np.array, exp: np.array):
     """
     Return error for model data, `mod`, w.r.t. experimental data, `exp`, over time, `t` 
     """
-    err = np.trapz(y=abs(mod - exp), x=t) / (t[-1] - t[0])
+    err = np.trapezoid(y=abs(mod - exp), x=t) / (t[-1] - t[0])
     return err
 
 @dataclass

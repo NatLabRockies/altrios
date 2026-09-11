@@ -33,8 +33,8 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
 ]
 dependencies = [
-    "pandas>=2",
-    "numpy~=1.24",
+    "pandas>=2,<3",
+    "numpy>=2.1",
     "numba>=0.59",
     "pymoo==0.6",
     "openpyxl",
@@ -45,9 +45,9 @@ dependencies = [
     "typing_extensions",
     "pyarrow >= 16.0",
     "polars==1.39.3",
-    "requests",
     "PyYAML==6.0.2",
     "simpy",
+    "progressbar2",
     "msgpack==1.1.0",
     "ipykernel~=6.29",
     "executing~=2.0",
@@ -67,6 +67,7 @@ networkbuilder = [
     "shapely>=2.0",
     "networkx>=3.0",
     "scipy>=1.10",
+    "requests",
 ]
 # Deps for publication-quality projected maps (applications/catenary_optimization/plot_electrified_network).
 # Cartopy provides a proper projected CRS (e.g. Lambert Conformal Conic) so long

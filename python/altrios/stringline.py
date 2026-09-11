@@ -142,7 +142,7 @@ else:
             'width':wideWidth,
             'color':color})
 
-bar = progressbar.ProgressBar(15)
+bar = progressbar.ProgressBar(max_value=15)
 print('Generating Graphs')
 bar.start()
 
@@ -420,7 +420,7 @@ for x  in range(len(allFolders)):
 bar.update(15)
 print('Writing Unwritten '+str(len(unwrittenFiles))+' Plots')
 maxUnwritten = len(unwrittenFiles)
-bar = progressbar.ProgressBar(15)
+bar = progressbar.ProgressBar(max_value=15)
 bar.start()
 while True:
     nextUnwrittenFiles = []

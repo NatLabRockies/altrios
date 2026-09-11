@@ -39,9 +39,6 @@ ninterp = { version = "0.6.4", features = ["serde"] }
 document-features = "0.2.10"
 anyhow = "1.0.71"
 pyo3 = "0.22"
-polars = { version = "0.45" }
-polars-lazy = { version = "0.45" }
-pyo3-polars = { version = "0.19" }
 uom = { version = "0.35.0" }
 eng_fmt = "0.1.2"
 lazy_static = "1.4.0"

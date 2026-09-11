@@ -10,7 +10,6 @@ pub use pyo3::exceptions::{
 };
 pub use pyo3::prelude::*;
 pub use pyo3::types::PyType;
-pub use pyo3_polars::PyDataFrame;
 
 // TODO: look into making stuff that gets added below have some module hierarchy that emulates the Rust module structure
 

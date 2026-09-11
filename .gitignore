@@ -1218,6 +1218,9 @@ altrios/resources/networks/Scenic - ALTRIOS Confidential.yaml
 altrios/dispatch/*.json
 activate.sh
 *.xlsx
+# The bundled RES data is tracked deliberately (force-added past the rule above).
+# Un-ignore it so packaging tools that honor .gitignore (maturin) ship it in wheels.
+!python/altrios/resources/powertrains/**/*.xlsx
 altrios/*.txt
 truck_work_log.txt
 vehicle_average_times.txt
