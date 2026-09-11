@@ -219,7 +219,6 @@ impl TrainDisp {
                     self.disp_path[self.disp_node_idx_free.idx()].disp_auth_idx_entry =
                         disp_auths_curr.len().try_from_idx().unwrap();
                     disp_auths_curr.push(DispAuth {
-                        arrive_entry: self.time_update_next,
                         train_idx: self.train_idx,
                         ..Default::default()
                     });
@@ -449,7 +448,20 @@ impl TrainDisp {
         self.update_occupancy(link_disp_auths, links_blocked, links);
     }
 
-    // TODO: this needs documentation!
+    /// Record where this train currently sits in the per-link dispatch authorities, so
+    /// following trains can see how much of each link is occupied.
+    ///
+    /// While the train is still on its path this just updates the front and back offsets.
+    /// Once it reaches the end of its path it stops being tracked, and the trailing links it
+    /// still occupies never get their clear events - the train runs off the end of the path
+    /// first - so their times would stay at the [DispAuth::default] placeholders forever.
+    /// The second branch finalizes exactly those links, walking back from the end of the
+    /// path to the link under the train's rear.
+    ///
+    /// # Arguments
+    /// - `link_disp_auths`: per-link stack of dispatch authorities, newest last
+    /// - `links_blocked`: the train blocking each link, indexed by link idx
+    /// - `links`: the network
     fn update_occupancy(
         &mut self,
         link_disp_auths: &mut [Vec<DispAuth>],
@@ -503,7 +515,8 @@ impl TrainDisp {
                 links_blocked[link_idx.idx()] = self.train_idx;
             }
         }
-        // If the train has left, remove any excess occupancy (WILL CAUSE ISSUES FOR EARLY EXIT)
+        // The train has reached the end of its path. Finalize every link it still occupies,
+        // whose clear events never ran; see this function's doc comment.
         else if !self.link_idxs_blocking.is_empty() {
             assert!(self.disp_node_idx_back.is_some());
             let link_idx_back = self.disp_path[self.disp_node_idx_back.idx()]
@@ -522,7 +535,11 @@ impl TrainDisp {
                     disp_auth_exit.offset_back = f64::INFINITY * uc::M;
                     disp_auth_exit.arrive_exit =
                         disp_auth_exit.arrive_exit.min(self.time_update_next);
-                    disp_auth_exit.arrive_entry =
+                    // Clamping this is what keeps a trailing link from carrying the
+                    // positive-infinity placeholder out of dispatch: a following train reads
+                    // `clear_entry` for same-direction headway, and an unset value there
+                    // makes its whole remaining timetable infinite.
+                    disp_auth_exit.clear_entry =
                         disp_auth_exit.clear_entry.min(self.time_update_next);
                     disp_auth_exit.clear_exit = self.time_update_next;
 
