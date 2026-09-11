@@ -155,6 +155,42 @@ cd altrios-core
 BENCH_NS=32,64,128 cargo test --release --test dispatch_bench -- --ignored --nocapture
 ```
 
+`BENCH_NETWORK` selects the corridor (`taconite` default, `spokane`, `spokane_plain`,
+`winnipeg`) and `BENCH_ROUTES=mixed` spreads trains over every feasible O-D pair instead of
+cloning one fixture. Corridors behave very differently — see below — so a result is only ever
+a statement about the corridor it was measured on.
+
+Adding `--features dispatch-counters` enables the instrumentation in `meet_pass::counters`
+(off by default, zero cost when off) and prints a `COUNT` line per counter. That is how the
+numbers in this document were obtained; counters are deterministic, so they are unaffected by
+machine load, but they inflate wall-clock times and must not be used for timing.
+
+### Corridor dependence (measured)
+
+Taconite is not representative. Link granularity drives how many dispatch nodes a fixed
+search distance covers, and both the share of work attributable to not-yet-departed trains
+and the cost of the offset suffix rewrite vary by orders of magnitude:
+
+| | Taconite (N=128) | Spokane-Lethbridge (N=16) | Winnipeg-Chicago (N=16) |
+|---|---|---|---|
+| links / route-miles | 1,077 / ~370 | 20,749 / ~490 | 60,931 / ~1,060 |
+| mi per link | 0.685 | 0.047 | 0.035 |
+| `SEARCH_ITERS` per `UPDATE_CALLS` | 134 | 1,196 | 1,160 |
+| undeparted share of `SEARCH_ITERS` | 96.8% | 23% | 12% |
+| `OFFSET_SUFFIX_ELEMS` / `SEARCH_ITERS` | 0.09% | 12% | **52%** |
+
+Two consequences. Any optimization aimed at not-yet-departed trains is close to worthless
+off Taconite - that 96.8% is an artifact of train density against a short corridor, not a
+property of dispatch. And the offset suffix rewrite in `update_free_path_helpers`, dismissed
+as negligible at 0.09% on Taconite, is half the search work on Winnipeg-Chicago; replacing
+the eager `disp_path[idx_join_base..]` rewrite with a range-add structure is worth
+revisiting on fine-grained networks.
+
+Scaling is `O(N^3)` on every corridor measured, decomposing as `O(N^2)` advance steps
+(sequential, one train at a time) times `O(N)` trains scanned per step. Only the second
+factor is parallelizable, and it is also the one the affected-train precheck and any
+inverted index attack directly, so parallelism is the wrong lever here.
+
 Timing pitfalls seen during investigation: right after editing Rust sources,
 rust-analyzer re-indexes and can inflate timings 3x for a minute or two. Use best-of-3
 and re-run the baseline back-to-back with the patched build.

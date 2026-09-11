@@ -49,6 +49,7 @@ fn check_deadlock(
     train_idx_moved: TrainIdx,
     is_local: bool,
 ) -> Result<(bool, usize), ComboErrors<anyhow::Error>> {
+    dcount!(CHECK_DEADLOCK_CALLS);
     let mut has_deadlock = false;
     let mut errors = ComboErrors::<anyhow::Error>::new();
 
@@ -156,6 +157,7 @@ pub fn run_dispatch<N: AsRef<[Link]>>(
 
         // Advance one train until reaching a deadlock free configuration
         loop {
+            dcount!(ADVANCE_CALLS);
             if train_disps[train_idx_curr.idx()].advance(
                 &mut link_disp_auths,
                 &mut links_blocked,
@@ -192,6 +194,7 @@ pub fn run_dispatch<N: AsRef<[Link]>>(
 
                 // If there was deadlock and the train is blocked, rewind and break
                 if has_deadlock && train_curr.is_blocked() {
+                    dcount!(REWIND_CALLS);
                     train_curr.rewind(&mut link_disp_auths, &mut links_blocked, network);
                     (has_deadlock, train_idx_begin) = check_deadlock(
                         &mut train_disps,

@@ -68,6 +68,9 @@ default = ["serde-default", "resources", ]
 resources = ["dep:include_dir"]
 ## Exposes ALTRIOS structs, methods, and functions to Python.
 pyo3 = ["dep:pyo3"]
+## Enables instrumentation counters in the meet-pass dispatch hot path.
+## Diagnostic only; perturbs timing by a few percent. See `meet_pass::counters`.
+dispatch-counters = []
 ## Enables several text file formats for serialization and deserialization
 serde-default = ["csv", "json", "toml", "yaml", "msgpack"]
 ## Enables csv serialization and deserialization
