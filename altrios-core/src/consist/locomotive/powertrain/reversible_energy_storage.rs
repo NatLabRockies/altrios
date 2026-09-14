@@ -262,7 +262,7 @@ impl SerdeAPI for ReversibleEnergyStorage {
             .ok_or_else(|| {
                 Error::SerdeError(format!("File extension could not be parsed: {filepath:?}"))
             })?;
-        let mut file = File::open(filepath)
+        let file = File::open(filepath)
             .with_context(|| {
                 if !filepath.exists() {
                     format!("File not found: {filepath:?}")
@@ -271,7 +271,9 @@ impl SerdeAPI for ReversibleEnergyStorage {
                 }
             })
             .map_err(|err| Error::SerdeError(format!("{err}")))?;
-        let mut network = match Self::from_reader(&mut file, extension, skip_init) {
+        // Buffer the reads for the same reason as `to_file` buffers writes.
+        let mut rdr = std::io::BufReader::new(file);
+        let mut network = match Self::from_reader(&mut rdr, extension, skip_init) {
             Ok(network) => network,
             Err(err) => res_legacy::ReversibleEnergyStorageLegacy::from_file(filepath, false)
                 .map_err(|old_err| {

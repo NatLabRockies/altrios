@@ -584,6 +584,40 @@ def export_path_with_sidings(
         for i in range(len(mainline_nodes)):
             elevations[i] = mainline_elevs[i]
 
+        # Sidings get the same treatment. Without this they keep raw sampled
+        # elevations while the mainline is smoothed, which produced siding
+        # grades of 90% on Toronto-Battle Creek and 39% on Spokane-Lethbridge
+        # -- track no locomotive could climb, and meet-pass routes trains onto
+        # it. Each siding is filtered along its own length, anchored at the
+        # mainline nodes it joins.
+        logger.info("Filtering grade spikes on %d sidings...", len(sidings))
+        for siding_path in sidings:
+            siding_dists = [0.0]
+            for prev_node, next_node in zip(siding_path, siding_path[1:]):
+                siding_dists.append(
+                    siding_dists[-1]
+                    + haversine_distance(
+                        G.nodes[prev_node]["lon"],
+                        G.nodes[prev_node]["lat"],
+                        G.nodes[next_node]["lon"],
+                        G.nodes[next_node]["lat"],
+                    )
+                )
+            siding_elevs = [elevations[node_to_idx[n]] for n in siding_path]
+            if len(siding_elevs) >= 3:
+                siding_elevs = filter_grade_spikes(
+                    siding_elevs, siding_dists, max_grade=max_grade
+                )
+            elif len(siding_elevs) == 2 and siding_dists[-1] >= 1.0:
+                # Too short for the filter, which needs three points.
+                rise = siding_elevs[1] - siding_elevs[0]
+                if abs(rise) / siding_dists[-1] > max_grade:
+                    siding_elevs[1] = siding_elevs[0] + math.copysign(
+                        max_grade * siding_dists[-1], rise
+                    )
+            for node, elev in zip(siding_path, siding_elevs):
+                elevations[node_to_idx[node]] = float(elev)
+
     # Convert all elevations to native Python floats so yaml.dump writes plain numbers,
     # not numpy binary blobs (which ALTRIOS cannot parse).
     elevations = [float(e) for e in elevations]

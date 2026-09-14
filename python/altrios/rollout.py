@@ -21,7 +21,7 @@ def simulate_prescribed_rollout(
     results_folder: Path,
     start_year: int = defaults.BASE_ANALYSIS_YEAR,
     # If you do not have this path, please add it! We are trying to keep confidential documents out of the git repo
-    network_filename_path: str = str(alt.resources_root() / "networks/Taconite.yaml"),
+    network_filename_path: str = str(alt.resources_root() / "networks/Taconite.msgpack"),
     save_interval: Optional[int] = None,
     freight_demand_percent_growth: float = 0.0,
     demand_file: Union[pl.DataFrame, Path, str] = defaults.DEMAND_FILE,

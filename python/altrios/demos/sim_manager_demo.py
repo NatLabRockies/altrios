@@ -33,7 +33,7 @@ location_map = alt.import_locations(
     alt.resources_root() / "networks/default_locations.csv"
 )
 network = alt.Network.from_file(
-    alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
+    alt.resources_root() / "networks/Taconite-NoBalloon.msgpack"
 )
 
 t1_import = time.perf_counter()

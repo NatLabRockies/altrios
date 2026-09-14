@@ -22,7 +22,7 @@ rail_vehicles = [
     for rv_file in Path(rs_dir).glob("*.yaml")
 ]
 
-network = alt.Network.from_file(network_dir / "Spokane_Lethbridge" / "spokane_lethbridge.yaml")
+network = alt.Network.from_file(network_dir / "Spokane_Lethbridge" / "spokane_lethbridge.msgpack")
 location_map = alt.import_locations(network_dir / "Spokane_Lethbridge" / "spokane_lethbridge_locations.csv")
 consist_plan_in = pl.read_csv(Path(__file__).parent / "catenary_optimization" / "train_consist_plan_spokane_lethbridge_clean.csv")
  

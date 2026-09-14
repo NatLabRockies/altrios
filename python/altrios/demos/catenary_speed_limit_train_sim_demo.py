@@ -67,7 +67,7 @@ location_map = alt.import_locations(alt.resources_root() / "networks/default_loc
 # Load the network and construct the timed link path through the network.
 print("Loading `Network`")
 network = alt.Network.from_file(
-    alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
+    alt.resources_root() / "networks/Taconite-NoBalloon.msgpack"
 )
 network_without_catenary = copy(network)
 

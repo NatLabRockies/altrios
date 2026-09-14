@@ -1,0 +1,5 @@
+Location ID,Link Index,Offset (m),Is Front End,Grid Emissions Region,Electricity Price Region,Liquid Fuel Price Region
+Toronto,1,0,FALSE,MISO_Central,TX,TX
+BattleCreek,2378,0,FALSE,MISO_Central,TX,TX
+BattleCreek,2379,0,FALSE,MISO_Central,TX,TX
+Toronto,4756,0,FALSE,MISO_Central,TX,TX

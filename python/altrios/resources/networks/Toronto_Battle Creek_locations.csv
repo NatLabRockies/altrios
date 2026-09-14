@@ -1,5 +1,0 @@
-Location ID,Link Index,Offset (m),Is Front End,Grid Emissions Region,Electricity Price Region,Liquid Fuel Price Region
-Toronto,1,0,FALSE,WECC,WA,WA
-Battle_Creek,7901,0,FALSE,WECC,ab,ab
-Battle_Creek,7902,0,FALSE,WECC,ab,ab
-Toronto,2,0,FALSE,WECC,WA,WA

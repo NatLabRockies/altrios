@@ -49,17 +49,17 @@ const SPOKANE_LETHBRIDGE_LOCS: [(&str, u32, u32); 2] =
 fn corridor() -> (Network, &'static [(&'static str, u32, u32)]) {
     let which = std::env::var("BENCH_NETWORK").unwrap_or_else(|_| "taconite".into());
     let (file, locs): (&str, &'static [(&'static str, u32, u32)]) = match which.as_str() {
-        "winnipeg" => ("Winnipeg_Chicago.yaml", &WINNIPEG_CHICAGO_LOCS),
+        "winnipeg" => ("Winnipeg_Chicago.msgpack", &WINNIPEG_CHICAGO_LOCS),
         // The with-sidings variant is what applications/catenary_optimization uses.
         "spokane_plain" => (
-            "Spokane_Lethbridge/spokane_lethbridge.yaml",
+            "Spokane_Lethbridge/spokane_lethbridge.msgpack",
             &SPOKANE_LETHBRIDGE_LOCS,
         ),
         "spokane" => (
-            "spokane_lethbridge_with_sidings_speed_reduced_059.yaml",
+            "spokane_lethbridge_with_sidings_speed_reduced_059.msgpack",
             &SPOKANE_LETHBRIDGE_LOCS,
         ),
-        _ => ("Taconite.yaml", &TACONITE_LOCS),
+        _ => ("Taconite.msgpack", &TACONITE_LOCS),
     };
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../python/altrios/resources/networks")

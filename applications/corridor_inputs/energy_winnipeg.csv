@@ -1,0 +1,2 @@
+corridor,trains,obs_over_sim,scaled_fuel_GJ,posted_traction_GJ,dwell_idle_GJ,posted_total_GJ,scaled_hours,posted_hours,dwell_hours,locos_per_train,pct_diff
+winnipeg_chicago,40,1.340865201864019,28893.465259030254,33167.05432468341,148.82325251450143,33315.87757719791,2467.402986870957,2104.365917896682,717.3051133996141,2.925,-13.274188284310577

@@ -843,7 +843,7 @@ if __name__ == "__main__":
     import altrios as alt
 
     net_path = (alt.resources_root() / "networks" / "Spokane_Lethbridge"
-                / "spokane_lethbridge.yaml")
+                / "spokane_lethbridge.msgpack")
     net = alt.Network.from_file(str(net_path))
     out = Path(__file__).resolve().parent / "electrified_network_smoketest.png"
     plot_electrified_track(

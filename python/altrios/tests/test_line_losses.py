@@ -10,7 +10,7 @@ NETWORK_FILE = (
     alt.resources_root()
     / "networks"
     / "Heart_of_Georgia"
-    / "Heart_of_Georgia.yaml"
+    / "Heart_of_Georgia.msgpack"
 )
 
 SAVE_INTERVAL = 60
@@ -129,7 +129,7 @@ def _run_catenary_sim():
         alt.resources_root() / "networks/default_locations.csv"
     )
     network = alt.Network.from_file(
-        alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
+        alt.resources_root() / "networks/Taconite-NoBalloon.msgpack"
     )
     # Taconite lacks lat/lon, so stamp line-loss params directly for the runtime test.
     network_cat = en.energize_uniform(network, 50e6)

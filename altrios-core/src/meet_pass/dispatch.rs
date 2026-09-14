@@ -324,7 +324,7 @@ mod test_dispatch {
     fn test_simple_dispatch() {
         let network_file_path = project_root::get_project_root()
             .unwrap()
-            .join("python/altrios/resources/networks/Taconite.yaml");
+            .join("python/altrios/resources/networks/Taconite.msgpack");
         let network = {
             let network = Network::from_file(network_file_path, false);
             if let Err(err) = &network {

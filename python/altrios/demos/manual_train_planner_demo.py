@@ -29,7 +29,7 @@ location_map = alt.import_locations(
 # message pack format for increased speed with larger networks.
 print("Loading `network`")
 network = alt.Network.from_file(
-    alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
+    alt.resources_root() / "networks/Taconite-NoBalloon.msgpack"
 )
 
 # create the train planner config.  Options within this default object

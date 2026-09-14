@@ -643,6 +643,13 @@ def run_train_planner(
                             train_length_meters,
                         )
 
+                    # An observed per-train speed ceiling, where the consist plan
+                    # carries one, overrides a car model rated below it.
+                    rv_to_use = data_prep.raise_rv_speed_max(
+                        rv_to_use,
+                        this_train.get("Train_Speed_Max_Meters_Per_Second"),
+                    )
+
                     # Create train configuration (after any mass/length scaling of rv_to_use above)
                     train_config = alt.TrainConfig(
                         rail_vehicles=rv_to_use,
@@ -884,7 +891,7 @@ if __name__ == "__main__":
 
     # Load network definition
     network = alt.Network.from_file(
-        str(alt.resources_root() / "networks/Taconite-NoBalloon.yaml")
+        str(alt.resources_root() / "networks/Taconite-NoBalloon.msgpack")
     )
 
     # Create planner configuration

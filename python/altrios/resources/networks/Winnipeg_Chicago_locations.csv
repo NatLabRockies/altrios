@@ -1,5 +1,5 @@
 Location ID,Link Index,Offset (m),Is Front End,Grid Emissions Region,Electricity Price Region,Liquid Fuel Price Region
 Winnipeg,1,0,FALSE,MISO_North,TX,TX
-Chicago,24640,0,FALSE,MISO_North,TX,TX
-Chicago,24641,0,FALSE,MISO_North,TX,TX
-Winnipeg,49280,0,FALSE,MISO_North,TX,TX
+Chicago,5178,0,FALSE,MISO_North,TX,TX
+Chicago,5179,0,FALSE,MISO_North,TX,TX
+Winnipeg,10356,0,FALSE,MISO_North,TX,TX

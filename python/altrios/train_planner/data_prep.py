@@ -669,6 +669,34 @@ def configure_rail_vehicles(
     ]
     return rv_to_use, n_cars_by_type
 
+def raise_rv_speed_max(
+    rv_to_use: list[alt.RailVehicle],
+    speed_max_meters_per_second: float,
+) -> list[alt.RailVehicle]:
+    """Lift each rail vehicle's speed ceiling to at least the given value.
+
+    A train's maximum speed is the minimum ``speed_max`` across its car types
+    (see ``TrainConfig`` in altrios-core), so a car model rated below the speed
+    a train was actually observed running caps it there no matter what the
+    track allows. Rather than editing the shared rolling-stock files -- which
+    would change every study that loads them -- the observed ceiling travels
+    with the train, on the consist plan, and is applied here.
+
+    Only raises, never lowers: a car type rated above the observed speed keeps
+    its rating.
+    """
+    if speed_max_meters_per_second is None:
+        return rv_to_use
+    raised = []
+    for rv in rv_to_use:
+        rv_dict = rv.to_pydict()
+        if rv_dict["speed_max_meters_per_second"] < speed_max_meters_per_second:
+            rv_dict["speed_max_meters_per_second"] = float(speed_max_meters_per_second)
+            rv = alt.RailVehicle.from_pydict(rv_dict)
+        raised.append(rv)
+    return raised
+
+
 def scale_rv_mass_and_length(
     rv_to_use: list[alt.RailVehicle],
     n_cars_by_type: dict[str, int],

@@ -1,0 +1,2 @@
+from_sensor,to_sensor,km,obs_n,obs_median_hr,obs_p25_hr,obs_p75_hr,sim_n,sim_median_hr,sim_p25_hr,sim_p75_hr,obs_kph,sim_kph,pct_error,corridor
+"Ste Anne, MB","Devlin, ON",259.15582,6836,5.450138888888889,4.922777777777778,6.095277777777778,152,3.826152904070101,3.634624974647493,4.271629321264356,47.55031482378125,67.73274003877914,-0.29797148621837544,winnipeg_chicago

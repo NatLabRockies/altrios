@@ -214,7 +214,7 @@ NOMINAL_LINE_EFFICIENCY = 0.97    # ~3% average catenary I2R loss
 # ---------------------------------------------------------------------------
 # Shared network, substations, and capital costs
 # ---------------------------------------------------------------------------
-_NET_PATH = alt.resources_root() / "networks" / "Spokane_Lethbridge" / "spokane_lethbridge.yaml"
+_NET_PATH = alt.resources_root() / "networks" / "Spokane_Lethbridge" / "spokane_lethbridge.msgpack"
 _log(f"loading network from {_NET_PATH} ...")
 _t = time.perf_counter()
 network = alt.Network.from_file(str(_NET_PATH))

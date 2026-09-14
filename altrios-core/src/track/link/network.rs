@@ -473,7 +473,7 @@ impl SerdeAPI for Network {
             .ok_or_else(|| {
                 Error::SerdeError(format!("File extension could not be parsed: {filepath:?}"))
             })?;
-        let mut file = File::open(filepath).map_err(|err| {
+        let file = File::open(filepath).map_err(|err| {
             Error::SerdeError(format!(
                 "{err}\n{}",
                 if !filepath.exists() {
@@ -483,7 +483,9 @@ impl SerdeAPI for Network {
                 }
             ))
         })?;
-        match Self::from_reader(&mut file, extension, skip_init) {
+        // Buffer the reads for the same reason as `to_file` buffers writes.
+        let mut rdr = std::io::BufReader::new(file);
+        match Self::from_reader(&mut rdr, extension, skip_init) {
             Ok(network) => {
                 // init already happened in `from_reader`
                 Ok(network)
@@ -940,7 +942,7 @@ mod tests {
     fn test_set_speed_set_from_train_type() {
         let network_file_path = project_root::get_project_root()
             .unwrap()
-            .join("python/altrios/resources/networks/Taconite.yaml");
+            .join("python/altrios/resources/networks/Taconite.msgpack");
         let network_speed_sets = {
             let network = Network::from_file(network_file_path, false);
             if let Err(err) = &network {
