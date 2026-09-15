@@ -84,31 +84,35 @@ def to_pydict(self, data_fmt: str = "msg_pack", flatten: bool = False) -> Dict:
 
 def get_hist_len(obj: Dict) -> Optional[int]:
     """
-    Finds nested `history` and gets lenth of first element
+    Finds nested `history` and gets the number of recorded time steps
     """
     # TODO: check if this is sufficiently recursive and if it's not, make it recursive all the way down
 
+    # The longest series, not the first one. Individual series can now be
+    # switched off (see `altrios.history`), which leaves them empty while the
+    # rest of the component records normally -- so the first key in the dict
+    # says nothing about how many time steps were saved. A component recording
+    # nothing at all yields 0 and falls through to the recursive search below,
+    # so a sim that saves only, say, consist history still flattens.
     if "history" in obj.keys():
-        return len(next(iter(obj["history"].values())))
+        lengths = [
+            len(v)
+            for k, v in obj["history"].items()
+            if isinstance(v, list) and k != "save_fields"
+        ]
+        if lengths and max(lengths) > 0:
+            return max(lengths)
 
-    elif (
-        next(
-            iter(
-                k for k in obj.keys() if re.search("(history\\.\\w+)$", k) is not None
-            ),
-            None,
-        )
-        is not None
-    ):
-        return len(
-            next(
-                (
-                    v
-                    for (k, v) in obj.items()
-                    if re.search("(history\\.\\w+)$", k) is not None
-                )
-            )
-        )
+    else:
+        flat_lengths = [
+            len(v)
+            for (k, v) in obj.items()
+            if re.search("(history\\.\\w+)$", k) is not None
+            and not k.endswith(".save_fields")
+            and isinstance(v, list)
+        ]
+        if flat_lengths and max(flat_lengths) > 0:
+            return max(flat_lengths)
 
     for k, v in obj.items():
         if isinstance(v, dict):

@@ -16,8 +16,18 @@ was the only available way to slow them down. Dispatch now batches all trains
 into one call, so that delay is modelled directly -- and keeping the scaler
 would charge for it twice.
 
-This script runs each corridor at its posted limits and compares the resulting
-sensor-to-sensor times against what RailState actually observed.
+This script runs each corridor at ``min(posted limit, observed p99 spot
+speed)`` and compares the resulting sensor-to-sensor times against what
+RailState actually observed.
+
+The cap is there because a posted limit is not always what freight runs, and
+is not always real data. Toronto-Battle Creek's mainline is posted 80 mph --
+an FRA Class 4 *passenger* limit, against 60 mph for freight -- and
+Spokane-Lethbridge carries the network builder's synthetic 60/15 mph constants
+against a maximum spot speed ever observed of 46.8 mph. The cap travels with
+the corridor inputs in ``corridor_meta_<slug>.csv``, derived by
+``railstate_corridor.corridor_speed_cap_mph``. ``--no-cap`` runs posted limits
+alone for comparison.
 
 Two deliberate choices:
 
@@ -25,10 +35,13 @@ Two deliberate choices:
   passes into a per-link schedule, which is exactly the quantity under test.
   Walking each train through the physics afterwards costs far more and would
   not change the arrival times, so ``walk_timed_paths`` stays off.
-- **Clean segments only.** Observed times include yard dwell that ALTRIOS does
-  not model. Toronto's Snider->Copetown runs 13.55 h one way and 3.58 h the
-  other over the same 94.2 km; that asymmetry is MacMillan Yard, not track. A
-  comparison against terminal-adjacent segments would be measuring dwell.
+- **Every measured segment.** An earlier version dropped sensor pairs next to
+  terminals, on the theory that their observed time was yard dwell rather than
+  running time. The data does not support that: Spokane-Lethbridge's slow
+  segments are slow by a similar margin in *both* directions (13.9 against
+  11.4 km/h), which is not what terminal dwell looks like -- dwell accrues to
+  the train entering the yard, not to both. Dropping them only removed the
+  segments the model fits worst. Every pair the sensors measure is compared.
 
 Usage:
     python speed_calibration.py --corridor toronto_battle_creek
@@ -60,15 +73,6 @@ INPUTS = HERE / "corridor_inputs"
 NETWORKS = Path(alt.resources_root()) / "networks"
 ROLLING_STOCK = Path(alt.resources_root()) / "rolling_stock"
 
-# Segments whose observed time is dominated by terminal dwell rather than
-# running time. Named by (from_sensor, to_sensor) as they appear in the
-# observed table; any pair involving one of these sensors is excluded.
-DWELL_SENSORS = {
-    "toronto_battle_creek": ("Malport, ON",),
-    "spokane_lethbridge": ("Moyie Springs, ID", "Coalhurst, AB"),
-    "winnipeg_chicago": (),
-}
-
 
 @dataclass
 class Corridor:
@@ -81,6 +85,10 @@ class Corridor:
     # energization app does today. None for both means posted limits.
     max_mph: Optional[float] = None
     scaler: Optional[float] = None
+    # The observed speed cap. None means "read it from corridor_meta"; set
+    # apply_cap False to run posted limits alone.
+    speed_cap_mph: Optional[float] = None
+    apply_cap: bool = True
     # Point at a plan built for a different traffic level, for the density sweep.
     plan_override: Optional[Path] = None
 
@@ -95,6 +103,23 @@ class Corridor:
     @property
     def observed_path(self) -> Path:
         return INPUTS / f"validation_travel_times_{self.slug}.csv"
+
+    @property
+    def meta_path(self) -> Path:
+        return INPUTS / f"corridor_meta_{self.slug}.csv"
+
+    def effective_cap(self) -> Optional[float]:
+        """The cap to apply, from the override or the corridor inputs."""
+        if not self.apply_cap:
+            return None
+        if self.speed_cap_mph is not None:
+            return self.speed_cap_mph
+        if not self.meta_path.exists():
+            raise FileNotFoundError(
+                f"{self.meta_path} is missing -- regenerate the corridor inputs "
+                "with railstate_corridor.py, or pass --no-cap"
+            )
+        return float(pl.read_csv(self.meta_path)["speed_cap_mph"][0])
 
 
 CORRIDORS: Dict[str, Corridor] = {
@@ -163,10 +188,16 @@ def dual_mode_planner_config() -> planner_config.TrainPlannerConfig:
 def prepare_network(corridor: Corridor) -> alt.Network:
     """Load the corridor network, applying any speed override under test."""
     network = alt.Network.from_file(str(NETWORKS / corridor.network))
-    if corridor.max_mph is None and corridor.scaler is None:
+    cap = corridor.effective_cap()
+    if corridor.max_mph is None and corridor.scaler is None and cap is None:
         return network
 
     network_dict = network.to_pydict()
+    if cap is not None:
+        network_dict = alt.utilities.set_network_max_speed(
+            network_dict, max_speed_mph=cap
+        )
+        logger.info("track limit = min(posted, %.1f mph observed p99)", cap)
     if corridor.max_mph is not None:
         network_dict = alt.utilities.set_network_max_speed(
             network_dict, max_speed_mph=corridor.max_mph
@@ -306,18 +337,10 @@ def simulated_segment_times(
     return pl.DataFrame(rows)
 
 
-def compare(
-    observed: pl.DataFrame, simulated: pl.DataFrame, dwell_sensors: Sequence[str]
-) -> pl.DataFrame:
-    """Observed against simulated, per segment, dwell-dominated pairs dropped."""
-    keep = ~(
-        pl.col("from_sensor").is_in(list(dwell_sensors))
-        | pl.col("to_sensor").is_in(list(dwell_sensors))
-    )
-
+def compare(observed: pl.DataFrame, simulated: pl.DataFrame) -> pl.DataFrame:
+    """Observed against simulated, one row per sensor pair."""
     obs = (
-        observed.filter(keep)
-        .group_by("from_sensor", "to_sensor")
+        observed.group_by("from_sensor", "to_sensor")
         .agg(
             pl.col("segment_km").first().alias("km"),
             pl.len().alias("obs_n"),
@@ -327,8 +350,7 @@ def compare(
         )
     )
     sim = (
-        simulated.filter(keep)
-        .group_by("from_sensor", "to_sensor")
+        simulated.group_by("from_sensor", "to_sensor")
         .agg(
             pl.len().alias("sim_n"),
             pl.col("sim_travel_time_hr").median().alias("sim_median_hr"),
@@ -350,13 +372,12 @@ def compare(
     )
 
 
-def run(corridor: Corridor, all_segments: bool = False) -> pl.DataFrame:
+def run(corridor: Corridor) -> pl.DataFrame:
     plan_out, timed_paths, sensors = simulate(corridor)
     offsets = link_offsets(prepare_network(corridor))
     simulated = simulated_segment_times(plan_out, timed_paths, sensors, offsets)
     observed = pl.read_csv(corridor.observed_path)
-    dwell = () if all_segments else DWELL_SENSORS.get(corridor.slug, ())
-    table = compare(observed, simulated, dwell)
+    table = compare(observed, simulated)
 
     logger.info("\n%s", table.to_pandas().to_string(index=False))
     if table.height:
@@ -385,11 +406,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="cap speed limits before scaling, as the old calibration did",
     )
     parser.add_argument(
-        "--all-segments",
+        "--no-cap",
         action="store_true",
-        help="keep terminal-adjacent sensor pairs too. Their observed times are "
-        "dwell-dominated, so excluding them flatters a simulation that models no "
-        "dwell; include them to see the widest-span comparison",
+        help="run posted speed limits alone, without the observed p99 cap",
     )
     parser.add_argument("--out", type=Path, help="write the comparison table here")
     args = parser.parse_args(argv)
@@ -405,8 +424,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         corridor = CORRIDORS[slug]
         corridor.scaler = args.scaler
         corridor.max_mph = args.max_mph
+        corridor.apply_cap = not args.no_cap
         logger.info("=== %s ===", slug)
-        table = run(corridor, all_segments=args.all_segments).with_columns(pl.lit(slug).alias("corridor"))
+        table = run(corridor).with_columns(pl.lit(slug).alias("corridor"))
         tables.append(table)
 
     if args.out and tables:

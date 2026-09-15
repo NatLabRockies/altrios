@@ -2,7 +2,7 @@ import pandas as pd
 import polars as pl
 import polars.selectors as cs
 import math
-from typing import List, Dict, Tuple, Union, Optional
+from typing import Any, List, Dict, Tuple, Union, Optional
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1853,13 +1853,26 @@ def _sim_catenary_joules(sims) -> Tuple[float, float]:
                 cat_int = sub.get("cat_int") if sub else None
                 if not cat_int:
                     continue
+                # Read the terminal STATE, not the history tail. Both series are
+                # cumulative, so only the final value matters -- and the last
+                # saved sample is not the final value: it lands on the last
+                # multiple of `save_interval` before the train arrives, dropping
+                # up to `save_interval - 1` seconds of delivery from every
+                # locomotive on every trip, always downward. Off the state the
+                # number is exact, and `cat_int`'s save interval stops mattering
+                # at all, so its history can be switched off entirely.
+                state = cat_int.get("state") or {}
                 hist = cat_int.get("history") or {}
-                e_in = hist.get("energy_elec_in_joules")
-                e_ll = hist.get("energy_line_loss_joules")
+                e_in = state.get("energy_elec_in_joules")
+                e_ll = state.get("energy_line_loss_joules")
+                if e_in is None:
+                    e_in = (hist.get("energy_elec_in_joules") or [None])[-1]
+                if e_ll is None:
+                    e_ll = (hist.get("energy_line_loss_joules") or [None])[-1]
                 if e_in:
-                    pantograph += e_in[-1]
+                    pantograph += e_in
                 if e_ll:
-                    line_loss += e_ll[-1]
+                    line_loss += e_ll
     return pantograph, line_loss
 
 
@@ -1937,51 +1950,222 @@ def calculate_energy(info: ScenarioInfo, units: str) -> MetricType:
         return metric("Energy", units, None)
     return metrics_from_list(rows)
 
+EN_ROUTE = "En_Route"
+
+
+def _en_route_flags(train_history: Dict[str, Any]) -> Optional[List[bool]]:
+    """Per sample: is the train between its origin and destination terminals?
+
+    A train sim's history runs from its PLANNED departure to its arrival, so a
+    train the dispatcher holds stands at the origin -- at zero speed, and
+    therefore "dwelling" -- for the whole hold, and one that reaches its
+    destination stands there to the end of its history. Those are terminal
+    dwells, not en-route stops. Nothing about a meet or a congested subdivision
+    caused them, and an anti-idling policy treats a locomotive parked at a
+    terminal quite differently from one holding the main line for a meet.
+
+    `offset_meters` is monotone along the path, so a sample is terminal while
+    the train has not yet left its starting offset or has reached its final
+    one. Returns None when offset was not recorded, in which case callers
+    report the undivided total only.
+    """
+    offset = train_history.get("offset_meters") or []
+    if len(offset) < 2:
+        return None
+    first, last = offset[0], offset[-1]
+    if not last > first:
+        return None
+    return [(o > first) and (o < last) for o in offset]
+
+
+def _dwell_frame(train_history: Dict[str, Any], train_idx: int, **extra):
+    """One train's dwell samples, with interval, and an `en_route` flag.
+
+    `en_route` is all-True when offset was not recorded, so the two reported
+    subsets coincide rather than one of them silently becoming zero.
+    """
+    time_seconds = train_history.get("time_seconds") or []
+    flags = _en_route_flags(train_history)
+    return pl.DataFrame(
+        {
+            "history.time_seconds": [float(t) for t in time_seconds],
+            "history.speed_meters_per_second": [
+                float(s) for s in train_history.get("speed_meters_per_second") or []
+            ],
+            "en_route": flags if flags is not None else [True] * len(time_seconds),
+            **extra,
+        }
+    ).with_columns(pl.lit(train_idx).alias("train_idx"))
+
+
+def _with_intervals(frame: pl.LazyFrame) -> pl.LazyFrame:
+    """Add each sample's interval, and whether the train was stopped throughout.
+
+    `stopped_interval` requires zero speed at BOTH ends, and it is what the
+    energy metrics attribute to idling. The interval in which a train pulls
+    away begins at zero speed but contains the whole acceleration, so charging
+    it to dwell overstates idle fuel by 16% on a congested Spokane week --
+    measured. Requiring both ends lands within 0.19% of multiplying idle power
+    by dwell time, while keeping the exactness of a cumulative difference.
+
+    `Dwell_Time` deliberately keeps the looser reading (zero speed at the start
+    of the interval), because it answers a different question -- how long was
+    the train stationary -- and dropping partial intervals would make any stop
+    shorter than two sampling intervals invisible.
+    """
+    return frame.sort("train_idx", "history.time_seconds").with_columns(
+        (
+            pl.col("history.time_seconds").shift(-1).over("train_idx")
+            - pl.col("history.time_seconds")
+        )
+        .fill_null(0.0)
+        .alias("interval_seconds"),
+        (
+            (pl.col("history.speed_meters_per_second") == 0)
+            & (
+                pl.col("history.speed_meters_per_second").shift(-1).over("train_idx")
+                == 0
+            )
+        )
+        .fill_null(False)
+        .alias("stopped_interval"),
+    )
+
+
+def _interval_delta(column: str, alias: str) -> pl.Expr:
+    """Energy accumulated over each sample's interval, from a cumulative series.
+
+    `E[i+1] - E[i]` is exact for any interval, because ALTRIOS accumulates the
+    cumulative series every one-second timestep -- the save interval only
+    decides where the boundaries fall, never the accuracy between them.
+    Multiplying a snapshot rate by the interval instead assumes the rate held
+    for the whole interval, which is false wherever it matters most: the sample
+    where a train comes to a stand or pulls away.
+
+    It also survives a component recording at a coarser interval than the
+    train. A stale rate carried forward by the as-of join would attribute
+    moving power to a stopped sample, a one-sided overestimate; a cumulative
+    difference stays exact per bin and merely cannot localize within it.
+
+    Clipped at zero: these series are monotonic by construction, so a negative
+    difference would be a bug, and silently subtracting energy would hide it.
+    """
+    return (
+        (pl.col(column).shift(-1).over("train_idx") - pl.col(column))
+        .fill_null(0.0)
+        .clip(lower_bound=0.0)
+        .alias(alias)
+    )
+
+
+def _both_subsets(frame: pl.LazyFrame, column: str, name: str, units: str, scale=1.0):
+    """The same quantity totalled over all dwell, and over en-route dwell only."""
+    totals = (
+        frame.select(
+            pl.col(column).sum().alias("all"),
+            pl.when(pl.col("en_route"))
+            .then(pl.col(column))
+            .otherwise(0.0)
+            .sum()
+            .alias("en_route"),
+        )
+        .collect()
+        .row(0)
+    )
+    return metrics_from_list(
+        [
+            metric(name, units, totals[0] * scale),
+            metric(name, units, totals[1] * scale, subset=EN_ROUTE),
+        ]
+    )
+
+
 def calculate_dwell_time(info: ScenarioInfo, units: str) -> MetricType:
     slts_results = []
     i = 0
     for slts in info.sims.to_pydict():
         history = slts["history"]
-        time_seconds = history.get("time_seconds", [])
-        speed_meters_per_second = history.get("speed_meters_per_second", [])
-        if not time_seconds or not speed_meters_per_second:
+        if not history.get("time_seconds") or not history.get(
+            "speed_meters_per_second"
+        ):
             print(
                 "No SpeedLimitTrainSim history was saved, so dwell time cannot be calculated."
             )
             return metric("Dwell_Time", units, None)
-
-        df = pl.LazyFrame(
-            {
-                "history.time_seconds": time_seconds,
-                "history.speed_meters_per_second": speed_meters_per_second,
-            }
-        ).with_columns(pl.lit(i).alias("train_idx"))
-        slts_results.append(df)
+        slts_results.append(_dwell_frame(history, i).lazy())
         i += 1
-    all = pl.concat(slts_results, how="diagonal_relaxed")
-    val = (
-        all.sort("train_idx", "history.time_seconds")
-        .with_columns(
-            (
-                pl.col("history.time_seconds")
-                .shift(-1)
-                .over("train_idx")
-                - pl.col("history.time_seconds")
-            )
-            .fill_null(0.0)
-            .alias("interval_seconds")
-        )
-        .with_columns(
-            pl.when(pl.col("history.speed_meters_per_second") == 0)
-            .then(pl.col("interval_seconds"))
-            .otherwise(0.0)
-            .alias("dwell_seconds")
-        )
-        .select(pl.col("dwell_seconds").sum())
-        .collect()
-        .item()
+    frame = _with_intervals(pl.concat(slts_results, how="diagonal_relaxed")).with_columns(
+        pl.when(pl.col("history.speed_meters_per_second") == 0)
+        .then(pl.col("interval_seconds"))
+        .otherwise(0.0)
+        .alias("dwell_seconds")
     )
-    return metric("Dwell_Time", units, val)
+    return _both_subsets(frame, "dwell_seconds", "Dwell_Time", units)
+
+
+def _align_on_step(
+    train_history: Dict[str, Any],
+    component_history: Dict[str, Any],
+    component_columns: Dict[str, List[float]],
+) -> Optional[pl.DataFrame]:
+    """Train time and speed with a component's series aligned alongside.
+
+    Components may record at their own ``save_interval`` (see
+    ``altrios.history``), in which case their samples are a subset of the
+    train's and cannot be zipped positionally -- the lists are simply different
+    lengths, and if they happened to match, the rows would still mean different
+    instants.
+
+    Every history carries the step counter ``i``, which is exactly why ``i`` is
+    not maskable, so a backward as-of join on it gives each train sample the
+    component value in effect at that moment. When both record at the same
+    interval -- the usual case, and the one these dwell metrics want, since a
+    coarser component series cannot resolve individual stops -- the join is
+    exact and this costs only the sort.
+
+    Returns ``None`` when either side recorded nothing, or when there is no
+    ``i`` to join on and the lengths disagree.
+    """
+    time_seconds = train_history.get("time_seconds") or []
+    speed = train_history.get("speed_meters_per_second") or []
+    if not time_seconds or not speed or not component_columns:
+        return None
+    if any(not values for values in component_columns.values()):
+        return None
+
+    flags = _en_route_flags(train_history)
+    train = pl.DataFrame(
+        {
+            "history.time_seconds": [float(t) for t in time_seconds],
+            "history.speed_meters_per_second": [float(s) for s in speed],
+            "en_route": flags if flags is not None else [True] * len(time_seconds),
+        }
+    )
+    component = pl.DataFrame(
+        {name: [float(v) for v in values] for name, values in component_columns.items()}
+    )
+
+    train_i = train_history.get("i") or []
+    component_i = component_history.get("i") or []
+    if len(train_i) == train.height and len(component_i) == component.height:
+        train = train.with_columns(
+            pl.Series("i", [int(v) for v in train_i], dtype=pl.Int64)
+        )
+        component = component.with_columns(
+            pl.Series("i", [int(v) for v in component_i], dtype=pl.Int64)
+        )
+        return (
+            train.sort("i")
+            .join_asof(component.sort("i"), on="i", strategy="backward")
+            .drop("i")
+        )
+
+    # No usable step counter: a build predating non-maskable `i`, or history
+    # assembled by hand. Positional pairing is only defensible when the lengths
+    # match, which implies a common interval.
+    if component.height != train.height:
+        return None
+    return pl.concat([train, component], how="horizontal")
 
 
 def calculate_dwell_fuel_energy(info: ScenarioInfo, units: str) -> MetricType:
@@ -2000,56 +2184,46 @@ def calculate_dwell_fuel_energy(info: ScenarioInfo, units: str) -> MetricType:
     slts_results = []
     i = 0
     for slts in info.sims.to_pydict():
-        history = slts["history"]
-        time_seconds = history.get("time_seconds", [])
-        speed_meters_per_second = history.get("speed_meters_per_second", [])
-        fuel_power_watts = slts["loco_con"]["history"].get("pwr_fuel_watts", [])
-        if (
-            not time_seconds
-            or not speed_meters_per_second
-            or not fuel_power_watts
-        ):
+        consist_history = slts["loco_con"]["history"]
+        aligned = _align_on_step(
+            slts["history"],
+            consist_history,
+            {
+                "loco_con.history.energy_fuel_joules": consist_history.get(
+                    "energy_fuel_joules", []
+                )
+            },
+        )
+        if aligned is None:
             print(
                 "No SpeedLimitTrainSim history was saved, so dwell fuel energy cannot be calculated."
             )
             return metric("Dwell_Fuel_Energy", units, None)
 
-        df = pl.LazyFrame(
-            {
-                "history.time_seconds": time_seconds,
-                "history.speed_meters_per_second": speed_meters_per_second,
-                "loco_con.history.pwr_fuel_watts": fuel_power_watts,
-            }
-        ).with_columns(pl.lit(i).alias("train_idx"))
+        df = aligned.lazy().with_columns(pl.lit(i).alias("train_idx"))
         slts_results.append(df)
         i += 1
-    all = pl.concat(slts_results, how="diagonal_relaxed")
-    val = (
-        all.sort("train_idx", "history.time_seconds")
+    frame = (
+        _with_intervals(pl.concat(slts_results, how="diagonal_relaxed"))
         .with_columns(
-            (
-                pl.col("history.time_seconds")
-                .shift(-1)
-                .over("train_idx")
-                - pl.col("history.time_seconds")
+            _interval_delta(
+                "loco_con.history.energy_fuel_joules", "interval_fuel_joules"
             )
-            .fill_null(0.0)
-            .alias("interval_seconds")
         )
         .with_columns(
-            pl.when(pl.col("history.speed_meters_per_second") == 0)
-            .then(
-                pl.col("loco_con.history.pwr_fuel_watts")
-                * pl.col("interval_seconds")
-            )
+            pl.when(pl.col("stopped_interval"))
+            .then(pl.col("interval_fuel_joules"))
             .otherwise(0.0)
             .alias("dwell_fuel_energy_joules")
         )
-        .select(pl.col("dwell_fuel_energy_joules").sum())
-        .collect()
-        .item()
     )
-    return metric("Dwell_Fuel_Energy", units, val * conversion_from_joule)
+    return _both_subsets(
+        frame,
+        "dwell_fuel_energy_joules",
+        "Dwell_Fuel_Energy",
+        units,
+        conversion_from_joule,
+    )
 
 
 def calculate_apu_fuel_consumption(info: ScenarioInfo, units: str) -> MetricType:
@@ -2075,77 +2249,76 @@ def calculate_apu_fuel_consumption(info: ScenarioInfo, units: str) -> MetricType
     slts_results = []
     i = 0
     for slts in info.sims.to_pydict():
-        history = slts["history"]
-        time_seconds = history.get("time_seconds", [])
-        speed_meters_per_second = history.get("speed_meters_per_second", [])
-        locomotive_aux_power_watts = [
-            locomotive["history"].get("pwr_aux_watts", [])
-            for locomotive in slts["loco_con"]["loco_vec"]
+        locomotives = slts["loco_con"]["loco_vec"]
+        locomotive_aux_energy_joules = [
+            locomotive["history"].get("energy_aux_joules", [])
+            for locomotive in locomotives
         ]
-        if (
-            not time_seconds
-            or not speed_meters_per_second
-            or not locomotive_aux_power_watts
-            or any(not power for power in locomotive_aux_power_watts)
+        if not locomotive_aux_energy_joules or any(
+            not energy for energy in locomotive_aux_energy_joules
         ):
             print(
                 "No SpeedLimitTrainSim history was saved, so APU fuel consumption cannot be calculated."
             )
             return metric("APU_Fuel_Consumption", units, None)
 
-        required_power_watts = [
-            sum(power_by_locomotive)
-            for power_by_locomotive in zip(*locomotive_aux_power_watts)
+        # Locomotives are configured together and step in lockstep, so their
+        # aux series share one interval and sum elementwise; the sum is then
+        # aligned to the train off the first locomotive's step counter.
+        if len({len(energy) for energy in locomotive_aux_energy_joules}) != 1:
+            print(
+                "Locomotives recorded auxiliary energy at differing intervals, so APU fuel consumption cannot be calculated."
+            )
+            return metric("APU_Fuel_Consumption", units, None)
+        consist_aux_energy_joules = [
+            sum(energy_by_locomotive)
+            for energy_by_locomotive in zip(*locomotive_aux_energy_joules)
         ]
-        if len(required_power_watts) != len(time_seconds):
+
+        aligned = _align_on_step(
+            slts["history"],
+            locomotives[0]["history"],
+            {"aux_energy_joules": consist_aux_energy_joules},
+        )
+        if aligned is None:
             print(
                 "Locomotive auxiliary-power history does not align with train history, so APU fuel consumption cannot be calculated."
             )
             return metric("APU_Fuel_Consumption", units, None)
 
-        df = pl.LazyFrame(
-            {
-                "history.time_seconds": time_seconds,
-                "history.speed_meters_per_second": speed_meters_per_second,
-                "required_power_watts": required_power_watts,
-            }
-        ).with_columns(pl.lit(i).alias("train_idx"))
+        df = aligned.lazy().with_columns(pl.lit(i).alias("train_idx"))
         slts_results.append(df)
         i += 1
-    all = pl.concat(slts_results, how="diagonal_relaxed")
-    val = (
-        all.sort("train_idx", "history.time_seconds")
+    # The APU fuel curve is nonlinear in power, so it needs the MEAN auxiliary
+    # power over each interval, not the instantaneous value at its start.
+    # Differencing the cumulative series gives exactly that mean; the snapshot
+    # rate only equals it where aux power happened to be constant.
+    frame = (
+        _with_intervals(pl.concat(slts_results, how="diagonal_relaxed"))
+        .with_columns(_interval_delta("aux_energy_joules", "interval_aux_joules"))
         .with_columns(
-            (
-                pl.col("history.time_seconds")
-                .shift(-1)
-                .over("train_idx")
-                - pl.col("history.time_seconds")
-            )
-            .fill_null(0.0)
-            .alias("interval_seconds")
+            pl.when(pl.col("interval_seconds") > 0)
+            .then(pl.col("interval_aux_joules") / pl.col("interval_seconds"))
+            .otherwise(0.0)
+            .alias("mean_aux_power_watts")
         )
         .with_columns(
-            pl.when(pl.col("history.speed_meters_per_second") == 0)
+            pl.when(pl.col("stopped_interval"))
             .then(
-                (
-                    0.063 * pl.col("required_power_watts") / 1_000.0
-                    + 0.4115
-                )
+                (0.063 * pl.col("mean_aux_power_watts") / 1_000.0 + 0.4115)
                 * pl.col("interval_seconds")
                 / 3_600.0
             )
             .otherwise(0.0)
             .alias("apu_fuel_gallons")
         )
-        .select(pl.col("apu_fuel_gallons").sum())
-        .collect()
-        .item()
     )
-    return metric(
+    return _both_subsets(
+        frame,
+        "apu_fuel_gallons",
         "APU_Fuel_Consumption",
         units,
-        val * joules_per_gallon * conversion_from_joule,
+        joules_per_gallon * conversion_from_joule,
     )
 
 function_mappings = {

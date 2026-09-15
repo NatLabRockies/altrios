@@ -1,0 +1,4 @@
+Architecture,Structure_MUSD_Per_Route_Mi,Energization_MUSD_Per_Track_Mi,Substation_MUSD_Each,System_Voltage_V,Electrification_Type
+ac_25kv,2.2,0.50,15.0,25000,ac_25kv_1x25
+ac_2x25,2.4,0.65,17.0,50000,ac_25kv_2x25
+dc_9kv,2.2,0.55,10.0,9000,dc_9kv

@@ -1,0 +1,2 @@
+corridor,corridor_km,measured_span_km,ruling_grade,speed_cap_mph,weekly_count,count_basis,flow_aggregation,count_if_min_flow,count_if_mean_flow,count_if_train,count_if_car,count_if_length,count_if_gross_ton
+spokane_lethbridge,618.8175642249543,442.0,0.011284766161316129,33.98377890798758,52,car,min,52,104,52,52,51,52

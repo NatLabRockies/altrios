@@ -1,0 +1,2 @@
+corridor,corridor_km,measured_span_km,ruling_grade,speed_cap_mph,weekly_count,count_basis,flow_aggregation,count_if_min_flow,count_if_mean_flow,count_if_train,count_if_car,count_if_length,count_if_gross_ton
+winnipeg_chicago,1237.327989999999,259.0,0.019605082087880726,54.08240353439116,161,car,min,161,163,147,161,157,159

@@ -721,6 +721,18 @@ PROJECT_LIFESPAN_YEARS = 25
 # (battery analysis).
 PLAN_DAYS = 7.0                     # consist plan treated as one representative week
 ANNUAL_SCALER = 365.25 / PLAN_DAYS  # week -> year
+
+# Warm-up and cool-down, in days either side of the measured week. The plan is a
+# representative week, so the warm-up traffic IS that week: its last two days
+# are replayed before it and its first two after, which keeps day-of-week
+# structure and, critically, does not invent demand that would change the
+# calibrated density.
+#
+# These trains are dispatched and walked so they congest the corridor, but their
+# energy is excluded from the per-link densities -- only the measured week is
+# summed, and ANNUAL_SCALER then annualizes exactly seven days.
+WARMUP_DAYS = 2.0
+COOLDOWN_DAYS = 2.0
 DEMAND_LEVELS = {
     "central": 1.0,  # the imported consist plan as-is
     "high":    2.0,  # utilization-stress case: double the plan's traffic
@@ -1361,14 +1373,42 @@ CONSIST_PLAN_PATH = (Path(__file__).resolve().parent
 # Electrical assumptions for line losses (25 kV AC medium; matches RULE_COSTS).
 SIM_SYSTEM_VOLTAGE_VOLTS = 25_000.0
 SIM_ELECTRIFICATION_TYPE = "ac_25kv_1x25"
-# Speed-limit calibration from milestone_1.3 / milestone_2.3b: cap the link speed
-# limits then scale them so simulated travel speed matches OBSERVED corridor
-# speeds (uncalibrated limits give unrealistically fast runs, which distorts the
-# fuel/electric split). 0.595 is the calibrated scaler; 40 mph is the pre-scaling
-# cap used during that calibration. Set SPEED_CALIBRATION_MAX_MPH = None to skip
-# the cap and apply the scaler alone.
-SPEED_CALIBRATION_MAX_MPH = 40.0
-SPEED_LIMIT_SCALER = 0.595
+# Speed-limit treatment. This is an experiment factor, not a fixed property of
+# the corridor, so both numbers are overridable from the environment
+# (ALTRIOS_SPEED_CAP_MPH, ALTRIOS_SPEED_SCALER; either may be "none") and both
+# are already hashed into the run cache key, so varying them cannot silently
+# reuse another cell's results.
+#
+# The default -- cap at 40 mph, then scale by 0.595 -- is the milestone_1.3 /
+# milestone_2.3b calibration, fitted so simulated travel time matched RailState
+# observations on Jaffray<->Sparwood. It was fitted while `sim_manager`
+# dispatched one train per `run_dispatch` call, which per commit d4f245c
+# bypassed meet-pass entirely: `check_deadlock` skips the only train present, so
+# no conflict resolution ever ran. The scaler was therefore never measuring
+# track speed; it was standing in for congestion delay that was not modelled.
+# Dispatch now batches all trains into one call and models that delay directly,
+# so keeping the scaler charges for it twice -- on Winnipeg-Chicago,
+# `speed_calibration.py --scaler 0.595` overshoots observed run time by +40.4%.
+#
+# It is nonetheless still the default here, for a reason specific to THIS
+# corridor: Spokane-Lethbridge's network carries synthetic speed limits (the
+# builder's 60/15 mph constants, not surveyed data). RailState's 99th-percentile
+# spot speeds come to 0.34-0.51 of them, against 0.66-1.00 on
+# Toronto-Battle Creek and 0.82-0.91 on Winnipeg-Chicago, where the posted
+# limits are real. Dropping the scaler here would run trains at fabricated line
+# speeds. Until real speed-limit data arrives for this corridor the calibration
+# stays, with its provenance stated rather than implied.
+def _env_float(name, default):
+    """Environment override for a numeric factor; "none"/"" means no limit."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    raw = raw.strip()
+    return None if raw.lower() in ("", "none") else float(raw)
+
+
+SPEED_CALIBRATION_MAX_MPH = _env_float("ALTRIOS_SPEED_CAP_MPH", 40.0)
+SPEED_LIMIT_SCALER = _env_float("ALTRIOS_SPEED_SCALER", 0.595)
 
 
 def _calibrate_speeds(net):
@@ -1376,7 +1416,8 @@ def _calibrate_speeds(net):
     d = net.to_pydict()
     if SPEED_CALIBRATION_MAX_MPH is not None:
         d = _utils.set_network_max_speed(d, max_speed_mph=SPEED_CALIBRATION_MAX_MPH)
-    d = _utils.scale_network_speed_limits(d, SPEED_LIMIT_SCALER)
+    if SPEED_LIMIT_SCALER is not None:
+        d = _utils.scale_network_speed_limits(d, SPEED_LIMIT_SCALER)
     return alt.Network.from_pydict(d)
 
 
@@ -1446,6 +1487,48 @@ def _load_full_consist_plan(path=None):
             .to_dicts()
         )
     return _FULL_CONSIST_PLAN
+
+
+def _extended_plan():
+    """The consist plan wrapped into warm-up + measured week + cool-down.
+
+    Each record carries ``_measured``: True for the week being reported on,
+    False for the traffic that exists only to congest it.
+    """
+    base = _load_full_consist_plan()
+    if WARMUP_DAYS <= 0 and COOLDOWN_DAYS <= 0:
+        return [dict(t, _measured=True) for t in base]
+
+    week_hr = PLAN_DAYS * 24.0
+    warm_hr, cool_hr = WARMUP_DAYS * 24.0, COOLDOWN_DAYS * 24.0
+    span = max(int(t["Train_ID"]) for t in base) + 1
+
+    def block(records, delta_hr, id_offset, measured):
+        out = []
+        for t in records:
+            r = dict(t)
+            r["Departure_Time_Planned_Hr"] = t["Departure_Time_Planned_Hr"] + delta_hr
+            r["Train_ID"] = int(t["Train_ID"]) + id_offset
+            r["_measured"] = measured
+            out.append(r)
+        return out
+
+    tail = [t for t in base if t["Departure_Time_Planned_Hr"] >= week_hr - warm_hr]
+    head = [t for t in base if t["Departure_Time_Planned_Hr"] < cool_hr]
+    records = (
+        block(tail, -week_hr, 0, False)
+        + block(base, 0.0, span, True)
+        + block(head, week_hr, 2 * span, False)
+    )
+    floor = min(r["Departure_Time_Planned_Hr"] for r in records)
+    for r in records:
+        r["Departure_Time_Planned_Hr"] -= floor
+    return records
+
+
+def _in_measure_window(train) -> bool:
+    """Whether this train's energy counts toward the reported week."""
+    return bool(train.get("_measured", True))
 
 
 def _plan_summary():
@@ -1561,10 +1644,20 @@ def _make_plan_train_ts(train, location_map, traction_kind,
         train_length_meters=None, train_mass_kilograms=None,
     )
     loco_con = alt.Consist(locos, save_interval)
+    # Depart at the train's planned hour. Without this every train starts at
+    # t=0, so a batched dispatch would put a whole week of traffic on the
+    # corridor simultaneously and meet-pass would be meaningless -- which is why
+    # these trains were previously dispatched one at a time, each seeing an
+    # empty corridor.
+    departure_hr = train.get("Departure_Time_Planned_Hr")
     tsb = alt.TrainSimBuilder(
         train_id=str(train["Train_ID"]),
         origin_id=train["Origin_ID"], destination_id=train["Destination_ID"],
         train_config=train_config, loco_con=loco_con,
+        init_train_state=(
+            alt.InitTrainState(time_seconds=float(departure_hr) * 3600.0)
+            if departure_hr is not None else None
+        ),
     )
     ts = tsb.make_speed_limit_train_sim(
         location_map=location_map, save_interval=save_interval)
@@ -1688,11 +1781,21 @@ def _extract_from_pydict(ts, d):
         ci = _loco_cat_int(loco)
         if ci is not None:
             ch = ci["history"]
-            e_in = ch.get("energy_elec_in_joules")
-            e_ll = ch.get("energy_line_loss_joules")
-            if e_in:  # prefer exact cumulative energy history
-                pantograph_j += e_in[-1]
-                line_loss_j += e_ll[-1] if e_ll else 0.0
+            cs = ci.get("state") or {}
+            # Cumulative totals come from the terminal STATE, matching
+            # `metric_calculator._sim_catenary_joules`. The history tail is the
+            # last sample on a multiple of `save_interval`, not the value at
+            # arrival, so it drops up to `save_interval - 1` seconds of delivery
+            # per locomotive per trip -- always downward, and growing with the
+            # interval. Measured at 60 s on a catenary sim: 0.011% low.
+            e_in = cs.get("energy_elec_in_joules")
+            e_ll = cs.get("energy_line_loss_joules")
+            if e_in is None:
+                e_in = (ch.get("energy_elec_in_joules") or [None])[-1]
+                e_ll = (ch.get("energy_line_loss_joules") or [None])[-1]
+            if e_in is not None:
+                pantograph_j += e_in
+                line_loss_j += e_ll or 0.0
             else:  # fallback: left-rectangle integration of power over time steps
                 grid = ch.get("pwr_elec_in_watts") or []
                 loss = ch.get("pwr_line_loss_watts") or [0.0] * len(grid)
@@ -1712,9 +1815,14 @@ def _extract_from_pydict(ts, d):
         # (negative); makes the battery's role in the energy balance visible.
         bel = lt.get("BatteryElectricLoco")
         if bel is not None:
-            e_chem = bel["res"]["history"].get("energy_out_chemical_joules")
+            # Terminal state for the same reason as the catenary totals above.
+            e_chem = (bel["res"].get("state") or {}).get("energy_out_chemical_joules")
+            if e_chem is None:
+                e_chem = (
+                    bel["res"]["history"].get("energy_out_chemical_joules") or [None]
+                )[-1]
             if e_chem:
-                battery_j += e_chem[-1]
+                battery_j += e_chem
     diesel_j_by_link = {}
     draw_by_link = {}
     for i, dt in enumerate(dts):
@@ -1802,15 +1910,17 @@ def _run_full_plan(sim_network, location_map, label, traction_kind,
         Retain the walked sims in the result (needed for battery sizing / the
         itemized-cost rollout; set False to save memory for baseline-only runs).
     """
-    plan = _load_full_consist_plan()
+    plan = _extended_plan()
     n = len(plan)
+    n_measured = sum(1 for t in plan if _in_measure_window(t))
     totals = {"diesel_j": 0.0, "pantograph_elec_j": 0.0, "line_loss_j": 0.0,
               "battery_j": 0.0, "travel_hr": 0.0}
     diesel_by_link, elec_by_link, draw_by_link = {}, {}, {}
     sims = []
     trains_with_helpers = 0
     total_diesel_helpers = 0
-    _log(f"  {label}: simulating {n} plan trains ({traction_kind}) ...")
+    _log(f"  {label}: simulating {n} plan trains ({traction_kind}); "
+         f"{n_measured} measured, {n - n_measured} warm-up/cool-down ...")
     t0 = time.perf_counter()
 
     def _accumulate(ts):
@@ -1833,27 +1943,38 @@ def _run_full_plan(sim_network, location_map, label, traction_kind,
     # so build + dispatch serially, then walk EVERY train in one parallel rayon
     # batch -- the dominant cost. BEL keeps the per-train retry path.
     if WALK_PARALLELIZE and traction_kind in ("dual_mode", "conventional"):
-        built = []
+        # ONE `run_dispatch` over every train, so meet-pass conflict resolution
+        # actually runs. Dispatching a `SpeedLimitTrainSimVec` of one -- as this
+        # did -- means `check_deadlock` skips the only train present and no
+        # conflict is ever resolved, so each train saw an empty corridor and the
+        # per-link densities carried no congestion at all. That is the same
+        # defect commit d4f245c fixed in `sim_manager`.
+        sims, etns = [], []
         for k, train in enumerate(plan, 1):
             ts = _make_plan_train_ts(train, location_map, traction_kind)
             etn, _consist = alt.make_est_times(ts, sim_network)
-            timed_path = next(iter(alt.run_dispatch(
-                sim_network, alt.SpeedLimitTrainSimVec([ts]), [etn], False, False)))
-            built.append((ts, timed_path))
+            sims.append(ts)
+            etns.append(etn)
             if k % 20 == 0 or k == n:
-                _log(f"    {label}: dispatched {k}/{n} "
+                _log(f"    {label}: built {k}/{n} "
                      f"({time.perf_counter() - t0:.0f}s)")
-        vec = alt.SpeedLimitTrainSimVec([ts for ts, _ in built])
-        timed = [tp for _, tp in built]
-        del built
+        vec = alt.SpeedLimitTrainSimVec(sims)
+        timed = list(alt.run_dispatch(sim_network, vec, etns, False, False))
+        del sims, etns
+        _log(f"    {label}: dispatched {n} trains together "
+             f"({time.perf_counter() - t0:.0f}s)")
         vec.walk_timed_paths(sim_network, timed, True)
         del timed
         _log(f"    {label}: parallel-walked {n} trains "
              f"({time.perf_counter() - t0:.0f}s)")
         walked = vec.tolist()
         del vec
-        for ts in walked:
-            _accumulate(ts)
+        # Warm-up and cool-down trains exist to congest the corridor for the
+        # measured week; their own energy is not part of the week being
+        # annualized, so it is excluded here rather than scaled away later.
+        for train, ts in zip(plan, walked):
+            if _in_measure_window(train):
+                _accumulate(ts)
     else:
         for k, train in enumerate(plan, 1):
             ts, n_help = _walk_plan_train(train, location_map, sim_network,
@@ -1861,7 +1982,8 @@ def _run_full_plan(sim_network, location_map, label, traction_kind,
             if n_help:
                 trains_with_helpers += 1
                 total_diesel_helpers += n_help
-            _accumulate(ts)
+            if _in_measure_window(train):
+                _accumulate(ts)
             if k % 20 == 0 or k == n:
                 _log(f"    {label}: {k}/{n} trains "
                      f"({time.perf_counter() - t0:.0f}s)")
@@ -1873,7 +1995,7 @@ def _run_full_plan(sim_network, location_map, label, traction_kind,
     if trains_with_helpers:
         _log(f"  {label}: {trains_with_helpers}/{n} trains required a diesel helper "
              f"({total_diesel_helpers} helper units total)")
-    return {**totals, "sims": sims, "n_trains": n,
+    return {**totals, "sims": sims, "n_trains": n_measured, "n_dispatched": n,
             "diesel_j_by_link": diesel_by_link, "elec_j_by_link": elec_by_link,
             "draw_by_link": draw_by_link,
             "trains_with_helpers": trains_with_helpers,

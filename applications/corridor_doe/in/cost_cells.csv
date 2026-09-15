@@ -1,0 +1,5 @@
+Infra_Level,Infra_Multiplier,Applies_To
+na,1.0,non_catenary
+low,0.5,catenary
+med,1.0,catenary
+high,2.0,catenary

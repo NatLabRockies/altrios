@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
@@ -42,15 +43,28 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 import polars as pl
 
-import altrios as alt
-
+# The input pipeline is analysis code and lives in the analysis repo, not here.
+# ALTRIOS_ANALYSIS_SCRIPTS points at it on a machine that checks it out
+# somewhere else.
 sys.path.append(
-    "C:/Users/mbruchon/Documents/Repos/Enterprise/ALTRIOS_Analysis_Code/Scripts"
+    os.environ.get(
+        "ALTRIOS_ANALYSIS_SCRIPTS",
+        str(
+            Path.home()
+            / "Documents"
+            / "Repos"
+            / "Enterprise"
+            / "ALTRIOS_Analysis_Code"
+            / "Scripts"
+        ),
+    )
 )
+
+from railstate_corridor import CORRIDOR_SPECS, corridor_config
+from railstate_corridor import run as build_corridor
 
 from speed_calibration import (
     CORRIDORS,
-    DWELL_SENSORS,
     INPUTS,
     compare,
     link_offsets,
@@ -70,11 +84,11 @@ OBSERVED_RANGE: Dict[str, tuple] = {
     "spokane_lethbridge": (52, 124),
 }
 
-# Density that matches observed train-km -- the primary configuration.
+# Density that matches observed train-km -- the primary configuration, and
+# each corridor's own default, so the sweep reads it rather than restating it.
 MEASURED: Dict[str, int] = {
-    "toronto_battle_creek": 138,
-    "winnipeg_chicago": 152,
-    "spokane_lethbridge": 100,
+    slug: int(spec["weekly_count_override"])  # type: ignore[arg-type]
+    for slug, spec in CORRIDOR_SPECS.items()
 }
 
 # Per-point observed rates, used to weight the curve into a
@@ -88,56 +102,20 @@ PER_POINT: Dict[str, List[float]] = {
 
 def build_plan(slug: str, n_trains: int, out_dir: Path) -> Optional[Path]:
     """Generate a consist plan at a given weekly train count."""
-    from railstate_corridor import CorridorConfig, run as build_corridor
-
-    networks = Path(alt.resources_root()) / "networks"
-    shared = dict(
-        toronto_battle_creek=dict(
-            network_path=networks / "Toronto_Battle_Creek.msgpack",
-            origin_id="Toronto",
-            destination_id="BattleCreek",
-            exclude_sensors=(142,),
-            bts_gateway="Port Huron",
-            us_bound_is_forward=True,
-            loaded_fraction_forward=0.442,
-            loaded_fraction_reverse=0.558,
-        ),
-        winnipeg_chicago=dict(
-            network_path=networks / "Winnipeg_Chicago.msgpack",
-            origin_id="Winnipeg",
-            destination_id="Chicago",
-            bts_gateway="International Falls",
-            us_bound_is_forward=True,
-            loaded_fraction_forward=0.714,
-            loaded_fraction_reverse=0.286,
-        ),
-        spokane_lethbridge=dict(
-            network_path=networks / "Spokane_Lethbridge" / "spokane_lethbridge.msgpack",
-            origin_id="Spokane",
-            destination_id="Lethbridge",
-            freight_operators=("CN", "CPKC", "UP", "BNSF", "CSX", "NS", "CP"),
-            bts_gateway="Eastport",
-            us_bound_is_forward=False,
-            loaded_fraction_forward=0.055,
-            loaded_fraction_reverse=0.945,
-        ),
-    )[slug]
-
-    config = CorridorConfig(name=slug, weekly_count_override=n_trains, **shared)
+    config = corridor_config(slug, weekly_count_override=n_trains)
     plan = build_corridor(config)["plan"]
     path = out_dir / f"sweep_{slug}_{n_trains}.csv"
     plan.write_csv(path)
     return path
 
 
-def weighted_error(corridor, all_segments: bool = True) -> Optional[float]:
+def weighted_error(corridor) -> Optional[float]:
     """Distance-weighted run-time error for one simulated corridor."""
     plan_out, timed_paths, sensors = simulate(corridor)
     offsets = link_offsets(prepare_network(corridor))
     simulated = simulated_segment_times(plan_out, timed_paths, sensors, offsets)
     observed = pl.read_csv(corridor.observed_path)
-    dwell = () if all_segments else DWELL_SENSORS.get(corridor.slug, ())
-    table = compare(observed, simulated, dwell)
+    table = compare(observed, simulated)
     if not table.height:
         return None
     return float(

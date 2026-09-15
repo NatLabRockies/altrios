@@ -1,11 +1,12 @@
 """
 Does it matter, for energy, whether missing run time is modelled as slow track or as dwell?
 
-``speed_calibration`` shows posted speed limits plus meet-pass reproduce
-observed run times to within about -25% on every corridor measured. Two ways of
+``speed_calibration`` shows posted speed limits plus meet-pass reproduce about
+70% of observed run time on the two corridors whose posted limits are real
+data (Toronto-Battle Creek -31.0%, Winnipeg-Chicago -29.8%). Two ways of
 closing that gap both match the observed *time*:
 
-- **Scale the speed limits** (the historical approach, refit here to 0.75).
+- **Scale the speed limits** (the historical approach, refit here to 0.70).
   Every train runs slower everywhere.
 - **Keep posted limits and add dwell.** Trains run at line speed and then wait.
 
@@ -57,9 +58,12 @@ logger = logging.getLogger(__name__)
 # fuel converter. Dwell costs this per locomotive per second.
 IDLE_FUEL_W = 19_703.2784
 
-# Refit from the calibration: simulated run time is ~0.75 of observed, so
-# scaling every speed limit by this reproduces the observed time.
-REFIT_SCALER = 0.75
+# Refit from the calibration: simulated run time is ~0.70 of observed, so
+# scaling every speed limit by this reproduces the observed time. (An earlier
+# 0.75 was fitted before `simulated_segment_times` interpolated at corridor
+# offset; exact-link matching registered only the minority of trains whose
+# dispatch nodes fell on a sensor link, and that subsample ran biased fast.)
+REFIT_SCALER = 0.70
 
 
 def run_variant(

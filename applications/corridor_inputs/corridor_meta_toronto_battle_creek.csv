@@ -1,0 +1,2 @@
+corridor,corridor_km,measured_span_km,ruling_grade,speed_cap_mph,weekly_count,count_basis,flow_aggregation,count_if_min_flow,count_if_mean_flow,count_if_train,count_if_car,count_if_length,count_if_gross_ton
+toronto_battle_creek,530.67987,281.0,0.014031396093345312,52.2213741839278,128,car,min,128,144,122,128,124,128

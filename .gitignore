@@ -1245,3 +1245,4 @@ applications/corridor/
 /.venv311
 /applications/catenary_optimization/outputs/
 CLAUDE.md
+applications/corridor_inputs/sample*.csv
