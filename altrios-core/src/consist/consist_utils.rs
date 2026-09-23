@@ -183,7 +183,11 @@ fn get_pwr_regen_vec(
         pwr_regen_vec.push(match &loco.loco_type {
             // no braking power from conventional locos if there is capacity to regen all power
             PowertrainType::ConventionalLoco(_) => si::Power::ZERO,
-            PowertrainType::DualModeLoco(_) => si::Power::ZERO,
+            // A dual-mode unit regenerates only into a receptive wire; its
+            // `pwr_regen_max` is zero otherwise, so this is exact either way.
+            PowertrainType::DualModeLoco(_) => {
+                *loco.state.pwr_regen_max.get_fresh(|| format_dbg!())? * regen_frac
+            }
             PowertrainType::HybridLoco(_) => {
                 *loco.state.pwr_regen_max.get_fresh(|| format_dbg!())? * regen_frac
             }

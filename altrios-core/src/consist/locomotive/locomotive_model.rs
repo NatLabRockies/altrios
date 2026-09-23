@@ -1531,11 +1531,9 @@ impl LocoTrait for Locomotive {
                 );
             }
             PowertrainType::DualModeLoco(loco) => {
+                // Regen is non-zero under a receptive wire (the only regen sink
+                // a dual-mode unit has), so no zero assertion here.
                 set_pwr_lims(&mut self.state, &loco.edrv)?;
-                assert_eq!(
-                    *self.state.pwr_regen_max.get_fresh(|| format_dbg!())?,
-                    si::Power::ZERO
-                );
             }
             PowertrainType::HybridLoco(loco) => {
                 set_pwr_lims(&mut self.state, &loco.edrv)?;
