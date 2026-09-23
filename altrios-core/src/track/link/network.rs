@@ -938,6 +938,38 @@ mod tests {
         tempdir.close().unwrap();
     }
 
+    /// Round-trips a real network through the lossless byte formats via `to_file`/`from_file`.
+    ///
+    /// Guards the buffered-IO path in [`SerdeAPI::to_file`]/[`SerdeAPI::from_file`] and the
+    /// [`Network::from_file`] override. `Network` is compared directly rather than via `to_yaml`
+    /// because `Link::speed_sets` is a [`HashMap`], whose serialized key order is not stable.
+    ///
+    /// `json` is deliberately excluded: it is written at full precision but parsed back up to
+    /// 1 ULP off, so roughly 10% of the float fields in `Taconite` do not survive the round trip.
+    #[test]
+    fn test_to_and_from_file_for_network() {
+        let network_file_path = project_root::get_project_root()
+            .unwrap()
+            .join("python/altrios/resources/networks/Taconite.msgpack");
+        let network = Network::from_file(network_file_path, false).unwrap();
+        let tempdir = tempfile::tempdir().unwrap();
+
+        for extension in ["yaml", "msgpack"] {
+            let temp_file_path = tempdir.path().join(format!("network.{extension}"));
+            network
+                .to_file(&temp_file_path)
+                .unwrap_or_else(|err| panic!("failed writing `{extension}`: {err}"));
+            let roundtripped = Network::from_file(&temp_file_path, false)
+                .unwrap_or_else(|err| panic!("failed reading `{extension}`: {err}"));
+            assert_eq!(
+                roundtripped, network,
+                "round trip through `{extension}` did not preserve the network"
+            );
+        }
+
+        tempdir.close().unwrap();
+    }
+
     #[test]
     fn test_set_speed_set_from_train_type() {
         let network_file_path = project_root::get_project_root()
