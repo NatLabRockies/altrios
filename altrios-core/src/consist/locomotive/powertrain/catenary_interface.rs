@@ -20,6 +20,13 @@ pub struct CatenaryInterface {
     /// [Self::set_cat_power_limit]. Line loss is `k * pwr_elec_in^2`.
     #[serde(default, skip)]
     pub loss_factor: f64,
+    /// Whether the wire accepts power back from the train. A transformer-fed AC
+    /// substation is receptive by construction and a converter-fed MVDC
+    /// substation by design; a diode-rectifier DC substation is not. When
+    /// false, a negative request is dissipated upstream (dynamic brake) and the
+    /// interface records nothing, which is the pre-2026-09 behaviour.
+    #[serde(default)]
+    pub receptive: bool,
     /// Custom vector of [Self::state] haha
     #[serde(default)]
     pub history: CatenaryInterfaceStateHistoryVec,
@@ -63,6 +70,7 @@ impl CatenaryInterface {
             pwr_out_max: pwr_out_max_watts,
             save_interval,
             loss_factor: 0.0,
+            receptive: false,
             history,
         };
         Ok(ci)
@@ -87,19 +95,30 @@ impl CatenaryInterface {
             .update(pwr_out_req_max, || format_dbg!())?;
 
         let eta = uc::R * Self::ETA;
+        let pwr_in_max = *self.state.pwr_elec_in_max.get_fresh(|| format_dbg!())?;
 
-        self.state.pwr_elec_out.update(
-            (*self.state.pwr_elec_in_max.get_fresh(|| format_dbg!())? 
-                * eta)
-                .min(pwr_out_req_max),
-            || format_dbg!(),
-        )?;
-
-        self.state.pwr_elec_in.update(
-            *self.state.pwr_elec_out.get_fresh(|| format_dbg!())? 
-                / eta,
-            || format_dbg!(),
-        )?;
+        if pwr_out_req_max >= si::Power::ZERO || !self.receptive {
+            // Drawing from the wire (or a negative request the wire cannot take,
+            // which the caller has already routed to the dynamic brake).
+            let pwr_elec_out = (pwr_in_max * eta).min(pwr_out_req_max).max(si::Power::ZERO);
+            self.state.pwr_elec_out.update(pwr_elec_out, || format_dbg!())?;
+            self.state.pwr_elec_in.update(pwr_elec_out / eta, || format_dbg!())?;
+            self.state.pwr_elec_regen.update(si::Power::ZERO, || format_dbg!())?;
+        } else {
+            // Returning to a receptive wire: bounded by the same interval power
+            // limit as a draw and by the interface rating; the interface loss is
+            // taken before the power reaches the wire. `pwr_elec_in` goes
+            // negative (V2Catenary sign convention) so the shared-conductor line
+            // loss in `Consist::set_aggregate_cat_line_loss` sees the real flow;
+            // `pwr_elec_regen` carries the returned power as a positive series
+            // so gross draw and return stay separable downstream.
+            let pwr_regen_cap = pwr_in_max.min(self.pwr_out_max);
+            let pwr_elec_out = pwr_out_req_max.max(-pwr_regen_cap);
+            let pwr_elec_in = pwr_elec_out * eta;
+            self.state.pwr_elec_out.update(pwr_elec_out, || format_dbg!())?;
+            self.state.pwr_elec_in.update(pwr_elec_in, || format_dbg!())?;
+            self.state.pwr_elec_regen.update(-pwr_elec_in, || format_dbg!())?;
+        }
 
         self.state.pwr_loss.update(
             (*self.state.pwr_elec_out.get_fresh(|| format_dbg!())?
@@ -201,6 +220,11 @@ pub struct CatenaryInterfaceState {
     /// the pantograph (additional power the substation must supply).
     #[serde(default)]
     pub pwr_line_loss: TrackedState<si::Power>,
+    /// Electrical power returned to a receptive catenary (positive; zero when
+    /// drawing or when the wire is not receptive). `pwr_elec_in` is the NET
+    /// flow, negative while returning.
+    #[serde(default)]
+    pub pwr_elec_regen: TrackedState<si::Power>,
 
     // Cumulative energy values
     /// cumulative electrical energy in from catenary
@@ -214,6 +238,10 @@ pub struct CatenaryInterfaceState {
     /// Cumulative resistive line-loss energy in the catenary.
     #[serde(default)]
     pub energy_line_loss: TrackedState<si::Energy>,
+    /// Cumulative electrical energy returned to the catenary (positive).
+    /// Gross draw at the pantograph is `energy_elec_in + energy_elec_regen`.
+    #[serde(default)]
+    pub energy_elec_regen: TrackedState<si::Energy>,
 }
 
 #[pyo3_api]

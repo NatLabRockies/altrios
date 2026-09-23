@@ -26,6 +26,11 @@ liquid_fuel_prices_eia = (
 battery_prices_nlr_atb = (pl.read_csv(source=defaults.BATTERY_PRICE_FILE)).filter(
     pl.col("Scenario") == "Moderate"
 )
+# Regional price zones (US states / PADD regions / Canadian provinces): an observed
+# reference-year price per zone and the name of the trajectory that carries it through
+# time. Canadian trajectories come from Canada's Energy Future 2026 (CER).
+energy_price_zones = pl.read_csv(source=defaults.ENERGY_PRICE_ZONE_FILE)
+cer_end_use_prices = pl.read_csv(source=defaults.CER_ENERGY_PRICE_FILE)
 
 metric_columns = ["Subset", "Value", "Metric", "Units", "Year"]
 
@@ -132,34 +137,54 @@ def _cached_sim_aggregate(
     return cache.get(info.sims, resolved, name, compute)
 
 
+def annualizer(info: "ScenarioInfo") -> float:
+    """The one factor that scales this scenario's simulated window to a year:
+    ``365.25 / simulation_days`` when annualizing, else 1.
+
+    Every sims-derived aggregate below is read RAW from Rust and scaled here, so
+    fuel, battery energy, tonne-km and car-km share exactly the scaler the
+    Python-side quantities (refuel sessions, catenary draw, container counts)
+    already use. The Rust getters' own ``annualize`` flag scales by each sim's
+    ``simulation_days`` field instead, which callers that build sims without it
+    (the catenary deep-dive) leave unset -- Rust then assumes ONE day and inflates
+    freight and diesel 7x relative to electricity, which is how a per-car-mile
+    intensity came out 2.3x low.
+    """
+    if not info.annualize:
+        return 1.0
+    if not info.simulation_days:
+        raise ValueError("annualize=True needs a positive ScenarioInfo.simulation_days")
+    return 365.25 / float(info.simulation_days)
+
+
 def _sim_energy_fuel_joules(info: "ScenarioInfo") -> float:
-    return _cached_sim_aggregate(
+    return annualizer(info) * _cached_sim_aggregate(
         info, "energy_fuel_joules",
-        lambda: info.sims.get_energy_fuel_joules(annualize=info.annualize))
+        lambda: info.sims.get_energy_fuel_joules(annualize=False), annualize=False)
 
 
 def _sim_net_energy_res_joules(info: "ScenarioInfo") -> float:
-    return _cached_sim_aggregate(
+    return annualizer(info) * _cached_sim_aggregate(
         info, "net_energy_res_joules",
-        lambda: info.sims.get_net_energy_res_joules(annualize=info.annualize))
+        lambda: info.sims.get_net_energy_res_joules(annualize=False), annualize=False)
 
 
 def _sim_megagram_kilometers(info: "ScenarioInfo") -> float:
-    return _cached_sim_aggregate(
+    return annualizer(info) * _cached_sim_aggregate(
         info, "megagram_kilometers",
-        lambda: info.sims.get_megagram_kilometers(annualize=info.annualize))
+        lambda: info.sims.get_megagram_kilometers(annualize=False), annualize=False)
 
 
 def _sim_car_kilometers(info: "ScenarioInfo") -> float:
-    return _cached_sim_aggregate(
+    return annualizer(info) * _cached_sim_aggregate(
         info, "car_kilometers",
-        lambda: info.sims.get_car_kilometers(annualize=info.annualize))
+        lambda: info.sims.get_car_kilometers(annualize=False), annualize=False)
 
 
 def _sim_cars_moved(info: "ScenarioInfo") -> float:
-    return _cached_sim_aggregate(
+    return annualizer(info) * _cached_sim_aggregate(
         info, "cars_moved",
-        lambda: info.sims.get_cars_moved(annualize=info.annualize))
+        lambda: info.sims.get_cars_moved(annualize=False), annualize=False)
 
 
 def _sim_catenary_joules_for(info: "ScenarioInfo") -> Tuple[float, float]:
@@ -752,7 +777,8 @@ def calculate_freight_moved(info: ScenarioInfo, units: str) -> MetricType:
             pl.DataFrame(
                 data={
                     "car-km": [
-                        alt.SpeedLimitTrainSim.from_pydict(sim).get_kilometers(annualize=info.annualize)
+                        alt.SpeedLimitTrainSim.from_pydict(sim).get_kilometers(annualize=False)
+                        * annualizer(info)
                         for sim in info.sims.to_pydict()
                     ]
                 }
@@ -1576,155 +1602,125 @@ def import_emissions_factors_cambium(
     )
 
 
+def _series_price_at(series: pl.DataFrame, year: float) -> float:
+    """``Price`` of a Year/Price table at ``year``: linear between tabulated years,
+    clamped to the first/last tabulated year outside them."""
+    s = series.select("Year", "Price").drop_nulls().sort("Year")
+    years = s.get_column("Year").cast(pl.Float64).to_list()
+    prices = s.get_column("Price").cast(pl.Float64).to_list()
+    if not years:
+        raise ValueError("empty price series")
+    y = float(year)
+    if y <= years[0]:
+        return prices[0]
+    if y >= years[-1]:
+        return prices[-1]
+    for y0, p0, y1, p1 in zip(years, prices, years[1:], prices[1:]):
+        if y0 <= y <= y1:
+            return p0 if y1 == y0 else p0 + (p1 - p0) * (y - y0) / (y1 - y0)
+    return prices[-1]
+
+
+def price_trajectory(trajectory: str, fuel: str) -> pl.DataFrame:
+    """The Year/Price series a price zone's ``Trajectory`` names. Only ratios of the
+    series are ever used, so its units and dollar year do not matter.
+
+    - ``EIA_AEO...``: the national AEO reference case (transportation-sector diesel,
+      industrial electricity) in the EIA price files.
+    - ``CER_EF2026:<Province>``: Canada's Energy Future 2026, Current Measures scenario,
+      end-use price for that province (transportation diesel, industrial electricity;
+      the file is in 2022 CAD/GJ).
+    """
+    if trajectory.startswith("EIA_AEO"):
+        return electricity_prices_eia if fuel == "Electricity" else liquid_fuel_prices_eia
+    if trajectory.startswith("CER_EF2026:"):
+        province = trajectory.split(":", 1)[1]
+        variable, sector = (
+            ("Electricity", "Industrial") if fuel == "Electricity"
+            else ("Diesel", "Transportation")
+        )
+        series = cer_end_use_prices.filter(
+            (pl.col("Scenario") == "Current Measures")
+            & (pl.col("Region") == province)
+            & (pl.col("Variable") == variable)
+            & (pl.col("Sector") == sector)
+        ).select("Year", pl.col("Value").alias("Price"))
+        if series.height == 0:
+            raise ValueError(
+                f"no CER EF2026 {variable}/{sector} series for {province!r} "
+                f"in {defaults.CER_ENERGY_PRICE_FILE}"
+            )
+        return series
+    raise ValueError(f"unknown price trajectory {trajectory!r}")
+
+
+def zone_energy_price(zone: str, fuel: str, year: int) -> float:
+    """Price of ``fuel`` ("Diesel" or "Electricity") in price zone ``zone`` at ``year``,
+    in the EIA tables' units (diesel USD/gal, electricity US cents/kWh; real 2025 USD).
+
+    The zone's observed reference-year price (Energy_Price_Zones.csv) is scaled by
+    its trajectory's ratio of ``year`` to the reference year, so regional level and
+    national (or provincial) real-price movement are combined the same way for every
+    zone on either side of the border.
+    """
+    row = energy_price_zones.filter((pl.col("Zone") == zone) & (pl.col("Fuel") == fuel))
+    if row.height == 0:
+        raise KeyError(f"no {fuel} price zone {zone!r} in {defaults.ENERGY_PRICE_ZONE_FILE}")
+    row = row.row(0, named=True)
+    trajectory = price_trajectory(row["Trajectory"], fuel)
+    reference = _series_price_at(trajectory, int(row["Reference_Year"]))
+    return float(row["Reference_Price"]) * _series_price_at(trajectory, year) / reference
+
+
+def location_price_zones(location_map: Dict[str, List[alt.Location]]) -> pl.DataFrame:
+    """One row per location node -- ``Node``, ``Electricity_Zone``, ``Diesel_Zone`` -- from
+    the location file's "Electricity Price Region" / "Liquid Fuel Price Region" columns."""
+    rows = []
+    for loc_list in location_map.values():
+        for loc in loc_list:
+            d = loc.to_pydict()
+            rows.append({
+                "Node": d["Location ID"],
+                "Electricity_Zone": d["Electricity Price Region"],
+                "Diesel_Zone": d["Liquid Fuel Price Region"],
+            })
+    return pl.DataFrame(rows).unique(maintain_order=True)
+
+
 def import_energy_prices_eia(
     location_map: Dict[str, List[alt.Location]],
     scenario_year: int,
     reference_year: int = defaults.EIA_PRICE_REFERENCE_YEAR,
     reference_year_values: Optional[Dict[str, List]] = None,
 ) -> pl.DataFrame:
-    if reference_year_values is None:
-        reference_year_values = {
-            "Fuel": ["Diesel", "Electricity"],
-            "Region": [defaults.EIA_REFERENCE_PRICE_REGION] * 2,
-            "Price": [
-                defaults.EIA_REFERENCE_DIESEL_PRICE,
-                defaults.EIA_REFERENCE_ELECTRICITY_PRICE,
-            ],
-        }
-    reference_year_values = pl.DataFrame(reference_year_values)
-    location_ids = [
-        loc.to_pydict()["Location ID"]
-        for loc_list in location_map.values()
-        for loc in loc_list
-    ]
-    electricity_price_regions = [
-        loc.to_pydict()["Electricity Price Region"]
-        for loc_list in location_map.values()
-        for loc in loc_list
-    ]
-    liquid_fuel_price_regions = [
-        loc.to_pydict()["Liquid Fuel Price Region"]
-        for loc_list in location_map.values()
-        for loc in loc_list
-    ]
-    nodal_reference_prices = pl.concat(
-        [
-            pl.DataFrame({"Node": location_ids, "Region": electricity_price_regions})
-            .unique()
-            .with_columns(pl.lit("Electricity").alias("Fuel")),
-            pl.DataFrame({"Node": location_ids, "Region": liquid_fuel_price_regions})
-            .unique()
-            .with_columns(pl.lit("Diesel").alias("Fuel")),
-        ],
-        how="diagonal",
-    ).join(reference_year_values, on=["Region", "Fuel"])
+    """Nodal energy prices (``Node``, ``Fuel``, ``Price``) for ``scenario_year``.
 
-    eia_reference_electric_price = electricity_prices_eia.filter(
-        pl.col("Year") == reference_year
-    ).get_column("Price")[0]
-    electric = electricity_prices_eia.with_columns(
-        (pl.col("Price") / eia_reference_electric_price).alias("Price"),
-        (pl.col("Year") - pl.lit(scenario_year)).alias("Year_Diff"),
+    Each location's price is its price zone's price at that year (see
+    :func:`zone_energy_price`): electricity in US cents/kWh, diesel in USD/gal.
+    ``reference_year_values`` is a legacy override -- ``{"Fuel": [...], "Region": [...],
+    "Price": [...]}`` pins ``reference_year`` prices for the named regions, which are
+    then carried by the national AEO trajectory as before.
+    """
+    overrides = (
+        pl.DataFrame(reference_year_values) if reference_year_values is not None else None
     )
-
-    eia_reference_liquid_fuel_price = liquid_fuel_prices_eia.filter(
-        pl.col("Year") == reference_year
-    ).get_column("Price")[0]
-    liquid = liquid_fuel_prices_eia.with_columns(
-        (pl.col("Price") / eia_reference_liquid_fuel_price).alias("Price"),
-        (pl.col("Year") - pl.lit(scenario_year)).alias("Year_Diff"),
-    )
-
-    if electric.get_column("Year_Diff").abs().min() == 0:
-        electric = electric.filter(pl.col("Year_Diff") == 0).drop("Year_Diff")
-    else:
-        earlier_year = electric.filter(pl.col("Year_Diff") < 0).filter(
-            pl.col("Year_Diff") == pl.col("Year_Diff").max()
-        )
-        later_year = electric.filter(pl.col("Year_Diff") > 0).filter(
-            pl.col("Year_Diff") == pl.col("Year_Diff").min()
-        )
-        if later_year.height == 0:
-            electric = earlier_year
-        elif earlier_year.height == 0:
-            electric = later_year
-        else:
-            electric = earlier_year.join(later_year, on=["Node"], how="left")
-            total_diff = (
-                electric.get_column("Year_Diff").abs()
-                + electric.get_column("Year_Diff_right").abs()
-            )
-            electric = electric.with_columns(
-                (
-                    pl.col("Price")
-                    * (total_diff - pl.col("Year_Diff").abs())
-                    / total_diff
-                    + pl.col("Price_right")
-                    * (total_diff - pl.col("Year_Diff_right").abs())
-                    / total_diff
-                ).alias("Price"),
-                (
-                    pl.col("Year")
-                    * (total_diff - pl.col("Year_Diff").abs())
-                    / total_diff
-                    + pl.col("Year_right")
-                    * (total_diff - pl.col("Year_Diff_right").abs())
-                    / total_diff
-                )
-                .cast(pl.Int64, strict=False)
-                .alias("Year"),
-            ).drop(["Year_right", "Price_right", "Year_Diff_right", "Year_Diff"])
-
-    if liquid.get_column("Year_Diff").abs().min() == 0:
-        liquid = liquid.filter(pl.col("Year_Diff") == 0).drop("Year_Diff")
-    else:
-        earlier_year = liquid.filter(pl.col("Year_Diff") < 0).filter(
-            pl.col("Year_Diff") == pl.col("Year_Diff").max()
-        )
-        later_year = liquid.filter(pl.col("Year_Diff") > 0).filter(
-            pl.col("Year_Diff") == pl.col("Year_Diff").min()
-        )
-        if later_year.height == 0:
-            liquid = earlier_year
-        elif earlier_year.height == 0:
-            liquid = later_year
-        else:
-            liquid = earlier_year.join(later_year, on=["Node"], how="left")
-            total_diff = (
-                liquid.get_column("Year_Diff").abs()
-                + liquid.get_column("Year_Diff_right").abs()
-            )
-            liquid = liquid.with_columns(
-                (
-                    pl.col("Price")
-                    * (total_diff - pl.col("Year_Diff").abs())
-                    / total_diff
-                    + pl.col("Price_right")
-                    * (total_diff - pl.col("Year_Diff_right").abs())
-                    / total_diff
-                ).alias("Price"),
-                (
-                    pl.col("Year")
-                    * (total_diff - pl.col("Year_Diff").abs())
-                    / total_diff
-                    + pl.col("Year_right")
-                    * (total_diff - pl.col("Year_Diff_right").abs())
-                    / total_diff
-                )
-                .cast(pl.Int64, strict=False)
-                .alias("Year"),
-            ).drop(["Year_right", "Price_right", "Year_Diff_right", "Year_Diff"])
-
-    liquid_multiplier = liquid.get_column("Price")[0]
-    electric_multiplier = electric.get_column("Price")[0]
-
-    nodal_energy_prices = nodal_reference_prices.with_columns(
-        pl.when(pl.col("Fuel") == pl.lit("Electricity"))
-        .then(pl.col("Price") * electric_multiplier)
-        .otherwise(pl.col("Price") * liquid_multiplier)
-        .alias("Price")
-    ).select(["Node", "Fuel", "Price"])
-    return nodal_energy_prices
+    out = []
+    for r in location_price_zones(location_map).iter_rows(named=True):
+        for fuel, zone in (("Electricity", r["Electricity_Zone"]), ("Diesel", r["Diesel_Zone"])):
+            price = None
+            if overrides is not None:
+                hit = overrides.filter((pl.col("Fuel") == fuel) & (pl.col("Region") == zone))
+                if hit.height:
+                    aeo = price_trajectory("EIA_AEO", fuel)
+                    price = (
+                        float(hit.get_column("Price")[0])
+                        * _series_price_at(aeo, scenario_year)
+                        / _series_price_at(aeo, reference_year)
+                    )
+            if price is None:
+                price = zone_energy_price(zone, fuel, scenario_year)
+            out.append({"Node": r["Node"], "Fuel": fuel, "Price": price})
+    return pl.DataFrame(out)
 
 
 def add_battery_costs(loco_info: pd.DataFrame, year: int) -> pd.DataFrame:
@@ -1738,9 +1734,6 @@ def add_battery_costs(loco_info: pd.DataFrame, year: int) -> pd.DataFrame:
     usd_per_kW = prices_to_use.filter(pl.col("Metric") == "USD_Per_kW").get_column(
         "Value"
     )[0]
-    usd_constant = prices_to_use.filter(pl.col("Metric") == "USD_Constant").get_column(
-        "Value"
-    )[0]
 
     for idx, row in loco_info.iterrows():
         loco_dict = row["Rust_Loco"].to_pydict()
@@ -1752,9 +1745,9 @@ def add_battery_costs(loco_info: pd.DataFrame, year: int) -> pd.DataFrame:
             )
             loco_info.at[idx, "Cost_USD"] = (
                 defaults.BEL_MINUS_BATTERY_COST_USD
-                # NREL ATB battery prices are 2022 USD; restate in the 2025 base year.
-                + (usd_constant + kW * usd_per_kW + kWh * usd_per_kWh)
-                * utilities.USD_2022_TO_2025
+                # NREL 2025 battery cost projections (energy $/kWh + power $/kW components
+                # of a utility-scale system) are 2024 USD; restate in the 2025 base year.
+                + (kW * usd_per_kW + kWh * usd_per_kWh) * utilities.USD_2024_TO_2025
             ) * defaults.RETAIL_PRICE_EQUIVALENT_MULTIPLIER
     return loco_info
 
@@ -1828,22 +1821,33 @@ def _mj_to_units(units: str) -> float:
     }.get(units)
 
 
-def _sim_catenary_joules(sims) -> Tuple[float, float]:
-    """``(pantograph_delivered_J, line_loss_J)`` summed over a sim vec's catenary
-    interfaces.
+def _sim_catenary_energy(sims) -> Tuple[float, float, float]:
+    """``(pantograph_draw_J, pantograph_return_J, line_loss_J)`` summed over a
+    sim vec's catenary interfaces.
 
-    Both are read directly from each locomotive's ``cat_int`` cumulative history
-    on the ``SpeedLimitTrainSim`` object(s) -- the authoritative source for
+    All three are read from each locomotive's ``cat_int`` cumulative STATE on the
+    ``SpeedLimitTrainSim`` object(s) -- the authoritative source for
     catenary delivery-chain energy -- not inferred or supplied out of band.
-    ``energy_elec_in_joules`` is the on-board (pantograph) energy delivered;
+    ``energy_elec_in_joules`` is the NET on-board (pantograph) energy: draw minus
+    anything returned to a receptive wire; ``energy_elec_regen_joules`` is the
+    returned part on its own (zero for a non-receptive wire, and absent on sims
+    saved before it existed), so gross draw is their sum.
     ``energy_line_loss_joules`` is the additional resistive loss the substation
-    must supply. Works for dual-mode and pantograph-equipped battery-electric
-    locomotives; locomotives without a catenary interface contribute nothing.
+    must supply, accumulated in both directions. Works for dual-mode and
+    pantograph-equipped battery-electric locomotives; locomotives without a
+    catenary interface contribute nothing.
+
+    Read the terminal STATE, not the history tail. The series are cumulative, so
+    only the final value matters -- and the last saved sample is not the final
+    value: it lands on the last multiple of ``save_interval`` before the train
+    arrives, dropping up to ``save_interval - 1`` seconds of delivery from every
+    locomotive on every trip, always downward. Off the state the number is exact.
     """
-    pantograph = 0.0
+    net = 0.0
+    regen = 0.0
     line_loss = 0.0
     if sims is None:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
     for slts in sims.to_pydict():
         loco_con = slts.get("loco_con") or {}
         for loco in loco_con.get("loco_vec") or []:
@@ -1853,28 +1857,35 @@ def _sim_catenary_joules(sims) -> Tuple[float, float]:
                 cat_int = sub.get("cat_int") if sub else None
                 if not cat_int:
                     continue
-                # Read the terminal STATE, not the history tail. Both series are
-                # cumulative, so only the final value matters -- and the last
-                # saved sample is not the final value: it lands on the last
-                # multiple of `save_interval` before the train arrives, dropping
-                # up to `save_interval - 1` seconds of delivery from every
-                # locomotive on every trip, always downward. Off the state the
-                # number is exact, and `cat_int`'s save interval stops mattering
-                # at all, so its history can be switched off entirely.
                 state = cat_int.get("state") or {}
                 hist = cat_int.get("history") or {}
                 e_in = state.get("energy_elec_in_joules")
+                e_rg = state.get("energy_elec_regen_joules")
                 e_ll = state.get("energy_line_loss_joules")
                 if e_in is None:
                     e_in = (hist.get("energy_elec_in_joules") or [None])[-1]
+                if e_rg is None:
+                    e_rg = (hist.get("energy_elec_regen_joules") or [0.0])[-1]
                 if e_ll is None:
                     e_ll = (hist.get("energy_line_loss_joules") or [None])[-1]
-                if e_in:
-                    pantograph += e_in
-                if e_ll:
-                    line_loss += e_ll
-    return pantograph, line_loss
+                net += float(e_in or 0.0)
+                regen += float(e_rg or 0.0)
+                line_loss += float(e_ll or 0.0)
+    return net + regen, regen, line_loss
 
+
+def _sim_catenary_energy_for(info: "ScenarioInfo") -> Tuple[float, float, float]:
+    return _cached_sim_aggregate(
+        info, "catenary_energy",
+        lambda: _sim_catenary_energy(info.sims), annualize=False)
+
+
+def _sim_catenary_joules(sims) -> Tuple[float, float]:
+    """``(pantograph_delivered_J, line_loss_J)``: the GROSS draw at the pantograph
+    and the resistive line loss. Kept for callers that predate receptive
+    catenary; see :func:`_sim_catenary_energy` for the returned energy too."""
+    draw, _regen, line_loss = _sim_catenary_energy(sims)
+    return draw, line_loss
 
 def calculate_energized_distance(info: ScenarioInfo, units: str) -> MetricType:
     """Built energization distance by component (e.g. catenary wire track-miles).

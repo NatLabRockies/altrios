@@ -36,6 +36,7 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import argparse
 import logging
 import sys
@@ -44,11 +45,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 import pandas as pd
+import json
 import polars as pl
 
 import altrios as alt
 from altrios import history, metric_calculator, sim_manager
-from altrios.train_planner import planner_config
+from altrios.train_planner import data_prep, planner_config
+
+import catenary_policy  # noqa: E402  -- receptive wire flag + export credit
 
 HERE = Path(__file__).parent
 OUT = HERE / "out"
@@ -147,7 +151,52 @@ FORCE_MAX_POUNDS = 200_000.0
 
 # The consist plan names one locomotive type for every locomotive, so the sweep
 # varies the powertrain by rebinding the Rust locomotive behind that name.
+# Helper assignments are cached: the test costs a free-running `make_est_times`
+# per train and the answer only changes when the plan or the layout does.
+HELPERS_DIR = Path(__file__).parent / "out" / "helper_assignments"
 PLAN_LOCO_TYPE = "Dual_Mode"
+# The battery-electric arm needs a second type in the pool. A pure-BEL consist
+# cannot cross this corridor on the heaviest trains -- 19 of Spokane-Lethbridge's
+# 52 carry more than ~4,400 tons per locomotive and run the pack to its 5% floor
+# on the loaded direction -- and the catenary study's answer to that is not more
+# wire but ONE conventional unit swapped into the consist. The wire is sized from
+# the fleet-MEAN drain by design (`BEL_AVG_KWH_PER_MILE`, documented as "24 light
+# .. 62 heavy"); the heavy tail is meant to be carried by helpers. Sizing the
+# wire for the tail instead would over-build every layout to solve a problem the
+# architecture already solves.
+HELPER_LOCO_TYPE = "Diesel_Helper"
+# State of charge a train must still hold at the end of the FREE-RUNNING
+# feasibility test to be accepted without a helper. Merely finishing is not
+# enough: the test cannot see dispatch, and a train that free-runs to the 5%
+# floor with nothing to spare hits it for real once meets add stopped time and
+# auxiliary load. Two layouts passed the bare test and then stranded trains
+# mid-walk at exactly 5.0%, which is what this reserve exists to prevent.
+HELPER_ESCALATION_FRACTIONS = (0.0, 0.25, 0.5, 1.0)
+# Ceiling on how much of a battery-electric fleet may be converted to diesel
+# before the cell stops being a battery-electric result at all. Without it,
+# escalation "succeeds" by turning the arm into a diesel operation: on the
+# dc_9kv cost cell where the optimizer declined to electrify, it swapped 71
+# units across 48 of 52 trains and reported 22.9 million MJ of diesel, ZERO grid
+# draw, as an `ok` catenary_bel row. An electrification a fleet cannot run is a
+# RESULT -- it belongs in the analysis as infeasible, not as diesel wearing a
+# battery-electric label. The deep-dive's own escalation swaps one unit of
+# three, so a third of the fleet is a generous bound.
+HELPER_MAX_SHARE = 1.0 / 3.0
+# How escalation widens when a cell still strands a train. The base pass gives
+# each train the FEWEST helpers that let it cross free-running, which is the
+# deep-dive's rule. That test cannot see dispatch, though -- meets add stopped
+# time and auxiliary load no single-train run produces -- so a cell that still
+# fails is retried with one extra helper given to this fraction of trains,
+# lowest finishing state of charge first.
+#
+# Escalating by a state-of-charge THRESHOLD instead does not work, and failed
+# here before this replaced it: a helper REPLACES a battery-electric unit rather
+# than adding to the consist, so more helpers can leave the remaining packs
+# working harder and finishing LOWER. Demanding a fixed reserve was therefore
+# non-monotone -- on the dc_9kv layout it went from 14 helper units at 0.20 to
+# ZERO at 0.35, because no helper count met the threshold and the loop fell
+# through to "none" on 157 trains. Ranking by margin and adding one unit at a
+# time is monotone by construction.
 
 # Catenary battery-electric settings, matching SIM_BEL_CAT_PWR_MAX_WATTS and
 # SIM_BEL_BATTERY_CAPACITY_KWH in catenary_optimization. The BEL pack is not a
@@ -218,6 +267,60 @@ def set_battery_capacity(loco: alt.Locomotive, mwh: float) -> alt.Locomotive:
     return alt.Locomotive.from_pydict(d)
 
 
+def with_fuel_converter_of(loco: alt.Locomotive, donor: alt.Locomotive) -> alt.Locomotive:
+    """``loco`` with ``donor``'s fuel converter (engine) in place of its own."""
+    d = loco.to_pydict()
+    kind = next(iter(d["loco_type"]))
+    dd = donor.to_pydict()
+    donor_kind = next(iter(dd["loco_type"]))
+    if "fc" not in (d["loco_type"][kind] or {}) or "fc" not in (dd["loco_type"][donor_kind] or {}):
+        raise ValueError(f"{kind} or {donor_kind} has no fuel converter")
+    d["loco_type"][kind]["fc"] = dd["loco_type"][donor_kind]["fc"]
+    return alt.Locomotive.from_pydict(d)
+
+
+def _strip_history(obj):
+    """A pydict without its (empty, but schema-bearing) history blocks."""
+    if isinstance(obj, dict):
+        return {k: _strip_history(v) for k, v in obj.items() if k != "history"}
+    if isinstance(obj, list):
+        return [_strip_history(v) for v in obj]
+    return obj
+
+
+# Hybrid pack power rating as a multiple of capacity (per hour). The library
+# default is 1.09 MW on a 0.3 MWh pack -- 3.6C, an HEV-style buffer -- and
+# resizing capacity alone left power fixed, so the DoE's four pack sizes were
+# silently four different batteries (4.4C at 0.25 MWh down to 0.55C at 2 MWh)
+# and a bigger pack lasted longer down a grade without absorbing any faster.
+# A fixed C-rate makes the capacity factor mean what it says.
+#
+# 2C is the top of what mainstream LFP/NMC cells sustain continuously (LTO goes
+# far higher at a price the ATB $/kWh basis does not carry), above the ~1.4C of
+# the first FLXdrive (a range-sized BEL pack, the wrong reference for a hybrid)
+# and in line with hybrid-vehicle practice for packs holding minutes of prime-
+# mover output. On these corridors it lets a 1 MWh pack take a median braking
+# event whole (2.5 MW per consist on Spokane; 0.7-3.8 MW per unit); 1C cannot,
+# and 3C+ runs into the pack-full limit and the 5 MW drivetrain cap. Not a DoE
+# factor by design -- one value, stated. Charge and discharge share the rating.
+HYBRID_PACK_C_RATE = 2.0
+
+
+def set_battery_power_from_c_rate(loco: alt.Locomotive, c_rate: float) -> alt.Locomotive:
+    """Rate the pack at ``c_rate`` times its capacity, capped at the electric
+    drive's rating (power beyond it is unusable for traction or regen)."""
+    d = loco.to_pydict()
+    kind = next(iter(d["loco_type"]))
+    body = d["loco_type"][kind] or {}
+    if "res" not in body:
+        raise ValueError(f"{kind} has no battery to rate")
+    capacity_wh = float(body["res"]["energy_capacity_joules"]) / 3600.0
+    pwr = c_rate * capacity_wh
+    edrv_max = float(body["edrv"]["pwr_out_max_watts"])
+    body["res"]["pwr_out_max_watts"] = min(pwr, edrv_max)
+    return alt.Locomotive.from_pydict(d)
+
+
 def build_locomotive(powertrain: str, battery_mwh: Optional[float]) -> alt.Locomotive:
     """The Rust locomotive for one powertrain level.
 
@@ -228,7 +331,15 @@ def build_locomotive(powertrain: str, battery_mwh: Optional[float]) -> alt.Locom
     if powertrain == "diesel":
         loco = alt.Locomotive.default()
     elif powertrain == "hybrid":
-        loco = alt.Locomotive.default_hybrid_electric_loco()
+        # The library's default hybrid carries HALF the conventional unit's
+        # engine (1,678 vs 3,356 kW) with a ~1.1 MW battery beside it, so at
+        # equal consist size a hybrid train had half the sustained power once
+        # the pack hit its floor: 2-9 h slower at the median, and slow enough
+        # to double meet-pass delay on the busy corridors. This study's hybrid
+        # is the diesel-electric being modelled PLUS a battery, so it takes
+        # that locomotive's fuel converter whole.
+        loco = with_fuel_converter_of(
+            alt.Locomotive.default_hybrid_electric_loco(), alt.Locomotive.default())
     elif powertrain == "catenary_bel":
         # Pantograph power and pack size match the catenary analysis this arm
         # replicates, so its cells stay comparable with that study.
@@ -241,9 +352,12 @@ def build_locomotive(powertrain: str, battery_mwh: Optional[float]) -> alt.Locom
     else:
         raise ValueError(f"unknown powertrain {powertrain!r}")
 
+    # Whether the wire takes braking energy back (policy, not per-cell factor).
+    loco = catenary_policy.apply_to_locomotive(loco)
     loco.set_force_max_pounds(FORCE_MAX_POUNDS, "UpdateMu")
     if battery_mwh is not None:
         loco = set_battery_capacity(loco, float(battery_mwh))
+        loco = set_battery_power_from_c_rate(loco, HYBRID_PACK_C_RATE)
         loco.set_force_max_pounds(FORCE_MAX_POUNDS, "UpdateMu")
     return loco
 
@@ -251,31 +365,57 @@ def build_locomotive(powertrain: str, battery_mwh: Optional[float]) -> alt.Locom
 def planner_config_for(
     powertrain: str, battery_mwh: Optional[float]
 ) -> planner_config.TrainPlannerConfig:
-    """Planner config whose single locomotive type carries this powertrain."""
+    """Planner config whose locomotive types cover this powertrain.
+
+    One type for every arm but battery-electric, which also carries a
+    conventional `HELPER_LOCO_TYPE`. The pool is keyed by `Locomotive_Type`, and
+    a consist plan may name either, so a mixed consist needs nothing more than
+    the second row here plus the right value in the plan.
+    """
     fuel = "Electricity" if powertrain == "catenary_bel" else "Diesel"
+    types = {
+        PLAN_LOCO_TYPE: {
+            "Fuel_Type": fuel,
+            "Min_Servicing_Time_Hr": 3.0,
+            "Rust_Loco": build_locomotive(powertrain, battery_mwh),
+            "Cost_USD": alt.defaults.DIESEL_LOCO_COST_USD,
+            "Lifespan_Years": alt.defaults.LOCO_LIFESPAN,
+        }
+    }
+    if powertrain == "catenary_bel":
+        types[HELPER_LOCO_TYPE] = {
+            "Fuel_Type": "Diesel",
+            "Min_Servicing_Time_Hr": 3.0,
+            "Rust_Loco": build_locomotive("diesel", None),
+            "Cost_USD": alt.defaults.DIESEL_LOCO_COST_USD,
+            "Lifespan_Years": alt.defaults.LOCO_LIFESPAN,
+        }
     config = planner_config.TrainPlannerConfig(
-        loco_info=pd.DataFrame(
-            {
-                PLAN_LOCO_TYPE: {
-                    "Fuel_Type": fuel,
-                    "Min_Servicing_Time_Hr": 3.0,
-                    "Rust_Loco": build_locomotive(powertrain, battery_mwh),
-                    "Cost_USD": alt.defaults.DIESEL_LOCO_COST_USD,
-                    "Lifespan_Years": alt.defaults.LOCO_LIFESPAN,
-                }
-            }
-        )
-        .transpose()
-        .reset_index(names="Locomotive_Type")
+        loco_info=pd.DataFrame(types).transpose().reset_index(
+            names="Locomotive_Type")
     )
-    refueler_type = "Diesel_Fueler" if fuel == "Diesel" else "BEL_Charger"
-    refuelers = config.refueler_info[
-        config.refueler_info["Refueler_Type"] == refueler_type
-    ].copy()
-    if refuelers.empty:  # fall back rather than hand the planner an empty pool
-        refuelers = config.refueler_info.head(1).copy()
-    refuelers["Locomotive_Type"] = PLAN_LOCO_TYPE
-    config.refueler_info.update(refuelers)
+    # One refueler row per LOCOMOTIVE TYPE in the pool. `build_refuelers` left-
+    # joins `refueler_info` on (Locomotive_Type, Fuel_Type), so a type with no
+    # row joins to null, and the null lands in a Series that polars then tries to
+    # cast to Categorical -- "cannot cast 'Object' type", raised two modules away
+    # from the actual omission. Assigned rather than `update`d: `update` aligns
+    # on the DataFrame index, so a row count that differs from the default two
+    # silently keeps stale defaults.
+    wanted = [(PLAN_LOCO_TYPE, fuel)]
+    if HELPER_LOCO_TYPE in set(types):
+        wanted.append((HELPER_LOCO_TYPE, "Diesel"))
+    rows = []
+    for loco_type, fuel_type in wanted:
+        template = config.refueler_info[
+            config.refueler_info["Fuel_Type"] == fuel_type
+        ]
+        if template.empty:  # fall back rather than hand the planner nothing
+            template = config.refueler_info.head(1)
+        row = template.head(1).copy()
+        row["Locomotive_Type"] = loco_type
+        row["Fuel_Type"] = fuel_type
+        rows.append(row)
+    config.refueler_info = pd.concat(rows, ignore_index=True)
     return config
 
 
@@ -407,6 +547,61 @@ def _stop_row(sim_key, train_idx, duration_s, energy_j, terminal):
     }
 
 
+def span_travel_hours(sims, corridor) -> Optional[float]:
+    """Median simulated time across the corridor's WIDEST observed sensor pair.
+
+    The counterpart to `observed_span_median_hr` in `corridor_meta`: the same
+    two points on the same corridor, so the difference between them is a
+    like-for-like measure of stationary time the simulation does not reproduce.
+    Measured on the span and never scaled to the full corridor -- the
+    unobserved remainder is precisely where there is no basis for assuming the
+    observed behaviour continues, and on Spokane-Lethbridge it demonstrably
+    does not, since the queue forms outside the sensor envelope.
+
+    Each train's crossing time is interpolated from `offset_meters`, which the
+    history spec already keeps. Reverse-direction trains are measured between
+    the mirrored offsets, so both directions cover the same physical track.
+    """
+    try:
+        sensors = pl.read_csv(corridor.sensors_path).sort("corridor_km")
+    except Exception:
+        return None
+    if sensors.height < 2:
+        return None
+    lo_km = float(sensors["corridor_km"][0])
+    hi_km = float(sensors["corridor_km"][-1])
+
+    def crossing(times, offsets, target):
+        for i in range(len(offsets) - 1):
+            if offsets[i] <= target <= offsets[i + 1]:
+                if offsets[i + 1] == offsets[i]:
+                    return times[i]
+                frac = (target - offsets[i]) / (offsets[i + 1] - offsets[i])
+                return times[i] + frac * (times[i + 1] - times[i])
+        return None
+
+    hours = []
+    for slts in sims.to_pydict():
+        hist = slts["history"]
+        t = hist.get("time_seconds") or []
+        off = hist.get("offset_meters") or []
+        if len(t) < 2 or len(off) < 2:
+            continue
+        t = [x / 3600.0 for x in t]
+        off = [x / 1000.0 for x in off]
+        total = off[-1]
+        # Forward trains pass lo then hi; reverse trains cover the same track
+        # between the mirrored offsets. Take whichever ordering resolves.
+        for a, b in ((lo_km, hi_km), (total - hi_km, total - lo_km)):
+            ta, tb = crossing(t, off, a), crossing(t, off, b)
+            if ta is not None and tb is not None and tb > ta:
+                hours.append(tb - ta)
+                break
+    if not hours:
+        return None
+    return float(pl.Series(hours).median())
+
+
 def stop_events(sims, sim_key: str) -> pl.DataFrame:
     """Every stop a train made, with its duration and the fuel burned during it.
 
@@ -496,21 +691,174 @@ def scenario_frame(row: dict) -> pl.DataFrame:
     )
 
 
-def run_simulation(row: dict, plan: pl.DataFrame):
-    """One simulation cell: returns ``(metrics, stop_events, consist_plan)``."""
-    corridor = CORRIDORS[row["Corridor"]]
-    config = planner_config_for(row["Powertrain"], row["Battery_MWh"])
-    network = network_for(row)
-    location_map = alt.import_locations(str(NETWORKS / corridor.locations))
+def _train_sim_for(row: dict, n_helpers: int, rail_vehicles, location_map):
+    """One plan train, built the way the planner builds it.
 
+    Mass and length are scaled to the plan's observed figures first. Without
+    that the feasibility test is run on a train far lighter and faster than the
+    one the sweep simulates, and every train looks feasible.
+    """
+    car_type = rail_vehicles[0].to_pydict()["car_type"]
+    n_cars = {car_type: int(row.get("Cars_Loaded") or 0)
+                        + int(row.get("Cars_Empty") or 0)}
+    n_locos = int(row["_n_locos"])
+    helpers = min(max(n_helpers, 0), n_locos)
+    locos = ([build_locomotive("diesel", None)] * helpers
+             + [build_locomotive("catenary_bel", None)] * (n_locos - helpers))
+    rv = data_prep.scale_rv_mass_and_length(
+        [rail_vehicles[0]], n_cars, locos,
+        float(row["Train_Weight_tons"]) * alt.utilities.KG_PER_TON,
+        float(row["Train_Length_meters"]),
+    )
+    rv = data_prep.raise_rv_speed_max(
+        rv, row.get("Train_Speed_Max_Meters_Per_Second"))
+    tsb = alt.TrainSimBuilder(
+        train_id=str(row["Train_ID"]),
+        origin_id=row["Origin_ID"],
+        destination_id=row["Destination_ID"],
+        train_config=alt.TrainConfig(rail_vehicles=rv, n_cars_by_type=n_cars,
+                                     train_type=alt.TrainType.Freight),
+        loco_con=alt.Consist(locos),
+    )
+    return tsb.make_speed_limit_train_sim(location_map=location_map,
+                                          save_interval=None)
+
+
+def _min_soc(consist) -> float:
+    """Lowest battery state of charge left in a consist after a test run.
+
+    `make_est_times` returns the evolved consist, so the margin a train finished
+    with costs nothing extra to read -- no second simulation and no history.
+    A consist with no battery returns 1.0, which never triggers escalation.
+    """
+    socs = []
+    for loco in consist.to_pydict()["loco_vec"]:
+        loco_type = loco["loco_type"]
+        inner = loco_type[next(iter(loco_type))]
+        res = inner.get("res") if isinstance(inner, dict) else None
+        if res:
+            socs.append(float(res["state"]["soc"]))
+    return min(socs) if socs else 1.0
+
+def _helper_cache_path(plan: pl.DataFrame, row: dict) -> Path:
+    """Cache key over everything the assignment depends on."""
+    h = hashlib.sha1()
+    h.update(plan.write_csv().encode("utf-8"))
+    h.update(str(row.get("Layout_Fingerprint")).encode("utf-8"))
+    h.update(str(row.get("Network_Path")).encode("utf-8"))
+    return HELPERS_DIR / (h.hexdigest()[:16] + ".json")
+
+
+def _base_helper_pass(plan, row, network, location_map, cache):
+    """Fewest helpers each train needs to cross free-running, and its margin.
+
+    One entry per train: the smallest number of conventional units that lets a
+    free-running `make_est_times` complete, and the lowest battery state of
+    charge the consist finished that run with. The margin is what escalation
+    ranks by later, and it costs nothing extra -- `make_est_times` returns the
+    evolved consist.
+    """
+    if cache.exists():
+        logger.info("  helper base pass: reusing %s", cache.name)
+        return {int(k): tuple(v) for k, v in
+                json.loads(cache.read_text(encoding="utf-8")).items()}
+    trains = (
+        plan.group_by("Train_ID")
+        .agg(pl.len().alias("_n_locos"), pl.all().first())
+        .sort("Train_ID")
+    )
+    rail_vehicles = load_rail_vehicles()
+    base, started = {}, time.perf_counter()
+    for rec in trains.to_dicts():
+        n_locos = int(rec["_n_locos"])
+        for k in range(n_locos):  # 0 helpers first, then escalate
+            try:
+                _etn, consist = alt.make_est_times(
+                    _train_sim_for(rec, k, rail_vehicles, location_map), network)
+                base[int(rec["Train_ID"])] = (k, _min_soc(consist))
+                break
+            except Exception:  # noqa: BLE001 - infeasible, try one more unit
+                continue
+        else:
+            # No helper count crossed. Record the MOST help available rather
+            # than none: falling through to zero is the worst answer, not a
+            # conservative one, and that is what an earlier version did.
+            logger.error("  train %s could not cross with any helper count",
+                         rec["Train_ID"])
+            base[int(rec["Train_ID"])] = (n_locos - 1, 0.0)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({str(k): list(v) for k, v in base.items()}),
+                     encoding="utf-8")
+    logger.info("  helper base pass: %d of %d trains need help (%d units) "
+                "in %.0f s", sum(1 for k, _ in base.values() if k), len(base),
+                sum(k for k, _ in base.values()), time.perf_counter() - started)
+    return base
+
+
+def assign_diesel_helpers(plan: pl.DataFrame, row: dict, network,
+                          location_map, extra_fraction: float) -> pl.DataFrame:
+    """Swap conventional units into the BEL consists that need them.
+
+    The catenary deep-dive escalates by RETRY: it dispatches one train at a
+    time, and on a pure-BEL failure re-runs that train with one more diesel unit
+    until it completes. The sweep cannot retry that way -- it dispatches the
+    whole plan in one call, which is what produces meet-pass -- so the decision
+    is made in advance on the same test the deep-dive's first attempt performs,
+    then widened at cell granularity if the dispatch still strands a train.
+
+    Trains that need help have their first `k` locomotive rows retyped, so the
+    plan carries the mixed consist and the pool builds it natively.
+    """
+    base = _base_helper_pass(plan, row, network, location_map,
+                             _helper_cache_path(plan, row))
+    n_by_train = dict(
+        plan.group_by("Train_ID").agg(pl.len().alias("n")).iter_rows()
+    )
+    assignment = {t: k for t, (k, _) in base.items() if k}
+    if extra_fraction > 0:
+        # Lowest finishing margin first: those are the trains dispatch is most
+        # likely to push past the floor.
+        ranked = sorted(base, key=lambda t: base[t][1])
+        for train in ranked[:int(round(extra_fraction * len(ranked)))]:
+            cap = max(int(n_by_train.get(train, 1)) - 1, 0)
+            assignment[train] = min(base[train][0] + 1, cap)
+        assignment = {t: k for t, k in assignment.items() if k}
+        logger.info("  escalated to fraction %.2f: %d of %d trains helped "
+                    "(%d units)", extra_fraction, len(assignment), len(base),
+                    sum(assignment.values()))
+    units = int(plan.height)
+    if sum(assignment.values()) > HELPER_MAX_SHARE * units:
+        raise RuntimeError(
+            f"battery-electric infeasible: {sum(assignment.values())} of {units} "
+            f"locomotive units would have to be diesel "
+            f"(>{HELPER_MAX_SHARE:.0%}), which is a diesel operation, not a "
+            f"battery-electric one")
+    if not assignment:
+        return plan
+    rank = pl.col("Locomotive_ID").rank("ordinal").over("Train_ID")
+    need = pl.col("Train_ID").replace_strict(assignment, default=0)
+    return plan.with_columns(
+        pl.when(rank <= need)
+        .then(pl.lit(HELPER_LOCO_TYPE))
+        .otherwise(pl.col("Locomotive_Type"))
+        .alias("Locomotive_Type")
+    )
+
+
+def _dispatch_and_walk(plan: pl.DataFrame, corridor, config, network, location_map):
+    """Dispatch and walk ONE sample: its own meet-pass problem, end to end.
+
+    Kept separate from `run_simulation` because a corridor whose calibrated
+    volume exceeds its stable traffic level is carried by SEVERAL samples,
+    and each has to be dispatched on its own. Merging them before dispatch
+    would assert exactly the congestion the split exists to avoid claiming.
+    """
     # Warm-up and cool-down traffic, so the measured week is not bounded by an
     # empty corridor at either end. Supplying a consist plan bypasses
     # sim_manager's own warm-start machinery -- it is gated on
     # `consist_plan_in is None` -- so the window is built here and passed
     # explicitly.
     plan, window = extend_plan(plan, WARMUP_DAYS, COOLDOWN_DAYS)
-
-    started = time.perf_counter()
     (
         train_consist_plan,
         loco_pool,
@@ -539,6 +887,113 @@ def run_simulation(row: dict, plan: pl.DataFrame):
         measure_window_hr=window,
         debug=False,
     )
+    return {
+        "consist_plan": train_consist_plan,
+        "loco_pool": loco_pool,
+        "refuel_facilities": refuel_facilities,
+        "grid_emissions_factors": grid_emissions_factors,
+        "nodal_energy_prices": nodal_energy_prices,
+        "sims": sims,
+    }
+
+
+# Samples are independent draws from the same trip population and each numbers
+# its trains and locomotives from 1, so their IDs collide. Offsetting by a
+# stride wider than any plan's ID range keeps them distinct through the joins
+# `metric_calculator` makes between the consist plan, the locomotive pool and
+# the sim vector -- without it, sample 2's train 7 would be matched against
+# sample 1's locomotives.
+_SAMPLE_ID_STRIDE = 1_000_000
+
+
+def _merge_sample_runs(parts: List[dict]) -> dict:
+    """Combine independently dispatched samples into one corridor-week.
+
+    The samples are NOT merged before dispatch: no train in one ever met a
+    train in another. That carries the corridor's full volume into energy,
+    emissions, cost and fleet count while UNDERSTATING congestion, which is
+    the honest direction to err -- the alternative, dispatching the whole
+    volume as one problem, is a queue that never clears and travel times that
+    mean nothing. See `stable_weekly_count` in `railstate_corridor.py`.
+
+    Merging here rather than summing metrics afterwards is deliberate:
+    `metric_calculator` then does its own aggregation over the combined week,
+    so ratios like `Energy_Per_Freight_Moved` come out as the corridor ratio
+    rather than an average of per-sample ratios, and nothing downstream needs
+    to know the split happened.
+    """
+    if len(parts) == 1:
+        return parts[0]
+    plans, pools, sim_dicts = [], [], []
+    for k, part in enumerate(parts):
+        offset = k * _SAMPLE_ID_STRIDE
+        part_sims = part["sims"].to_pydict()
+        plans.append(part["consist_plan"].with_columns(
+            (pl.col("Train_ID") + offset).alias("Train_ID"),
+            (pl.col("Locomotive_ID") + offset).alias("Locomotive_ID"),
+            # Positional, not an ID: it indexes the concatenated vector, so it
+            # shifts by how many sims the earlier samples contributed.
+            (pl.col("TrainSimVec_Index") + len(sim_dicts))
+            .alias("TrainSimVec_Index"),
+        ))
+        pools.append(part["loco_pool"].with_columns(
+            (pl.col("Locomotive_ID") + offset).alias("Locomotive_ID")))
+        sim_dicts.extend(part_sims)
+    merged = dict(parts[0])
+    merged["consist_plan"] = pl.concat(plans, how="diagonal_relaxed")
+    merged["loco_pool"] = pl.concat(pools, how="diagonal_relaxed")
+    merged["sims"] = alt.SpeedLimitTrainSimVec.from_pydict(sim_dicts)
+    return merged
+
+
+def run_simulation(row: dict, plans):
+    """One simulation cell: returns ``(metrics, stop_events, consist_plan)``.
+
+    ``plans`` is one consist plan per sample -- a single frame is accepted and
+    treated as one sample, which is what every corridor whose volume fits
+    under its stable level uses.
+    """
+    corridor = CORRIDORS[row["Corridor"]]
+    config = planner_config_for(row["Powertrain"], row["Battery_MWh"])
+    network = network_for(row)
+    location_map = alt.import_locations(str(NETWORKS / corridor.locations))
+    if isinstance(plans, pl.DataFrame):
+        plans = [plans]
+
+    started = time.perf_counter()
+    # Battery-electric only: every other arm runs one locomotive type, so there
+    # is nothing to escalate and the ladder collapses to a single pass.
+    ladder = (HELPER_ESCALATION_FRACTIONS if row["Powertrain"] == "catenary_bel"
+              else (None,))
+    parts = None
+    for attempt, fraction in enumerate(ladder, start=1):
+        staged = plans if fraction is None else [
+            assign_diesel_helpers(p, row, network, location_map, fraction)
+            for p in plans
+        ]
+        try:
+            parts = []
+            for k, plan in enumerate(staged, start=1):
+                if len(staged) > 1:
+                    logger.info("  sample %d of %d: %d trains", k, len(staged),
+                                plan["Train_ID"].n_unique())
+                parts.append(_dispatch_and_walk(plan, corridor, config, network,
+                                                location_map))
+            break
+        except Exception as exc:  # noqa: BLE001 - escalate and try again
+            if attempt >= len(ladder):
+                raise
+            logger.warning(
+                "  a train stranded at escalation %.2f (%s); widening to %.2f",
+                fraction, str(exc).splitlines()[0][:80], ladder[attempt])
+            parts = None
+    merged = _merge_sample_runs(parts)
+    train_consist_plan = merged["consist_plan"]
+    loco_pool = merged["loco_pool"]
+    refuel_facilities = merged["refuel_facilities"]
+    grid_emissions_factors = merged["grid_emissions_factors"]
+    nodal_energy_prices = merged["nodal_energy_prices"]
+    sims = merged["sims"]
 
     # Consequence of walking internally: no refuel sessions are produced.
     # An EMPTY frame rather than None, deliberately: `calculate_ghg` contains
@@ -612,14 +1067,28 @@ def run_simulation(row: dict, plan: pl.DataFrame):
     # so a fully electrified corridor reports zero electricity consumed while
     # correctly reporting its resistive losses. `_sim_catenary_joules_for` has
     # the number; this puts it where the cost and GHG arithmetic can see it.
-    pantograph_j, line_loss_j = metric_calculator._sim_catenary_joules_for(info)
+    pantograph_j, regen_j, line_loss_j = metric_calculator._sim_catenary_energy_for(info)
+    grid_draw_j, grid_return_j = catenary_policy.grid_flows(pantograph_j, regen_j, line_loss_j)
+    # Simulated time over the observed sensor span, for the idle band. Paired
+    # downstream with `observed_span_median_hr`: their difference is stationary
+    # time a real train spent that the model never produced, and it bounds the
+    # anti-idling opportunity from above.
+    span_hr = span_travel_hours(sims, corridor)
     catenary_rows = [
         ("Catenary_Pantograph_Energy", "MJ", pantograph_j / 1e6),
+        ("Catenary_Regen_Energy", "MJ", regen_j / 1e6),
         ("Catenary_Line_Loss", "MJ", line_loss_j / 1e6),
-        # What the substation must supply: delivered plus resistive loss. This
-        # is the quantity to price and to charge grid emissions against.
-        ("Catenary_Grid_Draw", "MJ", (pantograph_j + line_loss_j) / 1e6),
+        # What the substation must supply: gross draw plus the line loss on the
+        # way in. Priced in full and charged grid emissions in full.
+        ("Catenary_Grid_Draw", "MJ", grid_draw_j / 1e6),
+        # What the substation receives back under a receptive wire: returned
+        # energy minus the line loss on the way out. Zero when
+        # `catenary_policy.RECEPTIVE` is off. Credits emissions in full and
+        # cost at `catenary_policy.EXPORT_CREDIT_FRACTION` (post-processing).
+        ("Catenary_Grid_Return", "MJ", grid_return_j / 1e6),
     ]
+    if span_hr is not None:
+        catenary_rows.append(("Span_Travel_Time", "hours", span_hr))
     metrics = pl.concat(
         [
             metrics,
@@ -663,11 +1132,66 @@ def run_simulation(row: dict, plan: pl.DataFrame):
     )
     meta = scenario_frame(row)
     events = stop_events(sims, row["Sim_Key"])
+    # The walked sims, loco pool and catenary draw go back to the caller so
+    # they can be PERSISTED: the multi-year discounted-cost rollout runs as a
+    # separate stage over saved sims, so the economics can be re-run and
+    # re-priced without re-simulating. Grid regions come from the emissions
+    # factors sim_manager resolved for this corridor's locations.
+    regions = (sorted(grid_emissions_factors["Node"].unique().to_list())
+               if grid_emissions_factors is not None
+               and "Node" in grid_emissions_factors.columns else [])
+    sidecar = {
+        "sims": sims,
+        "loco_pool": loco_pool,
+        "pantograph_j": float(pantograph_j),
+        "regen_j": float(regen_j),
+        "line_loss_j": float(line_loss_j),
+        "grid_draw_j": float(grid_draw_j),
+        "grid_return_j": float(grid_return_j),
+        "grid_regions": regions,
+        "n_trains": int(train_consist_plan["Train_ID"].n_unique()),
+    }
     return (
         meta.join(metrics, how="cross"),
         meta.join(events.drop("Sim_Key"), how="cross") if events.height else events,
         meta.join(train_consist_plan, how="cross"),
+        sidecar,
     )
+
+
+def _inputs_fingerprint(row: dict) -> str:
+    """Hash of everything one cell's result depends on.
+
+    `--skip-existing` used to trust the mere presence of an output file. That
+    silently reused results computed against a DIFFERENT consist plan twice in
+    this project -- once an 88-train plan after the corridor had been resized to
+    52 -- and the failure is invisible: a stale result and a fresh one differ in
+    no way a filename can express, and every number downstream still looks
+    plausible. So the check is on content: the plan samples, the corridor
+    metadata that carries the speed cap and sample count, the optimized layout
+    where there is one, and the experiment row itself.
+    """
+    corridor = CORRIDORS[row["Corridor"]]
+    h = hashlib.sha1()
+    for path in corridor.sample_plan_paths:
+        h.update(Path(path).read_bytes())
+    if corridor.meta_path.exists():
+        h.update(corridor.meta_path.read_bytes())
+    fingerprint = row.get("Layout_Fingerprint") or "nobuild"
+    if fingerprint not in ("nobuild", "na", None):
+        layout = LAYOUTS / (str(fingerprint) + ".msgpack")
+        if layout.exists():
+            h.update(layout.read_bytes())
+    for key in ("Sim_Key", "Corridor", "Powertrain", "Battery_MWh",
+                "Architecture", "Layout_Fingerprint"):
+        h.update(str(row.get(key)).encode("utf-8"))
+    # The locomotive itself: a redefined powertrain (the hybrid's engine was
+    # doubled once) must invalidate the cells that used the old one, and a
+    # powertrain name cannot express that.
+    loco = build_locomotive(row["Powertrain"], row.get("Battery_MWh"))
+    h.update(json.dumps(_strip_history(loco.to_pydict()), sort_keys=True,
+                        default=str).encode("utf-8"))
+    return h.hexdigest()
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -762,41 +1286,66 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     stops: List[pl.DataFrame] = []
     out_plans: List[pl.DataFrame] = []
     failures: Dict[str, str] = {}
-    plans: Dict[str, pl.DataFrame] = {}
+    plans: Dict[str, List[pl.DataFrame]] = {}
 
     for row in sims.iter_rows(named=True):
         slug = row["Corridor"]
         if slug not in plans:
-            plan = pl.read_csv(CORRIDORS[slug].plan_path)
-            if args.max_trains:
-                keep = plan["Train_ID"].unique().sort()[: args.max_trains]
-                plan = plan.filter(pl.col("Train_ID").is_in(keep))
-                logger.warning(
-                    "SMOKE TEST: %s capped to %d trains -- results are not the "
-                    "calibrated traffic level", slug, plan["Train_ID"].n_unique()
-                )
-            logger.info(
-                "%s plan: %d trains, %d locomotive rows, from %s",
-                slug, plan["Train_ID"].n_unique(), plan.height,
-                CORRIDORS[slug].plan_path.name,
-            )
-            plans[slug] = plan
+            loaded = []
+            for path in CORRIDORS[slug].sample_plan_paths:
+                plan = pl.read_csv(path)
+                if args.max_trains:
+                    keep = plan["Train_ID"].unique().sort()[: args.max_trains]
+                    plan = plan.filter(pl.col("Train_ID").is_in(keep))
+                    logger.warning(
+                        "SMOKE TEST: %s capped to %d trains -- results are not "
+                        "the calibrated traffic level", slug,
+                        plan["Train_ID"].n_unique())
+                logger.info(
+                    "%s plan: %d trains, %d locomotive rows, from %s",
+                    slug, plan["Train_ID"].n_unique(), plan.height, path.name)
+                loaded.append(plan)
+            if len(loaded) > 1:
+                logger.info(
+                    "%s: %d samples, %d trains total -- dispatched as separate "
+                    "meet-pass problems, merged for metrics", slug, len(loaded),
+                    sum(f["Train_ID"].n_unique() for f in loaded))
+            plans[slug] = loaded
         safe = row["Sim_Key"].replace("|", "__").replace(".", "p")
         metrics_path = args.per_sim_dir / f"{safe}_metrics.csv"
-        if args.skip_existing and metrics_path.exists():
-            logger.info("skipping %s (already done)", row["Sim_Key"])
-            continue
+        stamp_path = args.per_sim_dir / (safe + "_inputs.txt")
+        stamp = _inputs_fingerprint(row)
+        # A cell is only done if its sims bundle exists too; the rollout stage
+        # needs it, and earlier sweeps never wrote one.
+        bundle_path = args.per_sim_dir / f"{safe}_sims.msgpack"
+        if args.skip_existing and metrics_path.exists() and bundle_path.exists():
+            prior = (stamp_path.read_text(encoding="utf-8").strip()
+                     if stamp_path.exists() else "")
+            if prior == stamp:
+                logger.info("skipping %s (already done)", row["Sim_Key"])
+                continue
+            logger.warning(
+                "  re-running %s: its inputs changed since that output was "
+                "written", row["Sim_Key"])
         logger.info("=== %s ===", row["Sim_Key"])
         try:
-            metrics, events, consist_plan = run_simulation(row, plans[slug])
+            metrics, events, consist_plan, sidecar = run_simulation(row, plans[slug])
         except Exception as exc:  # noqa: BLE001 - one cell failing is not fatal
             logger.exception("  FAILED: %s", str(exc)[:200])
             failures[row["Sim_Key"]] = str(exc)[:200]
             continue
         metrics.write_csv(metrics_path)
+        stamp_path.write_text(stamp, encoding="utf-8")
         if events.height:
             events.write_csv(args.per_sim_dir / f"{safe}_stops.csv")
         consist_plan.write_csv(args.per_sim_dir / f"{safe}_plan.csv")
+        # Persist the walked sims for the rollout stage. Small, because the
+        # history spec already trimmed them to the vectors the study reads.
+        sidecar["sims"].to_file(str(args.per_sim_dir / f"{safe}_sims.msgpack"))
+        sidecar["loco_pool"].write_csv(args.per_sim_dir / f"{safe}_loco_pool.csv")
+        (args.per_sim_dir / f"{safe}_sidecar.json").write_text(json.dumps({
+            k: v for k, v in sidecar.items() if k not in ("sims", "loco_pool")
+        }), encoding="utf-8")
         results.append(metrics)
         if events.height:
             stops.append(events)

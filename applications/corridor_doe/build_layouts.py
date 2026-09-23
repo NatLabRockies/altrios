@@ -65,9 +65,14 @@ import polars as pl
 HERE = Path(__file__).parent
 LAYOUTS = HERE / "out" / "layouts"
 CATENARY_DIR = HERE.parent / "catenary_optimization"
-PLAN_PATH = (
-    HERE.parent / "corridor_inputs" / "train_consist_plan_spokane_lethbridge_clean.csv"
-)
+sys.path.insert(0, str(HERE.parent))
+from speed_calibration import CORRIDORS  # noqa: E402
+
+# Every sample the corridor's traffic is carried by, not just the first.
+# Spokane-Lethbridge's calibrated volume exceeds the level at which its trip
+# times settle, so it is two independent weeks; optimizing the buildout
+# against one of them would size substations for half the corridor's energy.
+PLAN_PATHS = tuple(CORRIDORS["spokane_lethbridge"].sample_plan_paths)
 
 # Drive the catenary app's speed calibration to the DoE's rule before importing
 # it: a hard cap at the corridor's observed p99, no legacy scaler. The first
@@ -79,14 +84,16 @@ os.environ.setdefault("ALTRIOS_SPEED_SCALER", "none")
 
 sys.path.insert(0, str(CATENARY_DIR))
 
+import altrios as alt  # noqa: E402
 from altrios import energization as en  # noqa: E402
 from altrios.optimization import energization_placement as cp  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-# Harmonized base prices: the same EIA AEO figures postprocess_antiidling uses.
-DIESEL_USD_PER_GALLON = 3.65
-ELECTRICITY_USD_PER_KWH = 0.091
+# Energy prices come from the catenary app's zone functions (levelized over the
+# project lifespan, electricity per link from its price zone, diesel as the
+# terminal-zone mean) -- the same basis the deep-dive optimizes and the DoE rollout
+# prices on. See `cat.levelized_diesel_price` / `cat.levelized_elec_price_by_link`.
 
 MIN_ENERGIZED_LENGTH_MILES = 5.0
 
@@ -99,17 +106,22 @@ def _cost_levels() -> Tuple[pl.DataFrame, pl.DataFrame]:
     return infra, energy
 
 
-def trains_per_day(plan_path: Path, plan_days: float = 7.0) -> float:
-    """Traffic level from this DoE's own consist plan, not the app's copy.
+def trains_per_day(plan_paths, plan_days: float = 7.0) -> float:
+    """Traffic level from this DoE's own consist plans, not the app's copy.
 
     The BEL opex model is per-train, so this has to describe the traffic the
     study actually simulates rather than whatever plan the catenary app ships.
+    Summed over samples: they are concurrent weeks of the same corridor, so
+    the trains that pass a point in a day is their total.
     """
-    return pl.read_csv(plan_path)["Train_ID"].n_unique() / plan_days
+    if isinstance(plan_paths, Path):
+        plan_paths = [plan_paths]
+    return sum(
+        pl.read_csv(p)["Train_ID"].n_unique() for p in plan_paths) / plan_days
 
 
-def prepare_app(plan_path: Path):
-    """Import the catenary app and point it at this DoE's consist plan.
+def prepare_app(plan_paths):
+    """Import the catenary app and point it at this DoE's consist plans.
 
     The app caches the first pass by a key that hashes the plan bytes and the
     speed calibration, so repointing it invalidates correctly rather than
@@ -117,12 +129,31 @@ def prepare_app(plan_path: Path):
     """
     import energization_optimization_corridor as cat
 
-    cat.CONSIST_PLAN_PATH = plan_path
-    cat._FULL_CONSIST_PLAN = None
-    cat._PLAN_SUMMARY = None
+    if isinstance(plan_paths, Path):
+        plan_paths = [plan_paths]
+    plan_paths = tuple(plan_paths)
+    # CONSIST_PLAN_PATHS (plural) is what the app actually reads: it carries
+    # one plan per sample. The DoE hands it every sample of ITS corridor and
+    # declares them all one demand level, since together they ARE the
+    # calibrated volume -- the app's own 1x/2x/4x sweep is a different
+    # question, asked of the deep-dive rather than of the layouts the main
+    # DoE is compared against. The scalar alias is repointed too: setting
+    # only it would leave the app reading its own samples.
+    cat.CONSIST_PLAN_PATHS = plan_paths
+    cat.CONSIST_PLAN_PATH = plan_paths[0]
+    # The DoE's wire policy governs the layouts too: the first-pass sims that
+    # feed the optimizer's opex densities regenerate (or not) the same way the
+    # sweep's cells do, so the buildout is chosen for the trains it will carry.
+    import catenary_policy
+    cat.CATENARY_RECEPTIVE = catenary_policy.RECEPTIVE
+    cat.CATENARY_EXPORT_CREDIT_FRACTION = catenary_policy.EXPORT_CREDIT_FRACTION
+    cat.DEMAND_LEVELS = {"1x": tuple(range(len(plan_paths)))}
+    cat._FULL_CONSIST_PLAN = {}
+    cat._PLAN_SUMMARY = {}
     logger.info(
-        "app speed calibration: cap=%s mph scaler=%s | plan=%s",
-        cat.SPEED_CALIBRATION_MAX_MPH, cat.SPEED_LIMIT_SCALER, plan_path.name,
+        "app speed calibration: cap=%s mph scaler=%s | %d sample(s): %s",
+        cat.SPEED_CALIBRATION_MAX_MPH, cat.SPEED_LIMIT_SCALER, len(plan_paths),
+        ", ".join(p.name for p in plan_paths),
     )
     return cat
 
@@ -148,12 +179,32 @@ def layout_fingerprint(result) -> str:
 def build_bel_layout(cat, arch, costs_row, densities, out_dir):
     """The battery-electric buildout for one architecture.
 
-    Optimized once, at the reference (med) cost point, under the battery-range
-    constraint: every unelectrified gap must be one the pack can cross. The cost
-    grid re-prices this layout rather than re-deriving it, so a BEL cell always
-    has wire under it.
+    Optimized at the reference (med) cost point under the battery-range
+    constraint, then REFINED the way the catenary deep-dive refines it: simulate
+    the fleet on the buildout, drop the links it never actually drew from, and
+    re-optimize against what is left. The cost grid re-prices the result rather
+    than re-deriving it, so a BEL cell always has wire under it.
+
+    The refinement is not a nicety. A single optimization pass put 196 track-
+    miles on this corridor arranged into eight long blocks with a 155-MILE
+    unelectrified gap, and 19 of 52 trains could not cross it on a charge. The
+    refined layout carries LESS wire -- 136 miles, longest gap 107 -- and
+    stranded none of the same trains, because the second pass moves wire to
+    where the fleet actually draws. It costs one full-plan simulation per
+    feedback round (`DIRECTION_EXCLUSION_MAX_ITERS`, currently 1).
     """
-    sug = en.suggest_optimization_inputs(arch)
+    # Substation SPACING is sized from a voltage-drop model at a DESIGN train
+    # power, and the library default is 10 MW -- far below what this corridor's
+    # consists actually draw. The deep-dive sizes it from the 95th-percentile
+    # consist instead, and taking the default here was the single biggest
+    # difference between the two: 4 substations rather than 6, feeds three
+    # times as resistive (median 3.20 vs 1.16 ohms to source), and barely half
+    # the delivered power (median 21.8 vs 46.0 MW per interval). A
+    # battery-electric locomotive charges from that wire, so half the power is
+    # half the charge rate, which is why the DoE's trains reached the long
+    # unelectrified stretches with too little in the pack.
+    sug = en.suggest_optimization_inputs(
+        arch, design_train_power_watts=cat._design_train_power_watts())
     _gal, kwh = densities
     costs = cp.EnergizationOptCosts(
         structure_cost_per_mile=float(costs_row["Structure_MUSD_Per_Route_Mi"]),
@@ -165,30 +216,39 @@ def build_bel_layout(cat, arch, costs_row, densities, out_dir):
         discount_rate=cat.DISCOUNT_RATE,
     )
     drain = cat.bel_drain_by_link(kwh)
-    tpd = trains_per_day(PLAN_PATH)
+    tpd = trains_per_day(PLAN_PATHS)
     started = time.perf_counter()
-    result = cat.run_opt(
+    # `optimize_and_sim` returns the refined result first; the rest of its
+    # tuple (network, energy, exclusion, meta, substations, region fractions)
+    # belongs to the deep-dive's reporting and `_finalize` rebuilds what it
+    # needs from the result itself.
+    result = cat.optimize_and_sim(
         f"doe/{arch}/bel",
-        objective="min_cost",
-        economics=econ,
-        substation_feed_distance_miles=sug.substation_feed_distance_miles,
-        costs=costs,
-        piece_opex_fn=cat.build_bel_opex_fn(tpd, ELECTRICITY_USD_PER_KWH),
-        max_energized_gap_kwh=cat.BEL_MAX_GAP_KWH,
-        gap_energy_kwh_per_mile_by_link=drain,
-        charge_energy_kwh_per_mile_by_link=(
-            cat.bel_charge_by_link(drain)
-            if (cat.BEL_RECHARGE_TIER1 or cat.BEL_SOC_STATE_MODEL) else None
+        "battery_electric",
+        dict(
+            objective="min_cost",
+            economics=econ,
+            substation_feed_distance_miles=sug.substation_feed_distance_miles,
+            costs=costs,
+            piece_opex_fn=cat.build_bel_opex_fn(tpd, cat.levelized_elec_price_by_link()),
+            max_energized_gap_kwh=cat.BEL_MAX_GAP_KWH,
+            gap_energy_kwh_per_mile_by_link=drain,
+            charge_energy_kwh_per_mile_by_link=(
+                cat.bel_charge_by_link(drain)
+                if (cat.BEL_RECHARGE_TIER1 or cat.BEL_SOC_STATE_MODEL) else None
+            ),
+            regen_energy_kwh_per_mile_by_link=cat.bel_regen_by_link(drain),
+            battery_soc_state_model=cat.BEL_SOC_STATE_MODEL,
+            min_energized_length_miles=(
+                5.0 if cat.BEL_SOC_STATE_MODEL
+                else max(5.0, cat.BEL_RECHARGE_MILES)
+            ),
+            warmstart=True,
+            **cat.COMMON,
         ),
-        regen_energy_kwh_per_mile_by_link=cat.bel_regen_by_link(drain),
-        battery_soc_state_model=cat.BEL_SOC_STATE_MODEL,
-        min_energized_length_miles=(
-            5.0 if cat.BEL_SOC_STATE_MODEL
-            else max(5.0, cat.BEL_RECHARGE_MILES)
-        ),
-        warmstart=True,
-        **cat.COMMON,
-    )
+        cat.DEMAND_LEVELS["1x"],
+        alt.import_locations(str(cat.SIM_LOCATIONS_CSV)),
+    )[0]
     row = {
         "Architecture": arch,
         "Powertrain": "catenary_bel",
@@ -207,7 +267,8 @@ def _finalize(cat, result, sug, row, out_dir):
     """Apply line losses, write the network, and record what was built."""
     if result is None or result.network is None:
         row.update(fingerprint=None, path=None, energized_track_miles=0.0,
-                   substations_built=0, capex_musd=0.0,
+                   structure_route_miles=0.0, substations_built=0,
+                   candidate_substations=0, capex_musd=0.0,
                    intervals_with_voltage=0, status="no layout")
         return row
     miles = float(getattr(result, "energized_track_miles", 0.0) or 0.0)
@@ -215,11 +276,16 @@ def _finalize(cat, result, sug, row, out_dir):
     row.update(
         fingerprint=fp,
         energized_track_miles=miles,
+        # Shared-structure route-miles, the basis the optimizer prices
+        # structure on (once per site, not per parallel track). Recorded so
+        # the rollout stage need not back it out of `capex_musd`.
+        structure_route_miles=getattr(result, "structure_route_miles", None),
         capex_musd=float(getattr(result, "total_cost", 0.0) or 0.0),
         status=str(getattr(result, "status", "")).split(".")[-1],
     )
     if miles <= 0.0:
-        row.update(path=None, substations_built=0, intervals_with_voltage=0)
+        row.update(path=None, substations_built=0, candidate_substations=0,
+                   intervals_with_voltage=0)
         return row
     path = out_dir / f"{fp}.msgpack"
     subs = cat._built_sub_objs(result)
@@ -239,13 +305,28 @@ def _finalize(cat, result, sug, row, out_dir):
         )
     else:
         row["intervals_with_voltage"] = -1
-    row.update(path=str(path), substations_built=len(subs))
+    # `substations_built` includes the corridor's pre-existing (free) feeds;
+    # `candidate_substations` is what the optimizer actually bought.
+    row.update(path=str(path), substations_built=len(subs),
+               candidate_substations=sum(
+                   1 for s in subs if not getattr(s, "existing", False)))
     return row
 
 
 def build_cell(cat, arch, costs_row, infra_row, energy_row, densities, out_dir):
     """Optimize one dual-mode (architecture, infra, energy) cell."""
-    sug = en.suggest_optimization_inputs(arch)
+    # Substation SPACING is sized from a voltage-drop model at a DESIGN train
+    # power, and the library default is 10 MW -- far below what this corridor's
+    # consists actually draw. The deep-dive sizes it from the 95th-percentile
+    # consist instead, and taking the default here was the single biggest
+    # difference between the two: 4 substations rather than 6, feeds three
+    # times as resistive (median 3.20 vs 1.16 ohms to source), and barely half
+    # the delivered power (median 21.8 vs 46.0 MW per interval). A
+    # battery-electric locomotive charges from that wire, so half the power is
+    # half the charge rate, which is why the DoE's trains reached the long
+    # unelectrified stretches with too little in the pack.
+    sug = en.suggest_optimization_inputs(
+        arch, design_train_power_watts=cat._design_train_power_watts())
     infra_mult = float(infra_row["Infra_Multiplier"])
     costs = cp.EnergizationOptCosts(
         structure_cost_per_mile=float(costs_row["Structure_MUSD_Per_Route_Mi"]) * infra_mult,
@@ -257,8 +338,8 @@ def build_cell(cat, arch, costs_row, infra_row, energy_row, densities, out_dir):
         project_lifespan_years=cat.PROJECT_LIFESPAN_YEARS,
         discount_rate=cat.DISCOUNT_RATE,
     )
-    diesel_price = DIESEL_USD_PER_GALLON * float(energy_row["Diesel_Multiplier"])
-    elec_price = ELECTRICITY_USD_PER_KWH * float(energy_row["Electricity_Multiplier"])
+    diesel_price = cat.levelized_diesel_price(float(energy_row["Diesel_Multiplier"]))
+    elec_price = cat.levelized_elec_price_by_link(float(energy_row["Electricity_Multiplier"]))
 
     started = time.perf_counter()
     result = cat.run_opt(
@@ -280,7 +361,8 @@ def build_cell(cat, arch, costs_row, infra_row, energy_row, densities, out_dir):
         "Infra_Level": infra_row["Infra_Level"],
         "Energy_Level": energy_row["Energy_Level"],
         "diesel_usd_per_gal": diesel_price,
-        "electricity_usd_per_kwh": elec_price,
+        # Track-length-weighted mean of the per-link zone prices, for the record.
+        "electricity_usd_per_kwh": cat.corridor_mean_elec_price(elec_price),
         "infra_multiplier": infra_mult,
         "feed_distance_miles": sug.substation_feed_distance_miles,
         "system_voltage_volts": sug.system_voltage_volts,
@@ -294,15 +376,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     parser.add_argument("--arch", action="append", default=[])
     parser.add_argument("--out-dir", type=Path, default=LAYOUTS)
-    parser.add_argument("--plan", type=Path, default=PLAN_PATH)
+    parser.add_argument("--plan", type=Path, default=None, help="override: use this ONE plan instead of the corridor's samples")
     parser.add_argument("--densities-only", action="store_true")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    cat = prepare_app(args.plan)
-    logger.info("first pass over the full consist plan (cached after the first run)")
-    densities = cat.first_pass_densities()
-    gal, kwh = densities
+    cat = prepare_app(args.plan or PLAN_PATHS)
+    samples = cat.DEMAND_LEVELS["1x"]
+    logger.info("first pass over %d consist-plan sample(s) (cached after the first run)", len(samples))
+    # One density pass per sample, added link by link: each sample is a full
+    # week over the same track, so the energy a link must carry is their sum.
+    # Averaging instead would size the buildout for half the corridor.
+    parts = [cat.first_pass_densities(s_) for s_ in samples]
+    gal = cat._sum_link_densities(part[0] for part in parts)
+    kwh = cat._sum_link_densities(part[1] for part in parts)
+    # The pair the per-cell builders take. Summed across samples FIRST:
+    # each builder sizes a buildout against the energy its links carry, and
+    # that is the whole corridor's traffic, not one sample's.
+    densities = (gal, kwh)
     import statistics as st
     logger.info(
         "sim-derived densities: diesel median %.0f gal/track-mi/yr (max %.0f), "
@@ -374,6 +465,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 built["fingerprint"].n_unique() if built.height else 0,
             )
         logger.info("wrote %s", args.out_dir / "layouts.csv")
+    if not rows:
+        # Every cell failing used to exit 0, so `run_overnight` moved on and the
+        # sweep simulated whatever layout files happened to be on disk -- built
+        # days earlier against a different consist plan. Four catenary cells
+        # "succeeded" that way against stale buildouts and two stranded their
+        # battery-electric trains mid-corridor, which looked like a physics
+        # result rather than the bug it was.
+        logger.error("no layouts were built -- refusing to report success")
+        return 1
     return 0
 
 

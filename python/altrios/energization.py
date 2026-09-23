@@ -764,12 +764,26 @@ def energize_optimized(
     )
 
 
+PriceByLink = Union[float, Dict[int, float]]
+
+
+def _price_lookup(price: "PriceByLink") -> Callable[[int], float]:
+    """``link_idx -> price`` for a scalar price or a per-link price map. A link
+    missing from the map takes the map's mean, so a partially mapped network
+    still prices every piece."""
+    if isinstance(price, dict):
+        default = (sum(price.values()) / len(price)) if price else 0.0
+        return lambda idx: float(price.get(idx, default))
+    value = float(price)
+    return lambda idx: value
+
+
 def make_piece_opex_fn(
     *,
     diesel_gallons_per_track_mile_by_link: Dict[int, float],
     electricity_kwh_per_track_mile_by_link: Dict[int, float],
-    diesel_price_usd_per_gallon: float,
-    electricity_price_usd_per_kwh: float,
+    diesel_price_usd_per_gallon: "PriceByLink",
+    electricity_price_usd_per_kwh: "PriceByLink",
     default_diesel_gallons_per_track_mile: float = 0.0,
     default_electricity_kwh_per_track_mile: float = 0.0,
 ) -> Callable[["PieceBenefitContext"], float]:
@@ -802,8 +816,9 @@ def make_piece_opex_fn(
     electricity_kwh_per_track_mile_by_link : dict[int, float]
         Annual grid-side electricity (kWh) purchased per track-mile, keyed by link
         index.
-    diesel_price_usd_per_gallon, electricity_price_usd_per_kwh : float
-        Fuel and electricity prices.
+    diesel_price_usd_per_gallon, electricity_price_usd_per_kwh : float or dict[int, float]
+        Fuel and electricity prices, either one corridor-wide value or a price per
+        link index (regional price zones); unmapped links take the map's mean.
     default_diesel_gallons_per_track_mile, default_electricity_kwh_per_track_mile : float
         Fallback densities for links absent from the maps (default 0).
 
@@ -812,6 +827,9 @@ def make_piece_opex_fn(
     callable
         ``PieceBenefitContext -> float`` annual net operating cost ($/yr).
     """
+    diesel_price = _price_lookup(diesel_price_usd_per_gallon)
+    elec_price = _price_lookup(electricity_price_usd_per_kwh)
+
     def _opex(ctx: "PieceBenefitContext") -> float:
         gal_per_mi = diesel_gallons_per_track_mile_by_link.get(
             ctx.link_idx, default_diesel_gallons_per_track_mile
@@ -821,7 +839,7 @@ def make_piece_opex_fn(
         )
         gallons = gal_per_mi * ctx.length_miles
         kwh = kwh_per_mi * ctx.length_miles
-        return electricity_price_usd_per_kwh * kwh - diesel_price_usd_per_gallon * gallons
+        return elec_price(ctx.link_idx) * kwh - diesel_price(ctx.link_idx) * gallons
 
     return _opex
 
@@ -829,7 +847,7 @@ def make_piece_opex_fn(
 def make_bel_piece_opex_fn(
     *,
     traction_kwh_per_track_mile_by_link: Dict[int, float],
-    electricity_price_usd_per_kwh: float,
+    electricity_price_usd_per_kwh: "PriceByLink",
     battery_roundtrip_efficiency: float,
     default_traction_kwh_per_track_mile: float = 0.0,
 ) -> Callable[["PieceBenefitContext"], float]:
@@ -861,8 +879,8 @@ def make_bel_piece_opex_fn(
         Annual traction (at-the-wheel) energy per track-mile, keyed by link index.
         Grade/speed/mass scaling and traffic assumptions live here, as in
         :func:`make_piece_opex_fn`.
-    electricity_price_usd_per_kwh : float
-        Grid electricity price.
+    electricity_price_usd_per_kwh : float or dict[int, float]
+        Grid electricity price, corridor-wide or per link index (price zones).
     battery_roundtrip_efficiency : float
         Pack charge->discharge round-trip efficiency ``eta_rt`` in ``(0, 1]``.
     default_traction_kwh_per_track_mile : float, default 0.0
@@ -877,13 +895,14 @@ def make_bel_piece_opex_fn(
     if not 0.0 < battery_roundtrip_efficiency <= 1.0:
         raise ValueError("battery_roundtrip_efficiency must be in (0, 1].")
     loss_factor = (1.0 / battery_roundtrip_efficiency) - 1.0
+    elec_price = _price_lookup(electricity_price_usd_per_kwh)
 
     def _opex(ctx: "PieceBenefitContext") -> float:
         kwh_per_mi = traction_kwh_per_track_mile_by_link.get(
             ctx.link_idx, default_traction_kwh_per_track_mile
         )
         e_p = kwh_per_mi * ctx.length_miles
-        return -electricity_price_usd_per_kwh * loss_factor * e_p
+        return -elec_price(ctx.link_idx) * loss_factor * e_p
 
     return _opex
 

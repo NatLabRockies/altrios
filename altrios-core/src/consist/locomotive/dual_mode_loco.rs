@@ -84,21 +84,36 @@ impl DualModeLoco {
             .pwr_elec_prop_in
             .get_fresh(|| format_dbg!())?;
 
+        // Tell the catenary the full electrical demand (propulsion + aux) so it
+        // can cover aux load with any surplus capacity, enabling the engine to
+        // shut off when catenary power is sufficient. During regeneration
+        // (`pwr_elec_prop_in < 0`, only possible under a receptive wire since
+        // that is the only regen sink this locomotive has) the sum nets the
+        // recovered power against aux first and returns the remainder.
         let cat_pwr_out = if let Some(cat_int) = self.cat_int.as_mut() {
-            // Tell the catenary the full electrical demand (propulsion + aux) so it
-            // can cover aux load with any surplus capacity, enabling the engine to
-            // shut off when catenary power is sufficient.
             cat_int.set_pwr_in_req(pwr_elec_prop_in + pwr_aux, dt)?;
             *cat_int.state.pwr_elec_out.get_fresh(|| format_dbg!())?
         } else {
             si::Power::ZERO
         };
 
-        // Catenary covers propulsion first, then aux with any remaining capacity.
-        let cat_to_prop = cat_pwr_out.min(pwr_elec_prop_in);
-        let cat_to_aux = cat_pwr_out - cat_to_prop;
-        let gen_prop_req = (pwr_elec_prop_in - cat_to_prop).max(si::Power::ZERO);
-        let gen_aux_req = (pwr_aux - cat_to_aux).max(si::Power::ZERO);
+        let (gen_prop_req, gen_aux_req) = if pwr_elec_prop_in >= si::Power::ZERO {
+            // Catenary covers propulsion first, then aux with any remaining capacity.
+            let cat_to_prop = cat_pwr_out.min(pwr_elec_prop_in);
+            let cat_to_aux = cat_pwr_out - cat_to_prop;
+            (
+                (pwr_elec_prop_in - cat_to_prop).max(si::Power::ZERO),
+                (pwr_aux - cat_to_aux).max(si::Power::ZERO),
+            )
+        } else {
+            // Regenerating: recovered power serves aux, the wire takes or gives
+            // the net, and the engine covers only aux the two cannot.
+            let net_req = pwr_elec_prop_in + pwr_aux;
+            (
+                si::Power::ZERO,
+                (net_req - cat_pwr_out).max(si::Power::ZERO),
+            )
+        };
 
         // Engine only needs to be on if the generator must supply non-zero power.
         let engine_on = loco_on && (gen_prop_req + gen_aux_req > si::Power::ZERO);
@@ -207,7 +222,15 @@ impl LocoTrait for DualModeLoco {
                 + cat_pwr_out_max,
             None,
         )?;
-        self.edrv.set_cur_pwr_regen_max(si::Power::ZERO)?;
+        // A dual-mode unit has no battery: its only regen sink is a receptive
+        // wire, and off the wire (or under a non-receptive one) braking energy
+        // goes to the dynamic-brake grids.
+        let receptive = self.cat_int.as_ref().map_or(false, |c| c.receptive);
+        self.edrv.set_cur_pwr_regen_max(if receptive {
+            cat_pwr_out_max
+        } else {
+            si::Power::ZERO
+        })?;
         self.gen
             .set_pwr_rate_out_max(self.fc.pwr_out_max / self.fc.pwr_ramp_lag)?;
         self.edrv.set_pwr_rate_out_max(

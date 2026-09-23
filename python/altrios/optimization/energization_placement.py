@@ -364,6 +364,12 @@ class EnergizationPlacementResult:
     total_cost: Optional[float] = None
     #: Total electrified track length (miles), summed across parallel tracks.
     energized_track_miles: Optional[float] = None
+    #: Shared-structure length (miles) actually charged: the along-track length of
+    #: every installed structure cell, counted ONCE however many parallel tracks
+    #: share it. This is the mileage ``structure_cost_per_mile`` multiplied, and the
+    #: right basis for any downstream capital accounting -- ``energized_track_miles``
+    #: over-charges structure on multi-track corridors.
+    structure_route_miles: Optional[float] = None
     #: Objective (priority-weighted energized miles in ``"max_benefit"`` mode, or
     #: lifecycle cost $ in ``"min_cost"`` mode).
     objective_value: Optional[float] = None
@@ -2062,6 +2068,7 @@ def extract_result(
         + sum(data.sub_cost[j] for j in built)
     )
     energized_track_miles = sum(data.piece_miles[p] for p in energized_pieces)
+    structure_route_miles = sum(data.cell_len_miles[c] for c in installed_cells)
     objective_value = float(pyo.value(model.obj))
 
     # Lifecycle economics (only meaningful in min-cost mode).
@@ -2110,6 +2117,7 @@ def extract_result(
         installed_structure_cell_ids=installed_cells,
         total_cost=total_cost,
         energized_track_miles=energized_track_miles,
+        structure_route_miles=structure_route_miles,
         objective_value=objective_value,
         annual_opex_cost=annual_opex_cost,
         discounted_opex_cost=discounted_opex_cost,

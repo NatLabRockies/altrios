@@ -1,0 +1,5 @@
+Zone,Electricity_Price_Region,Liquid_Fuel_Price_Region,Lat_Min,Lat_Max,Lon_Min,Lon_Max,Note
+WA,WA,PADD5_West_Coast_ex_CA,,,,-117.04,Washington: west of the WA/ID line (117.04 W)
+ID,ID,PADD4_Rocky_Mountain,,49.0,-117.04,,"Idaho panhandle: US side, south of 49 N (Eastport/Kingsgate crossing)"
+BC,BC,BC,49.0,,,-114.68,British Columbia: Kingsgate to Crowsnest Pass (114.68 W)
+AB,AB,AB,49.0,,-114.68,,Alberta: east of Crowsnest Pass to Lethbridge

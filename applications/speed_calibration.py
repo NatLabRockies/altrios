@@ -108,6 +108,39 @@ class Corridor:
     def meta_path(self) -> Path:
         return INPUTS / f"corridor_meta_{self.slug}.csv"
 
+    @property
+    def sample_plan_paths(self) -> List[Path]:
+        """Every consist plan that together make up one corridor-week.
+
+        Usually one. A corridor whose calibrated volume exceeds the traffic
+        level at which its trip times still settle is split into `n_samples`
+        independent weeks -- decided by `stable_weekly_count` in
+        `railstate_corridor.py`, recorded in `corridor_meta`, and written as
+        `sample2_...` beside the base plan. Each is dispatched as its own
+        meet-pass problem and they are merged only afterwards, which carries
+        the corridor's full volume while understating congestion rather than
+        asserting a queue that never clears.
+
+        A declared sample whose file is missing raises rather than silently
+        falling back to one: that would halve the corridor's freight, energy
+        and cost while every number downstream still looked plausible.
+        """
+        paths = [self.plan_path]
+        if self.plan_override is not None or not self.meta_path.exists():
+            return paths
+        meta = pl.read_csv(self.meta_path)
+        if "n_samples" not in meta.columns:
+            return paths
+        for k in range(2, int(meta["n_samples"][0]) + 1):
+            extra = self.plan_path.with_name(f"sample{k}_{self.plan_path.name}")
+            if not extra.exists():
+                raise FileNotFoundError(
+                    f"{self.slug} declares {meta['n_samples'][0]} traffic "
+                    f"samples but {extra.name} is missing -- regenerate the "
+                    f"corridor inputs with railstate_corridor.py --all")
+            paths.append(extra)
+        return paths
+
     def effective_cap(self) -> Optional[float]:
         """The cap to apply, from the override or the corridor inputs."""
         if not self.apply_cap:

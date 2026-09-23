@@ -21,7 +21,11 @@ Factors, per the DoE specification:
    scenarios applied to catenary and non-catenary cells alike, so the two are
    comparable. This is why ``Energy_Level`` is on every row rather than only on
    catenary rows.
-5. **Battery size** -- 0.1, 0.5, 1.0 and 2.0 MWh, on the hybrid, every corridor.
+5. **Battery size** -- 0.5 and 1.0 MWh, on the hybrid, every corridor. Two
+   points, not four: `make_est_times` builds each train's DAG by simulating
+   it, and a hybrid consist costs roughly 5.7x a diesel one per train, so
+   each extra battery size is hours of wall-clock per corridor for a
+   sensitivity that two points already show the direction of.
 6. **Anti-idling** -- post-processing only; see ``postprocess_antiidling.py``.
    Battery-as-APU applies to hybrids alone, and no anti-idling level applies to
    the catenary battery-electric locomotive, which burns no fuel to idle.

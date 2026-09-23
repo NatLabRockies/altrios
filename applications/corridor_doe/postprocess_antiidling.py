@@ -28,11 +28,16 @@ curve (0.063 gal/hr per aux kW, plus 0.4115). That metric covers *all* stopped
 time, so it is prorated here by the eligible share of dwell seconds -- an
 approximation, and the only one in this step worth flagging.
 
-Energy prices are harmonized across catenary and non-catenary cells: both draw
-from the same EIA tables ``metric_calculator`` already loads, scaled by the
-cell's ``Diesel_Multiplier`` and ``Electricity_Multiplier``. Pricing a diesel
-cell from one source and a catenary cell from another would make the central
-comparison of the study an artifact of bookkeeping.
+Energy prices are harmonized across catenary and non-catenary cells: both come
+from the same regional price zones (``Energy_Price_Zones.csv`` through
+``metric_calculator.zone_energy_price``), scaled by the cell's
+``Diesel_Multiplier`` and ``Electricity_Multiplier``. Diesel is the mean of the
+corridor's terminal zones; electricity is the draw-weighted mean over the
+pricing nodes ``rollout_costs.grid_draw_shares`` resolved for the simulation
+(its cached split by feeding substation when the sim-based rollout has run,
+otherwise the terminals). Pricing a diesel cell from one source and a catenary
+cell from another would make the central comparison of the study an artifact
+of bookkeeping.
 
 Usage:
     python postprocess_antiidling.py
@@ -43,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -51,7 +57,12 @@ import polars as pl
 from altrios import defaults, metric_calculator
 
 HERE = Path(__file__).parent
+sys.path.insert(0, str(HERE))
+from catenary_policy import EXPORT_CREDIT_FRACTION  # noqa: E402
+
 OUT = HERE / "out"
+# Pipeline outputs: consist plans and the per-corridor scalars beside them.
+INPUTS = HERE.parent / "corridor_inputs"
 
 logger = logging.getLogger(__name__)
 
@@ -83,11 +94,25 @@ DIESEL_G_CO2E_PER_MJ = float(
 )
 
 
-def _price_at(table: pl.DataFrame, year: int) -> float:
-    """Nearest-year price, clamped to the table's range."""
-    years = table["Year"]
-    y = min(max(int(year), int(years.min())), int(years.max()))
-    return float(table.filter(pl.col("Year") == y)["Price"][0])
+def _zone_prices(cells: pl.DataFrame, year: int) -> pl.DataFrame:
+    """Per ``Sim_Key``: ``Zone_Diesel_USD_per_gal`` (mean of the corridor's terminal
+    diesel zones) and ``Zone_Elec_USD_per_kWh`` (draw-weighted over the simulation's
+    "<region>|<zone>" pricing nodes) at ``year``, before per-cell multipliers."""
+    import rollout_costs as rc  # the DoE's zone helpers (imports the catenary app)
+
+    rows = []
+    for key, corridor in cells.select("Sim_Key", "Corridor").unique().iter_rows():
+        safe = key.replace("|", "__").replace(".", "p")
+        dz = rc.diesel_zones(corridor)
+        diesel = sum(metric_calculator.zone_energy_price(z, "Diesel", year) for z in dz) / len(dz)
+        shares = rc.grid_draw_shares(None, corridor, safe)
+        elec = sum(
+            metric_calculator.zone_energy_price(rc.node_zone(n), "Electricity", year)
+            * ELEC_CENTS_PER_KWH_TO_USD * s
+            for n, s in shares.items())
+        rows.append({"Sim_Key": key, "Zone_Diesel_USD_per_gal": diesel,
+                     "Zone_Elec_USD_per_kWh": elec})
+    return pl.DataFrame(rows)
 
 
 # "All" counts every second a train stands still; "En_Route" excludes the hold
@@ -161,6 +186,87 @@ def stop_summary(
     return pl.concat(frames, how="diagonal_relaxed")
 
 
+def corridor_meta_table() -> pl.DataFrame:
+    """Per-corridor scalars the idle band needs, from the pipeline's own output.
+
+    `observed_span_median_hr` is the observed travel time over the widest
+    sensor pair; `weekly_count` is how many trains the simulated week carries.
+    Both are written by `railstate_corridor.py` alongside the consist plans, so
+    they cannot drift from the plans they describe.
+    """
+    frames = []
+    for path in sorted(INPUTS.glob("corridor_meta_*.csv")):
+        if path.name.startswith(("sample2_", "sample3_", "sample4_")):
+            continue  # demand samples describe the same corridor
+        d = pl.read_csv(path)
+        keep = [c for c in ("corridor", "observed_span_median_hr",
+                            "observed_span_km", "weekly_count") if c in d.columns]
+        if "corridor" not in keep:
+            continue
+        frames.append(d.select(keep))
+    if not frames:
+        return pl.DataFrame(schema={"Corridor": pl.Utf8})
+    out = pl.concat(frames, how="diagonal_relaxed").rename({"corridor": "Corridor"})
+    if "weekly_count" in out.columns:
+        out = out.rename({"weekly_count": "n_trains_simulated"})
+    return out
+
+
+def discrepancy_idle(cells: pl.DataFrame) -> pl.DataFrame:
+    """Upper-bound idling: stationary time the simulation never produced.
+
+    The model reproduces free-running speed but not the stopping that dominates
+    a real long-haul trip. On Spokane-Lethbridge, observed trips meeting no
+    opposing train run at 46-47 kph while the median trip over the 442 km
+    sensor span runs at 14.4 kph; the simulation reproduces the former and not
+    the latter. An anti-idling result computed from simulated dwell alone
+    therefore understates the opportunity, on that corridor by roughly a factor
+    of seven.
+
+    This adds the missing time as an explicit UPPER bound, per train and summed
+    over the simulated week:
+
+        discrepancy_hr = observed_span_median_hr - Span_Travel_Time
+
+    Both are medians over the SAME two sensors, so the comparison is
+    like-for-like and needs no scaling. It is deliberately not extrapolated to
+    the unobserved remainder of the corridor -- that is precisely where there is
+    no basis for assuming observed behaviour continues.
+
+    It is an upper bound in the strict sense: crew changes, inspections, yard
+    and terminal work all sit inside that difference alongside idling, so the
+    true idling opportunity is somewhere between the simulated-dwell lower bound
+    and this. Report the band, not a point.
+    """
+    need = {"observed_span_median_hr", "Span_Travel_Time__hours", "Dwell_Time__seconds"}
+    if not need <= set(cells.columns):
+        return cells.with_columns(
+            pl.lit(None, dtype=pl.Float64).alias("Discrepancy_Idle_Hours_Per_Train"),
+            pl.lit(None, dtype=pl.Float64).alias("Idle_Fuel_Saved_MJ_Upper"),
+        )
+    per_train = (
+        (pl.col("observed_span_median_hr") - pl.col("Span_Travel_Time__hours"))
+        .clip(lower_bound=0.0)
+    )
+    # Idle fuel rate implied by the simulation itself: the fuel it burned while
+    # stopped, per second stopped. Using the model's own rate keeps the upper
+    # bound internally consistent rather than importing an outside figure.
+    idle_mj_per_s = (
+        pl.when(pl.col("Dwell_Time__seconds") > 0)
+        .then(pl.col("Dwell_Fuel_Energy__MJ") / pl.col("Dwell_Time__seconds"))
+        .otherwise(0.0)
+    )
+    return cells.with_columns(
+        per_train.alias("Discrepancy_Idle_Hours_Per_Train"),
+        (per_train * 3600.0 * idle_mj_per_s * pl.col("n_trains_simulated"))
+        .alias("Discrepancy_Idle_Fuel_MJ"),
+    ).with_columns(
+        (pl.col("Idle_Fuel_Saved_MJ") + pl.col("Discrepancy_Idle_Fuel_MJ")
+         * pl.col("Eligible_Dwell_Share").fill_null(1.0))
+        .alias("Idle_Fuel_Saved_MJ_Upper")
+    )
+
+
 def expand(
     experiments: pl.DataFrame,
     metrics: pl.DataFrame,
@@ -175,6 +281,9 @@ def expand(
     # locomotive on a corridor the optimizer declined to electrify, which cannot
     # move at all -- indistinguishable from one nobody has run yet.
     cells = experiments.join(wide, on="Sim_Key", how="left")
+    meta = corridor_meta_table()
+    if "Corridor" in meta.columns and meta.height:
+        cells = cells.join(meta, on="Corridor", how="left")
     simulated = set(wide["Sim_Key"].to_list())
     if not simulated:
         raise ValueError(
@@ -215,7 +324,8 @@ def expand(
     diesel_col = "Diesel_Usage__MJ"
     stationary_col = "Electricity_Usage__MJ"
     catenary_col = "Catenary_Grid_Draw__MJ"
-    for col in (diesel_col, stationary_col, catenary_col,
+    return_col = "Catenary_Grid_Return__MJ"
+    for col in (diesel_col, stationary_col, catenary_col, return_col,
                 "Grid_Emissions_Factor__kg_CO2-eq_per_MWh"):
         if col not in cells.columns:
             cells = cells.with_columns(pl.lit(0.0).alias(col))
@@ -223,21 +333,27 @@ def expand(
     # wire (delivered + resistive loss). The two are disjoint: the catenary
     # figure comes from the locomotives' catenary interfaces, the stationary one
     # from battery net energy, which is ~0 whenever the wire is doing the work.
+    # Both NET of what a receptive wire took back: energy and emissions count
+    # the returned kWh in full (it displaces generation whoever is paid for it);
+    # cost credits it at the policy's export fraction, since net export to the
+    # utility is worth less than retail. Runs from before receptive catenary
+    # have no return column and the two totals coincide.
     elec_col = "Electricity_Total__MJ"
+    priced_col = "Electricity_Priced__MJ"
     cells = cells.with_columns(
-        (pl.col(stationary_col).fill_null(0.0) + pl.col(catenary_col).fill_null(0.0))
-        .alias(elec_col)
+        (pl.col(stationary_col).fill_null(0.0) + pl.col(catenary_col).fill_null(0.0)
+         - pl.col(return_col).fill_null(0.0)).alias(elec_col),
+        (pl.col(stationary_col).fill_null(0.0) + pl.col(catenary_col).fill_null(0.0)
+         - EXPORT_CREDIT_FRACTION * pl.col(return_col).fill_null(0.0)).alias(priced_col),
     )
 
-    diesel_price = _price_at(metric_calculator.liquid_fuel_prices_eia, year)
-    elec_price = (
-        _price_at(metric_calculator.electricity_prices_eia, year)
-        * ELEC_CENTS_PER_KWH_TO_USD
-    )
+    prices = _zone_prices(cells, year)
+    cells = cells.join(prices, on="Sim_Key", how="left")
     logger.info(
-        "harmonized %d prices: diesel $%.3f/gal, electricity $%.4f/kWh "
-        "(EIA tables, before per-cell multipliers)",
-        year, diesel_price, elec_price,
+        "harmonized %d zone prices: diesel $%.3f-%.3f/gal, electricity $%.4f-%.4f/kWh "
+        "across simulations (before per-cell multipliers)",
+        year, prices["Zone_Diesel_USD_per_gal"].min(), prices["Zone_Diesel_USD_per_gal"].max(),
+        prices["Zone_Elec_USD_per_kWh"].min(), prices["Zone_Elec_USD_per_kWh"].max(),
     )
 
     dwell_col = "Dwell_Time__seconds"
@@ -293,13 +409,13 @@ def expand(
         .with_columns(
             (
                 pl.col("Diesel_Gallons_Adjusted")
-                * pl.lit(diesel_price)
+                * pl.col("Zone_Diesel_USD_per_gal")
                 * pl.col("Diesel_Multiplier")
             ).alias("Cost_Diesel_USD"),
             (
-                pl.col(elec_col)
+                pl.col(priced_col)
                 / 3.6  # MJ -> kWh
-                * pl.lit(elec_price)
+                * pl.col("Zone_Elec_USD_per_kWh")
                 * pl.col("Electricity_Multiplier")
             ).alias("Cost_Electricity_USD"),
         )
@@ -387,6 +503,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         block = expand(
             experiments, metrics, stops, args.year, failures, dwell_scope=scope
         ).drop("_failure")
+        # Upper bound on idling, added after the simulated (lower-bound) result
+        # so both survive side by side. Only meaningful for the terminal-
+        # inclusive scope: the discrepancy is measured against total observed
+        # travel time, which includes whatever a real train did at its
+        # terminals, so netting it against en-route-only dwell would mix bases.
+        if scope == "All":
+            block = discrepancy_idle(block)
         blocks.append(block.with_columns(pl.lit(scope).alias("Dwell_Scope")))
     results = pl.concat(blocks, how="diagonal_relaxed")
     args.out.parent.mkdir(parents=True, exist_ok=True)

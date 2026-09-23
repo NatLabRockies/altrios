@@ -209,6 +209,27 @@ def _rebuild_metrics_csv(path: Path) -> None:
 # average -- the full pipeline computes catenary line loss spatially via
 # apply_line_losses instead.
 DRIVETRAIN_EFFICIENCY = 0.93      # traction inverter (~2.5%) + motor (~4.5%)
+
+# Receptive wire: braking energy the pack cannot take goes back through the
+# pantograph to the substation instead of the dynamic-brake grids. Every
+# substation costed below is receptive hardware (AC transformers; MVDC VSC
+# converters, whose price premium is justified by exactly this), so the default
+# is on. False restores the pre-2026-09 behaviour. Returned energy counts in
+# full for energy and emissions and at EXPORT_CREDIT_FRACTION of the purchase
+# price for cost. The DoE's `build_layouts` overrides both from its policy.
+CATENARY_RECEPTIVE = True
+CATENARY_EXPORT_CREDIT_FRACTION = 0.5
+
+
+def _with_receptivity(loco):
+    """Stamp `CATENARY_RECEPTIVE` on a locomotive's catenary interface."""
+    d = loco.to_pydict()
+    kind = next(iter(d["loco_type"]))
+    cat = (d["loco_type"][kind] or {}).get("cat_int")
+    if not isinstance(cat, dict) or bool(cat.get("receptive", False)) == CATENARY_RECEPTIVE:
+        return loco
+    cat["receptive"] = CATENARY_RECEPTIVE
+    return alt.Locomotive.from_pydict(d)
 NOMINAL_LINE_EFFICIENCY = 0.97    # ~3% average catenary I2R loss
 
 # ---------------------------------------------------------------------------
@@ -295,6 +316,138 @@ GRADE_BY_LINK = {L["idx_curr"]: max_grade(L) for L in links}
 # Per-link track length (miles), for splitting energy into electrified (grid) vs
 # unelectrified (diesel) portions of each plan.
 LINK_MILES = {L["idx_curr"]: L["length_meters"] * _utils.MI_PER_M for L in links}
+
+# ---------------------------------------------------------------------------
+# Energy price zones: regional prices carried on national / provincial trajectories
+# ---------------------------------------------------------------------------
+# The corridor's lat/lon price-zone boxes (WA, ID, BC, AB) name the electricity and
+# diesel zones of metrics_inputs/Energy_Price_Zones.csv, and
+# `metric_calculator.zone_energy_price` turns a zone into a price at a year (a 2025
+# reference price scaled by the AEO2026 trajectory for US zones and the province's
+# Canada's Energy Future 2026 trajectory for Canadian zones). Links, substations and
+# terminals are all placed with the same boxes, so the optimizer's per-piece opex,
+# the metrics rollout and the corridor DoE all price energy on one basis: catenary
+# electricity where the wire is fed from, diesel as the mean of the terminal zones
+# (a run-through train fuels at both ends).
+PRICE_ZONES_PATH = (alt.resources_root() / "networks" / "Spokane_Lethbridge"
+                    / "spokane_lethbridge_price_zones.csv")
+PRICE_ZONES = pl.read_csv(PRICE_ZONES_PATH)
+NODE_SEP = "|"  # pricing node: "<grid emissions region>|<electricity price zone>"
+
+
+def zone_at(lat, lon, boundaries=None):
+    """The first price-zone box (row of ``PRICE_ZONES``) containing (lat, lon); a
+    null bound is open."""
+    for b in (PRICE_ZONES if boundaries is None else boundaries).iter_rows(named=True):
+        if b["Lat_Min"] is not None and lat < b["Lat_Min"]:
+            continue
+        if b["Lat_Max"] is not None and lat >= b["Lat_Max"]:
+            continue
+        if b["Lon_Min"] is not None and lon < b["Lon_Min"]:
+            continue
+        if b["Lon_Max"] is not None and lon >= b["Lon_Max"]:
+            continue
+        return b
+    raise ValueError(f"({lat:.4f}, {lon:.4f}) falls in no price zone")
+
+
+def grid_node(region, zone):
+    return f"{region}{NODE_SEP}{zone}"
+
+
+def node_region(node):
+    return node.split(NODE_SEP)[0]
+
+
+def node_zone(node):
+    return node.split(NODE_SEP)[-1]
+
+
+def composite_emissions(ef_by_region, nodes):
+    """Cambium factors keyed by pricing node, copying each node's region's rows."""
+    return pl.concat([
+        ef_by_region.filter(pl.col("Node") == node_region(n)).with_columns(pl.lit(n).alias("Node"))
+        for n in nodes
+    ])
+
+
+SUBSTATIONS_BY_ID = {str(s.id): s for s in substations}
+
+
+def substation_node(sub):
+    """Pricing node of a substation: its grid-emissions region plus the electricity
+    zone its position falls in."""
+    return grid_node(sub.grid_emissions_region,
+                     zone_at(float(sub.lat), float(sub.lon))["Electricity_Price_Region"])
+
+
+STATIONARY_CHARGING_NODE = substation_node(SUBSTATIONS_BY_ID["west_terminus"])  # Spokane
+DEFAULT_CATENARY_NODE = substation_node(SUBSTATIONS_BY_ID["east_terminus"])  # Lethbridge
+
+
+def _elec_zone_by_link():
+    zones = {}
+    for L in links:
+        m = midpoint(L)
+        zones[L["idx_curr"]] = (zone_at(m[0], m[1])["Electricity_Price_Region"]
+                                if m is not None else None)
+    known = [z for z in zones.values() if z is not None]
+    fill = max(set(known), key=known.count) if known else None
+    return {idx: (z if z is not None else fill) for idx, z in zones.items()}
+
+
+# Electricity price zone of every link, by its midpoint (links without geometry take
+# the corridor's most common zone).
+ELEC_ZONE_BY_LINK = _elec_zone_by_link()
+_TERMINAL_ZONES = None
+
+
+def terminal_price_zones():
+    """Node, Electricity_Zone, Diesel_Zone of the corridor's terminals (location file)."""
+    global _TERMINAL_ZONES
+    if _TERMINAL_ZONES is None:
+        _TERMINAL_ZONES = _mc.location_price_zones(
+            alt.import_locations(str(SIM_LOCATIONS_CSV)))
+    return _TERMINAL_ZONES
+
+
+def diesel_price_zones():
+    return sorted(set(terminal_price_zones().get_column("Diesel_Zone").to_list()))
+
+
+def zone_elec_price(zone, year):
+    """Electricity price ($/kWh) of a zone at ``year``."""
+    return _mc.zone_energy_price(zone, "Electricity", year) / 100.0
+
+
+def corridor_diesel_price(year):
+    """Diesel price ($/gal) at ``year``: mean over the terminals' diesel zones."""
+    zones = diesel_price_zones()
+    return sum(_mc.zone_energy_price(z, "Diesel", year) for z in zones) / len(zones)
+
+
+def levelized_diesel_price(mult=1.0):
+    """Discount-weighted corridor diesel price over the project lifespan ($/gal)."""
+    return mult * _levelized_aeo_price(corridor_diesel_price, METRICS_START_YEAR,
+                                       PROJECT_LIFESPAN_YEARS, DISCOUNT_RATE)
+
+
+def levelized_elec_price_by_link(mult=1.0):
+    """Discount-weighted electricity price over the project lifespan, per link, from
+    the link's price zone ($/kWh) -- what the optimizer's per-piece opex sees."""
+    by_zone = {
+        z: _levelized_aeo_price(lambda y, _z=z: zone_elec_price(_z, y), METRICS_START_YEAR,
+                                PROJECT_LIFESPAN_YEARS, DISCOUNT_RATE)
+        for z in set(ELEC_ZONE_BY_LINK.values())
+    }
+    return {idx: mult * by_zone[z] for idx, z in ELEC_ZONE_BY_LINK.items()}
+
+
+def corridor_mean_elec_price(prices_by_link):
+    """Track-length-weighted mean of a per-link electricity price map ($/kWh)."""
+    num = sum(p * LINK_MILES.get(idx, 0.0) for idx, p in prices_by_link.items())
+    den = sum(LINK_MILES.get(idx, 0.0) for idx in prices_by_link)
+    return num / den if den > 0 else 0.0
 
 # Solver diagnostics. ``SOLVER_LOG`` streams the HiGHS/pyomo solver log for every
 # run so a hang during the SOLVE phase is visible; ``SOLVER_TIME_LIMIT_SECONDS``
@@ -441,7 +594,8 @@ def bel_drain_by_link(traction_by_link=None, grade_multiplier=40.0):
     the sim-derived per-track-mile traction intensity (grade/speed/mass aware,
     e.g. ``first_pass_densities`` output) -- else from a grade proxy
     ``1 + grade_multiplier * grade``. Either shape is normalized (length-weighted)
-    so the corridor-average equals the measured fleet-mean ``BEL_AVG_KWH_PER_MILE``
+    so the corridor-average equals ``design_drain_kwh_per_mile()`` -- the DESIGN
+    train's draw, not the fleet mean (see `BEL_DESIGN_DRAIN_PERCENTILE`)
     (Option B sizing), keeping the per-loco scale grounded while the shape reflects
     real physics. Traffic-independent (one locomotive traversing once).
     """
@@ -454,7 +608,8 @@ def bel_drain_by_link(traction_by_link=None, grade_multiplier=40.0):
     mean_shape = (wsum / wmi) if wmi > 0 else 1.0
     if mean_shape <= 0:
         mean_shape = 1.0
-    return {idx: BEL_AVG_KWH_PER_MILE * s / mean_shape for idx, s in shape.items()}
+    return {idx: design_drain_kwh_per_mile() * s / mean_shape
+            for idx, s in shape.items()}
 
 
 def bel_charge_by_link(drain=None):
@@ -571,6 +726,60 @@ BEL_USABLE_BATTERY_KWH = SIM_BEL_BATTERY_CAPACITY_KWH * SIM_BEL_SOC_WINDOW  # kW
 #   gross draw ~49 kWh/mi/loco (24 light .. 62 heavy), regen ~9% of draw,
 #   5 MW pantograph @ 32 mph -> ~156 kWh/mi gross charge capability.
 BEL_AVG_KWH_PER_MILE = 49.0       # measured avg per-locomotive traction draw (kWh/mi)
+# The gap constraint is a FEASIBILITY constraint, so it has to hold for the train
+# that decides feasibility, not the average one. Sizing it on the fleet mean is
+# what let the optimizer leave gaps no heavy train can cross:
+#
+#   7,344 kWh budget / 49 kWh per loco-mile (mean)  = 150 miles permitted
+#   7,344 kWh budget / 66 kWh per loco-mile (heavy) = 111 miles actual range
+#
+# and every gap between those is a train that needs a diesel helper. Measured
+# layouts left gaps of 110-208 miles, and the helper rate tracked that single
+# number almost perfectly: 110 mi -> 0 helpers, 143 -> 30, 208 -> 41 of ~80.
+#
+# Before 2026-07-30 this did not arise because the constraint was a flat
+# `max_energized_gap_miles` of 40, derived from a 190 kWh/loco-mile assumption
+# that exceeded what a 3.28 MW locomotive can draw in a mile at 32 mph (~102
+# kWh). The energy-based gap that replaced it is better physics -- wire where
+# the pack drains fastest rather than on a flat ruler -- but it was recalibrated
+# to a mean where the old number had been an (impossible) worst case.
+#
+# Drain scales with how much train each locomotive is pulling, so the design
+# figure is the mean scaled by the ratio of the design train's tons-per-
+# locomotive to the fleet's. Same percentile idea as
+# `DESIGN_TRAIN_POWER_PERCENTILE`, applied to range instead of substation
+# spacing.
+# Base for the design figure: the drain MEASURED from the all-catenary first
+# pass, not the 49 the opex model carries. Summing the fully-energized per-link
+# pantograph densities over the calibrated samples and dividing by the
+# locomotive-miles that produced them gives 38 kWh per locomotive-mile
+# (2026-09-16, Spokane-Lethbridge, 104 trains/week, 3.48 locos/train).
+#
+# Using 49 as the base instead double-counts conservatism -- it is already 29%
+# above measurement -- and at p90 that compounded to 90 kWh/loco-mile, an 81-mile
+# permitted gap, and a MILP with no feasible buildout on any architecture.
+BEL_MEASURED_MEAN_KWH_PER_MILE = 38.0
+BEL_DESIGN_DRAIN_PERCENTILE = 90.0
+
+
+def design_drain_kwh_per_mile():
+    """Per-locomotive drain of the design train, for sizing the range gap."""
+    import numpy as _np
+
+    tons, locos, per_loco = 0.0, 0, []
+    for s in range(len(CONSIST_PLAN_PATHS)):
+        for t in _load_full_consist_plan(sample=s):
+            w = float(t.get("Train_Weight_tons") or 0.0)
+            n = int(t.get("n_locos") or 0)
+            if w > 0 and n > 0:
+                tons += w
+                locos += n
+                per_loco.append(w / n)
+    if not per_loco or locos == 0:
+        return BEL_MEASURED_MEAN_KWH_PER_MILE
+    mean_tpl = tons / locos
+    design_tpl = float(_np.percentile(per_loco, BEL_DESIGN_DRAIN_PERCENTILE))
+    return BEL_MEASURED_MEAN_KWH_PER_MILE * design_tpl / mean_tpl
 BEL_REGEN_FRACTION = 0.09         # regen recovered as a fraction of gross draw
 BEL_RESERVE_FRACTION = 0.15       # withheld reserve (SOC protection + accessories)
 BEL_MAX_GAP_MILES = en.max_gap_miles_from_battery(
@@ -733,9 +942,48 @@ ANNUAL_SCALER = 365.25 / PLAN_DAYS  # week -> year
 # summed, and ANNUAL_SCALER then annualizes exactly seven days.
 WARMUP_DAYS = 2.0
 COOLDOWN_DAYS = 2.0
+# Demand levels as SAMPLE SETS, not multipliers. Each entry lists which of the
+# four independent consist-plan samples the level comprises; a level's energy,
+# emissions, cost and load are the sums over its samples, and each sample is
+# dispatched and walked as its own meet-pass problem.
+#
+# A scalar multiplier (the previous design) scales one week's energy but cannot
+# change which trains are on the corridor or when, so it produces no new
+# consists, no new departure profile, and a load curve that is just the 1x curve
+# stretched. Distinct samples give genuinely different weeks, which is what the
+# grid-impact question needs.
+#
+# What this deliberately does NOT model is the congestion of 2x or 4x traffic:
+# the samples never share a dispatch, so no train in S2 ever meets a train in
+# S1. Measured on this corridor, 4x traffic in one dispatch is an unbounded
+# meet-pass queue. These levels answer economics and grid impact at higher
+# throughput, and results must be caveated as not representing higher congestion.
+def _calibrated_sample_count() -> int:
+    """How many independent weeks ONE calibrated corridor-week takes.
+
+    The sizing rule caps how many trains may share a single meet-pass
+    problem, so a corridor whose observed volume exceeds that cap is carried
+    by several samples: Spokane-Lethbridge's 104 trains/week are two weeks of
+    52. Read from the corridor inputs rather than restated here, so the
+    demand levels move with the rule instead of drifting from it -- when this
+    was hard-coded at one sample, `1x` meant HALF the calibrated volume and
+    nothing in the output said so.
+    """
+    meta = (Path(__file__).resolve().parent.parent / "corridor_inputs"
+            / "corridor_meta_spokane_lethbridge.csv")
+    if not meta.exists():
+        return 1
+    frame = pl.read_csv(meta)
+    if "n_samples" not in frame.columns:
+        return 1
+    return max(1, int(frame["n_samples"][0]))
+
+
+_CALIBRATED_SAMPLES = _calibrated_sample_count()
+# 1x IS the corridor's calibrated volume, whatever number of samples that
+# takes; 2x and 4x are that many again, drawn as further independent weeks.
 DEMAND_LEVELS = {
-    "central": 1.0,  # the imported consist plan as-is
-    "high":    2.0,  # utilization-stress case: double the plan's traffic
+    f"{m}x": tuple(range(m * _CALIBRATED_SAMPLES)) for m in (1, 2, 4)
 }
 
 # Architecture -> medium (central) capital-cost point estimates, in $M (see
@@ -758,6 +1006,16 @@ DEMAND_LEVELS = {
 #     central estimate is set conservatively (NOT cheap); the low-infra case (x0.5)
 #     represents the mature, mass-produced modular future -- i.e. DC at its
 #     realistic competitive best [UIC2019; Simiyu2021].
+#   - FINDING (2026-09): at this corridor's design-train power (p95 consist,
+#     ~29 MW) a 9 kV wire carries ~4.9 kA at its 6 kV floor and the voltage-drop
+#     feed distance collapses to ~2.8 mi, so dc_9kv never builds. That is not the
+#     0.67 voltage floor (the EN 50163 two-thirds convention, which the MVDC
+#     literature keeps) nor the conductor (the 9 kV proposals use LIGHTER wire,
+#     266 mm2/track, and reach ~100 km spacing with few-MW trains); it is the
+#     train power. Kept in the design so the infeasibility is reported, not
+#     assumed away. A 24 kV DC architecture (~1.2 kA) would be the fair MVDC
+#     comparator. Sources: SNCF/UIC "Go for 9 kV" (2019); Sharifi et al. 2022,
+#     IET Electr. Syst. Transp. (7.5-24 kV window).
 # See docs/energization-voltage-and-capacity.md for the full source table.
 ARCH_MEDIUM_COSTS = {
     # key into en.suggest_optimization_inputs -> feed distance, voltage, efficiency
@@ -776,13 +1034,12 @@ ARCH_MEDIUM_COSTS = {
 INFRA_LEVELS = {"low": 0.5, "med": 1.0, "high": 2.0}
 
 # Diesel-vs-electricity "gap" scenario over the project lifespan. The CENTRAL
-# ("med") case is the AEO2026 reference (cb2026) price TRAJECTORY -- transportation
-# diesel ($/gal) and industrial electricity ($/kWh) at each rollout year (see
-# _aeo_diesel_price / _aeo_elec_price, which read the updated EIA price files via
-# metric_calculator). The low/high cases WIDEN the gap by ENERGY_GAP_WIDTH, moving
-# diesel and electricity in opposite directions: "low" barely favors electrification
-# (cheaper diesel, dearer power), "high" strongly favors it. Values are MULTIPLIERS
-# on the AEO trajectory.
+# ("med") case is each price zone's 2025 reference price on its trajectory (AEO2026
+# reference case for US zones, Canada's Energy Future 2026 for Canadian zones; see
+# the price-zone section above and metric_calculator.zone_energy_price). The
+# low/high cases WIDEN the gap by ENERGY_GAP_WIDTH, moving diesel and electricity in
+# opposite directions: "low" barely favors electrification (cheaper diesel, dearer
+# power), "high" strongly favors it. Values are MULTIPLIERS on the zone trajectory.
 ENERGY_GAP_WIDTH = 1.0 / 3.0
 ENERGY_LEVELS = {
     "low":  dict(diesel=1.0 - ENERGY_GAP_WIDTH, elec=1.0 + ENERGY_GAP_WIDTH),
@@ -810,7 +1067,8 @@ def _aeo_price_at(df, year):
 
 
 def _aeo_diesel_price(year):
-    """AEO2026 transportation diesel price ($/gal) at ``year``."""
+    """AEO2026 national transportation diesel price ($/gal) at ``year``. Kept for
+    reference; pricing now goes through the zone functions above."""
     return _aeo_price_at(_mc.liquid_fuel_prices_eia, year)
 
 
@@ -843,12 +1101,13 @@ METRICS_START_YEAR = _defaults.BASE_ANALYSIS_YEAR
 STRUCTURE_LIFESPAN_YEARS = 50      # civil structures / foundations / poles
 ENERGIZATION_LIFESPAN_YEARS = 40   # contact + messenger wire / OCS hardware
 SUBSTATION_LIFESPAN_YEARS = 30     # traction substation / power electronics
-# The itemized-cost report is built for the architecture, demand, and energy
-# prices below. The architecture matches the confirming simulation's 25 kV AC
-# electrification (SIM_ELECTRIFICATION_TYPE); the demand multiplier scales the
-# annualized full-consist-plan traffic (1.0 = the plan as-is).
+# The itemized-cost report is built for the architecture, demand level, and
+# energy prices below. The architecture matches the confirming simulation's
+# 25 kV AC electrification (SIM_ELECTRIFICATION_TYPE); the demand level names
+# which consist-plan samples it covers (see DEMAND_LEVELS).
 ITEMIZED_ARCH = "ac_25kv"
-ITEMIZED_DEMAND_MULT = DEMAND_LEVELS["central"]
+ITEMIZED_DEMAND_LEVEL = "1x"
+ITEMIZED_DEMAND_SAMPLES = DEMAND_LEVELS[ITEMIZED_DEMAND_LEVEL]
 ITEMIZED_ENERGY_LEVEL = "med"
 
 # Grid emissions regions (Cambium GEA) used to attribute electricity emissions.
@@ -863,54 +1122,52 @@ CAMBIUM_SCENARIO = "MidCase"
 
 
 def _region_fractions(dual_mode_energy, substation_meta):
-    """Fraction of catenary grid electricity by grid-emissions region.
+    """Fraction of catenary grid electricity by pricing node
+    ``"<grid emissions region>|<electricity price zone>"``.
 
     Runs ``compute_line_losses`` on every dual-mode plan sim (``dual_mode_energy
     ["sims"]``), sums each feeding substation/district's grid-side energy across
-    all trains, then groups by the substation's ``grid_emissions_region`` (existing
-    west_terminus -> West, all others -> East). Falls back to all-East if the split
-    is unavailable.
+    all trains, then groups by the substation's node (its grid-emissions region
+    plus the price zone its position falls in, see `substation_node`). So a
+    train's draw is priced where the wire under it is fed from. Falls back to the
+    Lethbridge terminus node if the split is unavailable.
     """
     sims = (dual_mode_energy or {}).get("sims") or []
     if sims and substation_meta:
-        parts = []
+        by_node = {}
         for ts in sims:
             df = en.compute_line_losses(ts, substation_meta)
-            df = df.filter(
-                (pl.col("district_id") != pl.lit("__total__"))
-                & pl.col("grid_emissions_region").is_not_null()
-            )
-            if df.height > 0:
-                parts.append(df)
-        if parts:
-            g = (pl.concat(parts, how="diagonal_relaxed")
-                 .group_by("grid_emissions_region")
-                 .agg(pl.col("substation_energy_joules").sum()))
-            total = g.get_column("substation_energy_joules").sum()
-            if total and total > 0:
-                return {
-                    r["grid_emissions_region"]: r["substation_energy_joules"] / total
-                    for r in g.iter_rows(named=True)
-                }
-    return {GRID_REGION_EAST: 1.0}
+            df = df.filter(pl.col("district_id") != pl.lit("__total__"))
+            for r in df.iter_rows(named=True):
+                did = r["district_id"]
+                if did is None or str(did) not in SUBSTATIONS_BY_ID:
+                    continue
+                node = substation_node(SUBSTATIONS_BY_ID[str(did)])
+                by_node[node] = by_node.get(node, 0.0) + float(r["substation_energy_joules"])
+        total = sum(by_node.values())
+        if total > 0:
+            return {n: v / total for n, v in sorted(by_node.items())}
+    return {DEFAULT_CATENARY_NODE: 1.0}
 
 
 def _split_electricity(energy, region_frac, stationary_j=0.0):
-    """Split a variant's grid electricity across grid-emissions regions.
+    """Split a variant's grid electricity across pricing nodes
+    ``"<grid emissions region>|<electricity price zone>"``.
 
     Catenary charging follows ``region_frac`` (by feeding substation); train-planner
     stationary charging (``stationary_j`` grid joules, week total) is attributed to
-    the Spokane (West) terminus region. Feeding both into the metrics calculator's
-    electricity total lets it back out ``Electricity_Stationary_Charging`` (total
-    grid electricity minus the sim's catenary grid draw) and price/attribute the
-    stationary energy's emissions by region.
+    the Spokane terminus node (West region, Washington prices). Feeding both into the
+    metrics calculator's electricity total lets it back out
+    ``Electricity_Stationary_Charging`` (total grid electricity minus the sim's
+    catenary grid draw) and price the energy by zone and attribute its emissions by
+    region.
     """
     catenary_j = float(energy.get("grid_elec_j") or 0.0)
     region_elec = {r: catenary_j * f for r, f in region_frac.items()}
     if stationary_j:
-        region_elec[STATIONARY_CHARGING_REGION] = (
-            region_elec.get(STATIONARY_CHARGING_REGION, 0.0) + float(stationary_j))
-    return region_elec or {GRID_REGION_EAST: catenary_j}
+        region_elec[STATIONARY_CHARGING_NODE] = (
+            region_elec.get(STATIONARY_CHARGING_NODE, 0.0) + float(stationary_j))
+    return region_elec or {DEFAULT_CATENARY_NODE: catenary_j}
 
 
 def _built_sub_objs(result):
@@ -930,6 +1187,109 @@ def _layout_fingerprint(result) -> str:
     subs = tuple(sorted(str(x) for x in (result.built_substation_ids or [])))
     return hashlib.sha1(repr((intervals, subs)).encode()).hexdigest()[:16]
 
+
+MAX_SIM_CACHE = 6
+# Bound the in-memory sim bundles (each a full walked plan) so repeated
+# re-optimization cannot accumulate every distinct layout and exhaust memory;
+# the disk bundle cache still allows reload.
+
+
+def simulate_layout(net, traction_kind, fingerprint, label,
+                    samples, location_map, sim_cache):
+    """Walk the plan on ``net`` once per demand sample, and merge.
+
+    Cached per (traction_kind, fingerprint, sample) so a level that shares
+    samples with a smaller level -- 4x contains 2x contains 1x -- reuses
+    their sims rather than re-walking them.
+    """
+    parts = []
+    for s_ in samples:
+        key = (traction_kind, fingerprint, s_)
+        tag = f"{fingerprint}_s{s_}"
+        cached = sim_cache.get(key)
+        if cached is None:  # reload a bundle serialized before an earlier kill
+            cached = _load_sim_bundle(traction_kind, tag)
+        if cached is None:
+            cached = _run_full_plan(net, location_map,
+                                    f"{label} S{s_ + 1}", traction_kind,
+                                    keep_sims=True, sample=s_)
+            _save_sim_bundle(traction_kind, tag, cached)
+        sim_cache[key] = cached
+        parts.append(cached)
+    while len(sim_cache) > MAX_SIM_CACHE * len(CONSIST_PLAN_PATHS):
+        sim_cache.pop(next(iter(sim_cache)))  # FIFO evict oldest layout
+    return _merge_plan_runs(parts)
+
+def optimize_and_sim(label, traction_kind, opt_kwargs, samples,
+                     location_map, sim_cache=None, derive_cache=None):
+    """Optimize a layout and simulate it, optionally feeding the realized
+    zero-catenary-draw exclusion back into the buildout as a bounded fixed
+    point (gated by ``DIRECTION_EXCLUSION_IN_BUILDOUT``).
+
+    Each round removes the links this fleet actually drew ~0 catenary from
+    (its OWN realized draw -- no grade/regen heuristic) from the optimizer's
+    candidate set and re-optimizes, so the exclusion informs the NPV/objective
+    rather than only the reported cost. Only never-charged links are removed,
+    so a BEL's SOC feasibility is preserved. Stops after
+    ``DIRECTION_EXCLUSION_MAX_ITERS`` rounds or once the excluded set stops
+    growing. A failed re-optimization keeps the prior (feasible) layout.
+
+    Returns ``(result, sim_net, energy, excl, meta, subs, region_frac)``; all
+    but ``result`` are ``None`` when the optimizer yields no usable layout.
+    """
+    if sim_cache is None:
+        sim_cache = {}
+    if derive_cache is None:
+        derive_cache = {}
+    denylist: list = []
+    best = None
+    n_iters = (DIRECTION_EXCLUSION_MAX_ITERS
+               if DIRECTION_EXCLUSION_IN_BUILDOUT else 0)
+    for it in range(n_iters + 1):
+        try:
+            r = run_opt(label, excluded_link_idxs=(denylist or None),
+                        **opt_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            if best is None:
+                raise
+            _log(f"  {label}: re-optimize failed ({exc}); keeping prior layout")
+            break
+        if r is None or r.network is None:
+            break
+        subs = _built_sub_objs(r)
+        net, meta = en.apply_line_losses(
+            r.network, subs,
+            system_voltage_volts=SIM_SYSTEM_VOLTAGE_VOLTS,
+            electrification_type=SIM_ELECTRIFICATION_TYPE,
+            base_power_limit_watts=COMMON["uniform_power_limit_watts"])
+        net = _calibrate_speeds(net)
+        fp = _layout_fingerprint(r)
+        e = simulate_layout(net, traction_kind, fp, label, samples,
+                        location_map, sim_cache)
+        derived = derive_cache.get((traction_kind, fp))
+        if derived is None:
+            region_frac = _region_fractions(e, meta)
+            excl = (_excluded_energization_miles(
+                        r, e["sims"], e.get("draw_by_link"))
+                    if EXCLUDE_UNUSED_DIRECTION_WIRE else (0.0, []))
+            derived = (region_frac, excl)
+            derive_cache[(traction_kind, fp)] = derived
+        region_frac, excl = derived
+        best = (r, net, e, excl, meta, subs, region_frac)
+        if it == n_iters:
+            break
+        new_excl = [li for li in excl[1] if li not in set(denylist)]
+        if not new_excl:
+            _log(f"  {label}: direction exclusion converged after "
+                 f"{it} feedback iter(s)")
+            break
+        denylist = list(set(denylist) | set(excl[1]))
+        _log(f"  {label}: feedback iter {it + 1}: dropping {len(new_excl)} "
+             f"zero-draw links ({excl[0]:.1f} mi), re-optimizing "
+             f"(denylist now {len(denylist)} links)")
+    if best is None:
+        return None, None, None, (0.0, []), None, None, None
+    return best
 
 def run_pipeline():
     """Full pipeline. The train SIMULATION depends only on the physical buildout,
@@ -963,8 +1323,9 @@ def run_pipeline():
     print("FULL PIPELINE (min_cost): optimize + simulate per (arch, demand); sweep "
           "infra x energy as an economics-only re-pricing (no sim re-runs)")
     demand_desc = " | ".join(
-        f"{name}=x{mult:g} ({ps['trains_per_day'] * mult:.1f}tr/day)"
-        for name, mult in DEMAND_LEVELS.items()
+        f"{name}={len(smp)} sample(s), "
+        f"{_level_plan_summary(smp)['trains_per_day']:.1f}tr/day"
+        for name, smp in DEMAND_LEVELS.items()
     )
     print(f"  horizon {PROJECT_LIFESPAN_YEARS} yr | discount {DISCOUNT_RATE:.0%} | "
           f"PVAF {econ.pvaf():.2f} | consist plan: {ps['n_trains']} trains over "
@@ -973,9 +1334,13 @@ def run_pipeline():
     # First-pass full-consist-plan sims give the ANNUAL per-link per-track-mile
     # energy that feeds the min_cost opex (run once, cached, then multiplied by the
     # demand multiplier); else fall back to the illustrative grade-scaled constants.
-    sim_gal_mi, sim_kwh_mi = (
-        first_pass_densities() if USE_SIM_DERIVED_DENSITIES else (None, None)
-    )
+    # One density pass PER SAMPLE. A demand level sums the samples it contains,
+    # which is what makes 2x and 4x carry genuinely different weeks of traffic
+    # rather than one week scaled up.
+    sim_density_by_sample = {}
+    if USE_SIM_DERIVED_DENSITIES:
+        for _s in sorted({s_ for samples in DEMAND_LEVELS.values() for s_ in samples}):
+            sim_density_by_sample[_s] = first_pass_densities(_s)
     # Reseed the summary table from any completed steps so a RESUMED sweep keeps
     # prior rows; per-variant metrics are rebuilt from disk (glob), not memory.
     summary_rows = _completed_summary_rows()
@@ -996,95 +1361,26 @@ def run_pipeline():
     # the disk bundle cache still allows reload, and BEL stays alive via ``e_bel``.
     _MAX_SIM_CACHE = 6
 
-    def _sim(net, traction_kind, fingerprint, label):
-        key = (traction_kind, fingerprint)
-        cached = sim_cache.get(key)
-        if cached is None:  # reload a bundle serialized before an earlier kill
-            cached = _load_sim_bundle(traction_kind, fingerprint)
-        if cached is None:
-            cached = _run_full_plan(net, location_map, label, traction_kind,
-                                    keep_sims=True)
-            _save_sim_bundle(traction_kind, fingerprint, cached)
-        sim_cache[key] = cached
-        while len(sim_cache) > _MAX_SIM_CACHE:  # FIFO evict oldest layout
-            sim_cache.pop(next(iter(sim_cache)))
-        return cached
+    # Bound to this run's caches and location map; the loop itself is module
+    # level so `build_layouts.py` can use the same refinement.
+    def _sim(net, traction_kind, fingerprint, label, samples=(0,)):
+        return simulate_layout(net, traction_kind, fingerprint, label, samples,
+                               location_map, sim_cache)
 
-    def _optimize_and_sim(label, traction_kind, opt_kwargs):
-        """Optimize a layout and simulate it, optionally feeding the realized
-        zero-catenary-draw exclusion back into the buildout as a bounded fixed
-        point (gated by ``DIRECTION_EXCLUSION_IN_BUILDOUT``).
-
-        Each round removes the links this fleet actually drew ~0 catenary from
-        (its OWN realized draw -- no grade/regen heuristic) from the optimizer's
-        candidate set and re-optimizes, so the exclusion informs the NPV/objective
-        rather than only the reported cost. Only never-charged links are removed,
-        so a BEL's SOC feasibility is preserved. Stops after
-        ``DIRECTION_EXCLUSION_MAX_ITERS`` rounds or once the excluded set stops
-        growing. A failed re-optimization keeps the prior (feasible) layout.
-
-        Returns ``(result, sim_net, energy, excl, meta, subs, region_frac)``; all
-        but ``result`` are ``None`` when the optimizer yields no usable layout.
-        """
-        denylist: list = []
-        best = None
-        n_iters = (DIRECTION_EXCLUSION_MAX_ITERS
-                   if DIRECTION_EXCLUSION_IN_BUILDOUT else 0)
-        for it in range(n_iters + 1):
-            try:
-                r = run_opt(label, excluded_link_idxs=(denylist or None),
-                            **opt_kwargs)
-            except Exception as exc:  # noqa: BLE001
-                if best is None:
-                    raise
-                _log(f"  {label}: re-optimize failed ({exc}); keeping prior layout")
-                break
-            if r is None or r.network is None:
-                break
-            subs = _built_sub_objs(r)
-            net, meta = en.apply_line_losses(
-                r.network, subs,
-                system_voltage_volts=SIM_SYSTEM_VOLTAGE_VOLTS,
-                electrification_type=SIM_ELECTRIFICATION_TYPE,
-                base_power_limit_watts=COMMON["uniform_power_limit_watts"])
-            net = _calibrate_speeds(net)
-            fp = _layout_fingerprint(r)
-            e = _sim(net, traction_kind, fp, label)
-            derived = derive_cache.get((traction_kind, fp))
-            if derived is None:
-                region_frac = _region_fractions(e, meta)
-                excl = (_excluded_energization_miles(
-                            r, e["sims"], e.get("draw_by_link"))
-                        if EXCLUDE_UNUSED_DIRECTION_WIRE else (0.0, []))
-                derived = (region_frac, excl)
-                derive_cache[(traction_kind, fp)] = derived
-            region_frac, excl = derived
-            best = (r, net, e, excl, meta, subs, region_frac)
-            if it == n_iters:
-                break
-            new_excl = [li for li in excl[1] if li not in set(denylist)]
-            if not new_excl:
-                _log(f"  {label}: direction exclusion converged after "
-                     f"{it} feedback iter(s)")
-                break
-            denylist = list(set(denylist) | set(excl[1]))
-            _log(f"  {label}: feedback iter {it + 1}: dropping {len(new_excl)} "
-                 f"zero-draw links ({excl[0]:.1f} mi), re-optimizing "
-                 f"(denylist now {len(denylist)} links)")
-        if best is None:
-            return None, None, None, (0.0, []), None, None, None
-        return best
+    def _optimize_and_sim(label, traction_kind, opt_kwargs, samples=(0,)):
+        return optimize_and_sim(label, traction_kind, opt_kwargs, samples,
+                                location_map, sim_cache, derive_cache)
 
     # Reference cost point that determines the SIMULATED buildout. Infra cost and
     # energy price are swept later ONLY in the metrics accounting, so they never
     # change the layout being simulated (and thus never re-run the simulation).
     # The buildout is decided at the CENTRAL energy case: the discount-weighted
-    # average AEO price over the project lifespan (so lifetime opex sits
+    # average zone price over the project lifespan (so lifetime opex sits
     # consistently alongside the annualized capital in the objective's PVAF).
-    ref_diesel = _levelized_aeo_price(_aeo_diesel_price, METRICS_START_YEAR,
-                                      PROJECT_LIFESPAN_YEARS, DISCOUNT_RATE)
-    ref_elec = _levelized_aeo_price(_aeo_elec_price, METRICS_START_YEAR,
-                                    PROJECT_LIFESPAN_YEARS, DISCOUNT_RATE)
+    # Electricity is a price PER LINK from the link's zone, so a piece in Alberta is
+    # judged at Alberta power; diesel is the corridor's terminal-zone mean.
+    ref_diesel = levelized_diesel_price()
+    ref_elec = levelized_elec_price_by_link()
     ref_infra_mult = INFRA_LEVELS["med"]
 
     for arch in ("ac_25kv", "ac_2x25", "dc_9kv"):
@@ -1092,14 +1388,16 @@ def run_pipeline():
         sug = en.suggest_optimization_inputs(
             arch, design_train_power_watts=_design_train_power_watts())
         med = ARCH_MEDIUM_COSTS[arch]
-        for demand_lvl, demand_mult in DEMAND_LEVELS.items():
-            trains_per_day = ps["trains_per_day"] * demand_mult
+        for demand_lvl, demand_samples in DEMAND_LEVELS.items():
+            lvl = _level_plan_summary(demand_samples)
+            trains_per_day = lvl["trains_per_day"]
             if USE_SIM_DERIVED_DENSITIES:
-                diesel_by_link = {
-                    li: demand_mult * v for li, v in sim_gal_mi.items()}
+                diesel_by_link = _sum_link_densities(
+                    sim_density_by_sample[s_][0] for s_ in demand_samples)
+                elec_raw = _sum_link_densities(
+                    sim_density_by_sample[s_][1] for s_ in demand_samples)
                 elec_by_link = {
-                    li: demand_mult * sim_kwh_mi[li] / sug.substation_efficiency
-                    for li in sim_kwh_mi
+                    li: v / sug.substation_efficiency for li, v in elec_raw.items()
                 }
             else:
                 diesel_by_link, elec_by_link = energy_densities(
@@ -1130,7 +1428,7 @@ def run_pipeline():
             # ENERGY-based range gap (wire where the pack drains fastest),
             # round-trip-loss opex, energy-sized recharge min run. BEL drain shape
             # from the sim-derived per-link traction intensity when available.
-            bel_drain = bel_drain_by_link(sim_kwh_mi if USE_SIM_DERIVED_DENSITIES
+            bel_drain = bel_drain_by_link(elec_raw if USE_SIM_DERIVED_DENSITIES
                                           else None)
             r_bel = None
             net_bel = subs_bel = e_bel = region_frac_bel = meta_bel = None
@@ -1157,7 +1455,8 @@ def run_pipeline():
                          min_energized_length_miles=(
                              5.0 if BEL_SOC_STATE_MODEL
                              else max(5.0, BEL_RECHARGE_MILES)),
-                         warmstart=True, **common_opt))
+                         warmstart=True, **common_opt),
+                    samples=demand_samples)
                 if r_bel is not None and r_bel.network is None:
                     _log(f"BEL layout for {layout}: no incumbent "
                          f"(status={str(r_bel.status).split('.')[-1]}); skipping")
@@ -1177,23 +1476,38 @@ def run_pipeline():
             # The dispatch schedule is traction-agnostic, so its departures are
             # reused for the dual-mode curves too; computed ONCE per block.
             sched_net = net_bel if r_bel is not None else net_diesel
-            refuel_sessions_bel, dep_by_index = _planner_charge_pass(
-                sched_net, location_map)
+            # One charging pass per demand sample, concatenated: stationary
+            # charging is grid load and has to scale with the level's traffic
+            # like everything else. Sim indices are offset per sample so the
+            # departure map lines up with the concatenated sim vector.
+            _refuel_parts, dep_by_index, _offset = [], {}, 0
+            for _s in demand_samples:
+                _rs, _dep = _planner_charge_pass(sched_net, location_map, _s)
+                if _rs is not None and getattr(_rs, "height", 0):
+                    _refuel_parts.append(_rs)
+                for _k, _v in (_dep or {}).items():
+                    dep_by_index[int(_k) + _offset] = _v
+                _offset += len(_level_measured_plan((_s,)))
+            refuel_sessions_bel = (
+                pl.concat(_refuel_parts, how="diagonal_relaxed")
+                if _refuel_parts else None)
             if r_bel is None:
                 refuel_sessions_bel = None
-            dep_seconds = _departure_seconds(dep_by_index, ps["n_trains"])
+            dep_seconds = _departure_seconds(dep_by_index, lvl["n_trains"])
 
             def _do_variant(tag, net, result, built_objs, energy, region_frac,
                             loco_type, cost_fns, render_pdf, *, scenario,
                             infra_lvl, infra_mult, energy_lvl,
-                            substation_meta=None, refuel_sessions=None):
+                            substation_meta=None, refuel_sessions=None,
+                            opt_infra_mult=None):
                 try:
                     m = _variant_metrics_df(
                         tag, loco_type, cost_fns, energy, result, built_objs,
                         region_frac, arch=arch, demand_lvl=demand_lvl,
-                        demand_mult=demand_mult, infra_lvl=infra_lvl,
+                        demand_samples=demand_samples, infra_lvl=infra_lvl,
                         infra_mult=infra_mult, energy_lvl=energy_lvl,
-                        net_purchased=net, stationary_sessions=refuel_sessions)
+                        net_purchased=net, stationary_sessions=refuel_sessions,
+                        opt_infra_mult=opt_infra_mult)
                     _serialize_variant_run(
                         RESULTS_DIR / f"{scenario}__{tag}", tag=tag, net=net,
                         result=result, metrics_df=m, sims=energy["sims"],
@@ -1201,7 +1515,7 @@ def run_pipeline():
                         plan_label=f"{scenario} {tag}",
                         departure_seconds=dep_seconds,
                         substation_meta=substation_meta,
-                        refuel_sessions=refuel_sessions)
+                        refuel_sessions=refuel_sessions, samples=demand_samples)
                 except Exception as exc:  # noqa: BLE001 - keep pipeline alive
                     _log(f"variant [{tag}] FAILED for {scenario}: {exc}")
 
@@ -1219,7 +1533,7 @@ def run_pipeline():
                 for energy_lvl in ENERGY_LEVELS:
                     emult = ENERGY_LEVELS[energy_lvl]
                     cell_diesel = ref_diesel * emult["diesel"]
-                    cell_elec = ref_elec * emult["elec"]
+                    cell_elec = {i: p * emult["elec"] for i, p in ref_elec.items()}
                     scenario = f"{layout}_infra-{infra_lvl}_energy-{energy_lvl}"
                     render_pdf = _should_render_pdf(infra_lvl, energy_lvl)
                     # Dual-mode buildout at THIS cost scenario (NPV-optimal, anti-
@@ -1230,7 +1544,8 @@ def run_pipeline():
                         dict(piece_opex_fn=build_opex_fn(
                                  diesel_by_link, elec_by_link, cell_diesel, cell_elec),
                              costs=cell_costs, min_energized_length_miles=5.0,
-                             warmstart=True, **common_opt))
+                             warmstart=True, **common_opt),
+                        samples=demand_samples)
                     net_dual_out = _prune_unused_catenary(net_dual, excl_dual[1])
                     if infra_lvl == "med" and energy_lvl == "med":
                         ref_r_dual = r_dual
@@ -1249,6 +1564,9 @@ def run_pipeline():
                                     render_pdf,
                                     scenario=scenario, infra_lvl=infra_lvl,
                                     infra_mult=infra_mult, energy_lvl=energy_lvl,
+                                    # BEL layouts are optimized at reference
+                                    # costs whatever the cell's multiplier.
+                                    opt_infra_mult=1.0,
                                     substation_meta=meta_bel,
                                     refuel_sessions=refuel_sessions_bel)
 
@@ -1256,7 +1574,8 @@ def run_pipeline():
             # from its single buildout.
             summary_row = {
                 "layout": layout, "architecture": arch,
-                "demand_level": demand_lvl, "demand_multiplier": demand_mult,
+                "demand_level": demand_lvl,
+                "demand_multiplier": float(len(demand_samples)),
                 "dual_status": (str(ref_r_dual.status).split(".")[-1]
                                 if ref_r_dual else "failed"),
                 "dual_gap_pct": (ref_r_dual.optimality_gap_rel * 100.0
@@ -1297,22 +1616,22 @@ def run_pipeline():
     # spanning the energy-price sweep (diesel price is the only economic dimension
     # that touches the baseline).
     e_die = None  # simulated lazily, only if a diesel step still needs running
-    for demand_lvl, demand_mult in DEMAND_LEVELS.items():
+    for demand_lvl, demand_samples in DEMAND_LEVELS.items():
         d_step = f"diesel_{demand_lvl}"
         if _step_done(d_step):
             _log(f"RESUME: skipping completed step diesel {demand_lvl}")
             continue
         if e_die is None:
             e_die = _sim(net_diesel, "conventional", "no_catenary",
-                         "diesel-baseline")
+                         "diesel-baseline", demand_samples)
         die_metrics = []
         for energy_lvl in ENERGY_LEVELS:
             try:
                 die_metrics.append(_variant_metrics_df(
                     "diesel", "Diesel",
                     {"Diesel": lambda _y: _defaults.DIESEL_LOCO_COST_USD}, e_die,
-                    None, [], {GRID_REGION_EAST: 1.0}, arch="none",
-                    demand_lvl=demand_lvl, demand_mult=demand_mult,
+                    None, [], {DEFAULT_CATENARY_NODE: 1.0}, arch="none",
+                    demand_lvl=demand_lvl, demand_samples=demand_samples,
                     infra_lvl="na", infra_mult=1.0, energy_lvl=energy_lvl))
             except Exception as exc:  # noqa: BLE001 - keep pipeline alive
                 _log(f"diesel metrics FAILED {demand_lvl}/{energy_lvl}: {exc}")
@@ -1368,8 +1687,31 @@ SIM_BEL_CAT_PWR_MAX_WATTS = 5.0e6
 # buildout) with its locomotives overridden to all dual-mode (cost) or all BEL
 # (battery). Defaults to the milestone_1.3 Spokane-Lethbridge consist
 # plan sitting next to this script.
-CONSIST_PLAN_PATH = (Path(__file__).resolve().parent
-                     / "train_consist_plan_spokane_lethbridge_clean.csv")
+#
+# There is one per demand SAMPLE. Each is an independent draw of the same
+# representative week at the same per-sample traffic level (52 trains/week,
+# the level at which this corridor's trip times still settle), differing only
+# in which observed consists were drawn -- pairwise overlap runs 15-23%, so
+# they are different weeks rather than copies of one.
+#
+# `DEMAND_LEVELS` composes them in units of the CALIBRATED volume, which is
+# itself two samples here: 1x is samples 1-2, 2x is 1-4, 4x is 1-8.
+#
+# They are never concatenated. A 4x level is EIGHT meet-pass problems of 52
+# trains each, solved separately and summed, not one problem of 416. That is
+# deliberate: it raises energy throughput for the economics and grid-impact
+# questions without asserting the congestion that 416 trains on this corridor
+# would actually cause -- which, measured, is an unbounded queue. Results at 2x
+# and 4x therefore describe demand, not congestion, and must be caveated so.
+_CORRIDOR_INPUTS = Path(__file__).resolve().parent.parent / "corridor_inputs"
+_PLAN_BASENAME = "train_consist_plan_spokane_lethbridge_clean.csv"
+CONSIST_PLAN_PATHS = tuple(
+    _CORRIDOR_INPUTS / (_PLAN_BASENAME if k == 1
+                        else f"sample{k}_{_PLAN_BASENAME}")
+    for k in range(1, max(max(s_) for s_ in DEMAND_LEVELS.values()) + 2)
+)
+# Single-sample entry point, for the paths that are not demand-swept.
+CONSIST_PLAN_PATH = CONSIST_PLAN_PATHS[0]
 # Electrical assumptions for line losses (25 kV AC medium; matches RULE_COSTS).
 SIM_SYSTEM_VOLTAGE_VOLTS = 25_000.0
 SIM_ELECTRIFICATION_TYPE = "ac_25kv_1x25"
@@ -1437,8 +1779,10 @@ def load_consist_plan(path=None):
 # post-optimization buildout test run the FULL plan).
 _RAIL_VEHICLES = None
 _FREIGHT_TO_CAR = None
-_FULL_CONSIST_PLAN = None
-_PLAN_SUMMARY = None
+# Keyed by demand-sample index (or by explicit path), not singletons: the
+# demand levels need several plans loaded at once and must not share a cache.
+_FULL_CONSIST_PLAN = {}
+_PLAN_SUMMARY = {}
 
 
 def _load_rail_vehicles():
@@ -1455,7 +1799,7 @@ def _load_rail_vehicles():
     return _RAIL_VEHICLES, _FREIGHT_TO_CAR
 
 
-def _load_full_consist_plan(path=None):
+def _load_full_consist_plan(path=None, sample=0):
     """Parse the imported consist plan into one record per TRAIN (loaded once).
 
     The CSV has one row per locomotive assignment (keyed by ``Train_ID``); this
@@ -1465,11 +1809,11 @@ def _load_full_consist_plan(path=None):
     train's locomotives to be all dual-mode or all BEL while preserving
     that consist size and the rest of the train's attributes.
     """
-    global _FULL_CONSIST_PLAN
-    if _FULL_CONSIST_PLAN is None:
-        path = path if path is not None else CONSIST_PLAN_PATH
+    key = str(path) if path is not None else int(sample)
+    if key not in _FULL_CONSIST_PLAN:
+        path = path if path is not None else CONSIST_PLAN_PATHS[sample]
         df = pl.read_csv(path)
-        _FULL_CONSIST_PLAN = (
+        _FULL_CONSIST_PLAN[key] = (
             df.group_by("Train_ID")
             .agg(
                 pl.len().alias("n_locos"),
@@ -1486,16 +1830,16 @@ def _load_full_consist_plan(path=None):
             .sort("Train_ID")
             .to_dicts()
         )
-    return _FULL_CONSIST_PLAN
+    return _FULL_CONSIST_PLAN[key]
 
 
-def _extended_plan():
+def _extended_plan(sample=0):
     """The consist plan wrapped into warm-up + measured week + cool-down.
 
     Each record carries ``_measured``: True for the week being reported on,
     False for the traffic that exists only to congest it.
     """
-    base = _load_full_consist_plan()
+    base = _load_full_consist_plan(sample=sample)
     if WARMUP_DAYS <= 0 and COOLDOWN_DAYS <= 0:
         return [dict(t, _measured=True) for t in base]
 
@@ -1531,26 +1875,44 @@ def _in_measure_window(train) -> bool:
     return bool(train.get("_measured", True))
 
 
-def _plan_summary():
-    """Traffic summary of the imported consist plan (treated as one week).
+def _plan_summary(sample=0):
+    """Traffic summary of one demand sample's consist plan (one week).
 
     Returns trains/day, locomotives/day, and average locomotives/train over
-    ``PLAN_DAYS``; used for reporting and fleet sizing now that the demand sweep
-    is a multiplier on the plan rather than a trains/day setting.
+    ``PLAN_DAYS``, for reporting and fleet sizing. A demand LEVEL's traffic is
+    the sum over its samples -- see `_level_plan_summary`.
     """
-    global _PLAN_SUMMARY
-    if _PLAN_SUMMARY is None:
-        plan = _load_full_consist_plan()
+    if sample not in _PLAN_SUMMARY:
+        plan = _load_full_consist_plan(sample=sample)
         n_trains = len(plan)
         total_locos = sum(int(t["n_locos"]) for t in plan)
-        _PLAN_SUMMARY = {
+        _PLAN_SUMMARY[sample] = {
             "n_trains": n_trains,
             "total_locos": total_locos,
             "trains_per_day": n_trains / PLAN_DAYS,
             "locos_per_day": total_locos / PLAN_DAYS,
             "avg_locos_per_train": total_locos / max(n_trains, 1),
         }
-    return _PLAN_SUMMARY
+    return _PLAN_SUMMARY[sample]
+
+
+def _level_plan_summary(samples):
+    """Traffic of a demand LEVEL: its samples' traffic, summed.
+
+    Counts and rates add across samples because each sample is a separate week
+    of trains on the same corridor. Averages (locomotives per train) do not add
+    and are re-derived from the summed totals.
+    """
+    totals = {"n_trains": 0, "total_locos": 0, "trains_per_day": 0.0,
+              "locos_per_day": 0.0}
+    for s in samples:
+        ps = _plan_summary(s)
+        for k in totals:
+            totals[k] += ps[k]
+    totals["avg_locos_per_train"] = (
+        totals["total_locos"] / max(totals["n_trains"], 1))
+    totals["n_samples"] = len(samples)
+    return totals
 
 
 # Substation SPACING is sized from a voltage-drop model at a DESIGN train power:
@@ -1570,7 +1932,12 @@ def _design_train_power_watts():
     global _DESIGN_TRAIN_POWER_WATTS
     if _DESIGN_TRAIN_POWER_WATTS is None:
         import numpy as _np
-        n_locos = [int(t["n_locos"]) for t in _load_full_consist_plan()]
+        # Pooled over every demand sample: substation spacing is a property
+        # of the corridor's consists, not of how many weeks of them are
+        # simulated, and pooling gives the percentile a larger, stabler base.
+        n_locos = [int(t["n_locos"])
+                   for s in range(len(CONSIST_PLAN_PATHS))
+                   for t in _load_full_consist_plan(sample=s)]
         pct_locos = float(_np.percentile(n_locos, DESIGN_TRAIN_POWER_PERCENTILE))
         _DESIGN_TRAIN_POWER_WATTS = pct_locos * SIM_BEL_CAT_PWR_MAX_WATTS
         _log(f"substation-spacing design train power: "
@@ -1612,6 +1979,7 @@ def _build_locos(n_locos, traction_kind, save_interval=SIM_SAVE_INTERVAL,
             "traction_kind must be 'dual_mode', 'conventional', or "
             f"'battery_electric', got {traction_kind!r}"
         )
+    locos = [_with_receptivity(loco) for loco in locos]
     for loco in locos:
         loco.set_save_interval(save_interval)
     return locos
@@ -1659,8 +2027,12 @@ def _make_plan_train_ts(train, location_map, traction_kind,
             if departure_hr is not None else None
         ),
     )
+    # The plan is one representative week; stamping it on the sim keeps the Rust
+    # annualize getters consistent with the metrics calculator's own scaler
+    # (which no longer depends on this field, but downstream readers may).
     ts = tsb.make_speed_limit_train_sim(
-        location_map=location_map, save_interval=save_interval)
+        location_map=location_map, save_interval=save_interval,
+        simulation_days=int(PLAN_DAYS))
     ts.set_save_interval(save_interval)
     return ts
 
@@ -1683,7 +2055,7 @@ def _make_corridor_ts(location_map, origin_id, destination_id, loco_factory=None
     )
     if loco_factory is None:
         loco_factory = alt.Locomotive.default_dual_mode_loco
-    loco = loco_factory()
+    loco = _with_receptivity(loco_factory())
     loco.set_save_interval(SIM_SAVE_INTERVAL)
     loco_con = alt.Consist([loco.copy() for _ in range(SIM_N_LOCOS)], SIM_SAVE_INTERVAL)
     tsb = alt.TrainSimBuilder(
@@ -1775,7 +2147,7 @@ def _extract_from_pydict(ts, d):
     dts = [t2 - t1 for t1, t2 in zip(times[:-1], times[1:])]
     fuel_w = [0.0] * n
     panto_w = [0.0] * n
-    pantograph_j = line_loss_j = battery_j = 0.0
+    pantograph_j = line_loss_j = battery_j = regen_j = 0.0
     for loco in d["loco_con"]["loco_vec"]:
         lt = loco["loco_type"]
         ci = _loco_cat_int(loco)
@@ -1790,11 +2162,16 @@ def _extract_from_pydict(ts, d):
             # interval. Measured at 60 s on a catenary sim: 0.011% low.
             e_in = cs.get("energy_elec_in_joules")
             e_ll = cs.get("energy_line_loss_joules")
+            # Returned to a receptive wire; `energy_elec_in` is NET of it, so
+            # the gross draw is their sum. Absent on sims that predate it.
+            e_rg = cs.get("energy_elec_regen_joules")
             if e_in is None:
                 e_in = (ch.get("energy_elec_in_joules") or [None])[-1]
                 e_ll = (ch.get("energy_line_loss_joules") or [None])[-1]
+                e_rg = (ch.get("energy_elec_regen_joules") or [0.0])[-1]
             if e_in is not None:
-                pantograph_j += e_in
+                pantograph_j += e_in + (e_rg or 0.0)
+                regen_j += e_rg or 0.0
                 line_loss_j += e_ll or 0.0
             else:  # fallback: left-rectangle integration of power over time steps
                 grid = ch.get("pwr_elec_in_watts") or []
@@ -1825,6 +2202,12 @@ def _extract_from_pydict(ts, d):
                 battery_j += e_chem
     diesel_j_by_link = {}
     draw_by_link = {}
+    net_by_link = {}
+    # `pwr_elec_in` is signed: positive drawing, negative returning. The gross
+    # draw per link says which wire is USED (direction exclusion); the net,
+    # with the return credited at the export fraction, is what the optimizer's
+    # opex should see.
+    credit = CATENARY_EXPORT_CREDIT_FRACTION
     for i, dt in enumerate(dts):
         li = front[i]
         if not li:  # skip 0 / None (off-network / pre-departure steps)
@@ -1833,12 +2216,21 @@ def _extract_from_pydict(ts, d):
             diesel_j_by_link[li] = diesel_j_by_link.get(li, 0.0) + fuel_w[i] * dt
         if panto_w[i] > 0.0:
             draw_by_link[li] = draw_by_link.get(li, 0.0) + panto_w[i] * dt
+            net_by_link[li] = net_by_link.get(li, 0.0) + panto_w[i] * dt
+        elif panto_w[i] < 0.0:
+            net_by_link[li] = net_by_link.get(li, 0.0) + credit * panto_w[i] * dt
+    # Grid electricity is NET of what a receptive wire took back (the line loss
+    # on the return leg comes out of the returned energy).
+    loss_on_return = (line_loss_j * regen_j / (pantograph_j + regen_j)
+                      if pantograph_j + regen_j > 0 else 0.0)
     totals = {"diesel_j": ts.get_energy_fuel_joules(False),
-              "pantograph_elec_j": pantograph_j, "line_loss_j": line_loss_j,
-              "grid_elec_j": pantograph_j + line_loss_j, "battery_j": battery_j,
+              "pantograph_elec_j": pantograph_j, "regen_elec_j": regen_j,
+              "line_loss_j": line_loss_j,
+              "grid_elec_j": pantograph_j + line_loss_j - max(regen_j - loss_on_return, 0.0),
+              "battery_j": battery_j,
               "travel_hr": times[-1] / 3600.0}
     return {"totals": totals, "diesel_j_by_link": diesel_j_by_link,
-            "draw_by_link": draw_by_link}
+            "draw_by_link": draw_by_link, "net_by_link": net_by_link}
 
 
 def _energy_from_walked(ts):
@@ -1890,7 +2282,7 @@ WALK_PARALLELIZE = True
 
 
 def _run_full_plan(sim_network, location_map, label, traction_kind,
-                   want_per_link=False, keep_sims=True):
+                   want_per_link=False, keep_sims=True, sample=0):
     """Build, dispatch, and walk EVERY train in the consist plan over
     ``sim_network``; return energy summed over all trains.
 
@@ -1910,11 +2302,11 @@ def _run_full_plan(sim_network, location_map, label, traction_kind,
         Retain the walked sims in the result (needed for battery sizing / the
         itemized-cost rollout; set False to save memory for baseline-only runs).
     """
-    plan = _extended_plan()
+    plan = _extended_plan(sample)
     n = len(plan)
     n_measured = sum(1 for t in plan if _in_measure_window(t))
-    totals = {"diesel_j": 0.0, "pantograph_elec_j": 0.0, "line_loss_j": 0.0,
-              "battery_j": 0.0, "travel_hr": 0.0}
+    totals = {"diesel_j": 0.0, "pantograph_elec_j": 0.0, "regen_elec_j": 0.0,
+              "line_loss_j": 0.0, "grid_elec_j": 0.0, "battery_j": 0.0, "travel_hr": 0.0}
     diesel_by_link, elec_by_link, draw_by_link = {}, {}, {}
     sims = []
     trains_with_helpers = 0
@@ -1934,7 +2326,8 @@ def _run_full_plan(sim_network, location_map, label, traction_kind,
         if want_per_link:
             for li, v in ex["diesel_j_by_link"].items():
                 diesel_by_link[li] = diesel_by_link.get(li, 0.0) + v
-            for li, v in ex["draw_by_link"].items():
+            # Net electricity per link (return credited), for the opex densities.
+            for li, v in ex["net_by_link"].items():
                 elec_by_link[li] = elec_by_link.get(li, 0.0) + v
         if keep_sims:
             sims.append(ts)
@@ -1949,18 +2342,22 @@ def _run_full_plan(sim_network, location_map, label, traction_kind,
         # conflict is ever resolved, so each train saw an empty corridor and the
         # per-link densities carried no congestion at all. That is the same
         # defect commit d4f245c fixed in `sim_manager`.
-        sims, etns = [], []
+        # `built`, NOT `sims`: `sims` is the accumulator of RETAINED walked sims
+        # that this function returns, and `_accumulate` appends to it below.
+        # Rebinding it here as the pre-dispatch build list and then deleting it
+        # left the return statement reading a deleted local.
+        built, etns = [], []
         for k, train in enumerate(plan, 1):
             ts = _make_plan_train_ts(train, location_map, traction_kind)
             etn, _consist = alt.make_est_times(ts, sim_network)
-            sims.append(ts)
+            built.append(ts)
             etns.append(etn)
             if k % 20 == 0 or k == n:
                 _log(f"    {label}: built {k}/{n} "
                      f"({time.perf_counter() - t0:.0f}s)")
-        vec = alt.SpeedLimitTrainSimVec(sims)
+        vec = alt.SpeedLimitTrainSimVec(built)
         timed = list(alt.run_dispatch(sim_network, vec, etns, False, False))
-        del sims, etns
+        del built, etns
         _log(f"    {label}: dispatched {n} trains together "
              f"({time.perf_counter() - t0:.0f}s)")
         vec.walk_timed_paths(sim_network, timed, True)
@@ -1988,9 +2385,9 @@ def _run_full_plan(sim_network, location_map, label, traction_kind,
                 _log(f"    {label}: {k}/{n} trains "
                      f"({time.perf_counter() - t0:.0f}s)")
 
-    totals["grid_elec_j"] = totals["pantograph_elec_j"] + totals["line_loss_j"]
+    # `grid_elec_j` was summed per train above, net of returned energy.
     _log(f"  {label} TOTAL over {n} trains: diesel {totals['diesel_j']/1e9:.1f} GJ, "
-         f"grid {totals['grid_elec_j']/1e9:.1f} GJ, "
+         f"grid {totals['grid_elec_j']/1e9:.1f} GJ (returned {totals['regen_elec_j']/1e9:.1f} GJ), "
          f"battery {totals['battery_j']/1e9:.1f} GJ")
     if trains_with_helpers:
         _log(f"  {label}: {trains_with_helpers}/{n} trains required a diesel helper "
@@ -2033,7 +2430,10 @@ def _per_link_energy_from_sim(ts):
         if not li:  # skip 0 / None (off-network / pre-departure steps)
             continue
         diesel_j_by_link[li] = diesel_j_by_link.get(li, 0.0) + fuel_w[i] * dt
-        elec_j_by_link[li] = elec_j_by_link.get(li, 0.0) + grid_w[i] * dt
+        # Signed pantograph power: a return (negative) is credited at the
+        # export fraction, a draw in full.
+        w = grid_w[i] if grid_w[i] >= 0.0 else CATENARY_EXPORT_CREDIT_FRACTION * grid_w[i]
+        elec_j_by_link[li] = elec_j_by_link.get(li, 0.0) + w * dt
     return diesel_j_by_link, elec_j_by_link
 
 
@@ -2143,8 +2543,8 @@ def _sim_bundle_path(traction_kind: str, fingerprint: str) -> Path:
 def _aggregate_walked_energy(sims: list) -> dict:
     """Rebuild the ``_run_full_plan`` energy totals from ALREADY-walked sims (no
     dispatch), so a reloaded bundle matches a freshly simulated one."""
-    totals = {"diesel_j": 0.0, "pantograph_elec_j": 0.0, "line_loss_j": 0.0,
-              "battery_j": 0.0, "travel_hr": 0.0}
+    totals = {"diesel_j": 0.0, "pantograph_elec_j": 0.0, "regen_elec_j": 0.0,
+              "line_loss_j": 0.0, "grid_elec_j": 0.0, "battery_j": 0.0, "travel_hr": 0.0}
     draw_by_link = {}
     for ts in sims:
         ex = _extract_from_pydict(ts, ts.to_pydict())
@@ -2152,7 +2552,7 @@ def _aggregate_walked_energy(sims: list) -> dict:
             totals[k] += ex["totals"][k]
         for li, v in ex["draw_by_link"].items():
             draw_by_link[li] = draw_by_link.get(li, 0.0) + v
-    totals["grid_elec_j"] = totals["pantograph_elec_j"] + totals["line_loss_j"]
+    totals["grid_elec_j"] = totals["pantograph_elec_j"] + totals["line_loss_j"] - totals["regen_elec_j"]
     return {**totals, "sims": list(sims), "n_trains": len(sims),
             "diesel_j_by_link": {}, "elec_j_by_link": {},
             "draw_by_link": draw_by_link}
@@ -2206,7 +2606,7 @@ def _bel_planner_config():
     return cfg
 
 
-def _planner_charge_pass(sim_network, location_map):
+def _planner_charge_pass(sim_network, location_map, sample=0):
     """Run the train planner + post-sim charging driver over the imported plan.
 
     The planner schedules the plan onto ``sim_network`` (battery-electric consists),
@@ -2218,7 +2618,7 @@ def _planner_charge_pass(sim_network, location_map):
     """
     try:
         rail_vehicles, _ = _load_rail_vehicles()
-        consist_plan_in = pl.read_csv(CONSIST_PLAN_PATH)
+        consist_plan_in = pl.read_csv(CONSIST_PLAN_PATHS[sample])
         (consist_plan_out, loco_pool, refuelers, _gef, _nep,
          train_sims, timed_paths, _untrimmed) = _sim_manager.main(
             rail_vehicles=rail_vehicles, location_map=location_map,
@@ -2243,11 +2643,11 @@ def _planner_charge_pass(sim_network, location_map):
         return None, {}
 
 
-def _departure_seconds(dep_by_index, n_sims):
+def _departure_seconds(dep_by_index, n_sims, sample=0):
     """Per-train wall-clock departure offset (s) aligned to the ``_run_full_plan``
     sim order, from the planner schedule (``dep_by_index``) with the plan's planned
     departures as a fallback when the planner schedule is missing an index."""
-    plan = _load_full_consist_plan()
+    plan = _load_full_consist_plan(sample=sample)
     out = []
     for i in range(n_sims):
         hr = dep_by_index.get(i)
@@ -2257,7 +2657,73 @@ def _departure_seconds(dep_by_index, n_sims):
     return out
 
 
-def _first_pass_cache_path():
+def _level_measured_plan(samples):
+    """Per-train records in the order `_merge_plan_runs` concatenated the sims.
+
+    `_run_full_plan` retains a sim only for MEASURED trains (warm-up and
+    cool-down congest the corridor but are not part of the annualized week), in
+    plan order, and the merge concatenates samples in order. Anything that maps
+    a sim index back to its train -- fleet tables, load-curve departure
+    alignment -- has to walk the same sequence or it will attribute one
+    sample's locomotives to another sample's train.
+    """
+    return [t for s in samples
+            for t in _extended_plan(s) if _in_measure_window(t)]
+
+
+def _merge_plan_runs(parts):
+    """Combine one `_run_full_plan` result per demand sample into one.
+
+    A demand level is several independent weeks of traffic on the same
+    corridor, so its energy, emissions, cost basis and train counts are the
+    sums over its samples, its per-link dictionaries add link by link, and its
+    walked sims concatenate -- which is what carries the extra traffic into the
+    metrics calculator and the substation load curves.
+
+    The samples are NOT merged before dispatch. Each was dispatched and walked
+    on its own, so no train in one sample ever met a train in another. This
+    raises throughput without asserting the congestion that the combined
+    traffic would cause; see `DEMAND_LEVELS`.
+    """
+    parts = list(parts)
+    if len(parts) == 1:
+        return parts[0]
+    merged = {}
+    for key, sample_value in parts[0].items():
+        if key == "sims":
+            continue
+        if isinstance(sample_value, dict):
+            merged[key] = _sum_link_densities(part[key] for part in parts)
+        elif isinstance(sample_value, bool) or not isinstance(sample_value, (int, float)):
+            merged[key] = sample_value          # labels, networks, flags
+        else:
+            merged[key] = sum(part[key] for part in parts)
+    # A plain list, matching what `_run_full_plan` returns. Wrapping it in a
+    # `SpeedLimitTrainSimVec` here made the merged result behave differently from
+    # an unmerged one: the vec is not iterable from Python, so every consumer
+    # that walks `energy["sims"]` directly -- `_region_fractions`,
+    # `_build_fleet_tables`, `_train_timeseries_df` -- broke, but only at 2x and
+    # 4x, since 1x returns its single part untouched. Callers that need a vec
+    # build one themselves.
+    merged["sims"] = [ts for part in parts for ts in list(part.get("sims") or [])]
+    return merged
+
+
+def _sum_link_densities(dicts):
+    """Add per-link energy densities across demand samples.
+
+    Each sample contributes a full week of traffic over the same links, so the
+    densities add. Links absent from one sample (no train reached them in that
+    week) simply contribute zero there rather than dropping out of the union.
+    """
+    out = {}
+    for d in dicts:
+        for link_idx, value in d.items():
+            out[link_idx] = out.get(link_idx, 0.0) + value
+    return out
+
+
+def _first_pass_cache_path(sample=0):
     """Stable cache path for the first-pass densities, keyed by their inputs.
 
     The key hashes the consist-plan file contents plus the network file, speed
@@ -2265,14 +2731,14 @@ def _first_pass_cache_path():
     only when those inputs are unchanged; edit any of them and a fresh pass runs.
     """
     h = hashlib.sha1()
-    h.update(Path(CONSIST_PLAN_PATH).read_bytes())
+    h.update(Path(CONSIST_PLAN_PATHS[sample]).read_bytes())
     h.update(str(_NET_PATH).encode())
     h.update(repr((SPEED_CALIBRATION_MAX_MPH, SPEED_LIMIT_SCALER, SIM_SAVE_INTERVAL,
                    COMMON["uniform_power_limit_watts"], PLAN_DAYS)).encode())
     return _CACHE_DIR / f"first_pass_densities_{h.hexdigest()[:12]}.parquet"
 
 
-def first_pass_densities():
+def first_pass_densities(sample=0):
     """First-pass calibrated sims over the FULL consist plan -> per-link densities.
 
     Runs every train in the imported consist plan (all-dual-mode composition)
@@ -2289,7 +2755,7 @@ def first_pass_densities():
     The result is cached to ``_CACHE_DIR`` (keyed by the inputs) and reused on
     subsequent runs so the ~160-train pass isn't repeated unnecessarily.
     """
-    cache = _first_pass_cache_path()
+    cache = _first_pass_cache_path(sample)
     if cache.exists():
         _log(f"FIRST-PASS: reusing cached densities <- {cache}")
         cdf = pl.read_parquet(cache)
@@ -2306,11 +2772,32 @@ def first_pass_densities():
     net_cat = _calibrate_speeds(en.energize_uniform(
         network, uniform_power_limit_watts=COMMON["uniform_power_limit_watts"]))
     die = _run_full_plan(net_diesel, location_map, "first-pass/all-diesel",
-                         "dual_mode", want_per_link=True, keep_sims=False)
+                         "dual_mode", want_per_link=True, keep_sims=False,
+                         sample=sample)
     cat = _run_full_plan(net_cat, location_map, "first-pass/all-catenary",
-                         "dual_mode", want_per_link=True, keep_sims=False)
+                         "dual_mode", want_per_link=True, keep_sims=False,
+                         sample=sample)
     diesel_j_by_link = die["diesel_j_by_link"]   # fuel from all-diesel pass
     elec_j_by_link = cat["elec_j_by_link"]       # grid from all-catenary pass
+
+    # These maps are the optimizer's entire view of where electrification pays,
+    # and they are assembled from history series this study never configures
+    # explicitly -- it saves everything. The sibling DoE (`corridor_doe`) now
+    # records a deliberately parsimonious five-series set, and applying that
+    # here would empty these maps: `link_idx_front` keys the per-link
+    # attribution, `fc.history.pwr_fuel_watts` supplies the diesel, and
+    # `cat_int.history.pwr_elec_in_watts` the pantograph draw. Two of the three
+    # degrade to empty lists rather than raising, so the failure would reach the
+    # MILP as "nothing to save anywhere" instead of as an error.
+    for name, by_link in (("diesel", diesel_j_by_link), ("electric", elec_j_by_link)):
+        if not by_link:
+            raise RuntimeError(
+                f"first-pass {name} per-link density map is empty -- the walked "
+                "sims did not carry the history this needs (train "
+                "`link_idx_front`, per-locomotive `fc.pwr_fuel_watts`, "
+                "`cat_int.pwr_elec_in_watts`). Check that save intervals were "
+                "not trimmed for these components."
+            )
 
     # J/gallon diesel (LHV * density * m3/gallon), from altrios defaults/utils.
     j_per_gal = ((_defaults.LHV_DIESEL_KJ_PER_KG * 1000.0)
@@ -2360,14 +2847,21 @@ def _bel_with_cat_loco_cost(year: int) -> float:
 
 
 def _infrastructure_costs_df(plan_result, built_subs, arch=ITEMIZED_ARCH,
-                             infra_mult=1.0, net_purchased=None) -> pl.DataFrame:
+                             infra_mult=1.0, net_purchased=None,
+                             opt_infra_mult=None) -> pl.DataFrame:
     """Per-asset catenary infrastructure capital ($) for the metrics rollover,
     using ``arch``'s medium costs scaled by ``infra_mult`` (the infrastructure-cost
     sweep level): one aggregate structure asset, one aggregate energization asset,
     and one row per built (non-existing) substation.
 
-    Structure is charged per corridor route-mile (shared per site) and energization
-    per track-mile. When ``net_purchased`` is given, the energization (marginal
+    Structure is charged per corridor route-mile -- the optimizer's own basis,
+    once per site however many parallel tracks share the masts, read from
+    ``plan_result.structure_route_miles`` -- and energization per track-mile.
+    A plan solved before the optimizer recorded route-miles has that field
+    ``None``; then the mileage is backed out exactly from the optimizer's capital
+    total at the multiplier the plan was OPTIMIZED at (``opt_infra_mult``,
+    defaulting to ``infra_mult``; BEL plans are optimized at reference costs, so
+    their callers pass 1.0). When ``net_purchased`` is given, the energization (marginal
     wire) miles are read straight from that network's ``cat_power_limits`` -- i.e.
     the AS-PURCHASED wire after direction exclusion strips catenary the fleet never
     charges from -- while structure keeps the full optimizer mileage (masts serve
@@ -2375,14 +2869,24 @@ def _infrastructure_costs_df(plan_result, built_subs, arch=ITEMIZED_ARCH,
 
     The ``Distance_Miles`` / ``Distance_Units`` columns feed the metrics
     calculator's ``Distance_Energized`` metric: energization carries the built
-    catenary wire length (track-miles). Structure would carry corridor-miles, but
-    that is not stored on the plan result, so it is left null here.
+    catenary wire length (track-miles). Structure's is left null on purpose so
+    that metric keeps reporting wire only.
     """
     med = ARCH_MEDIUM_COSTS[arch]
-    struct_miles = plan_result.energized_track_miles or 0.0
-    energ_miles = (_net_energized_track_miles(net_purchased)
-                   if net_purchased is not None else struct_miles)
+    track_miles = plan_result.energized_track_miles or 0.0
     n_subs = sum(1 for s in built_subs if not getattr(s, "existing", False))
+    struct_miles = getattr(plan_result, "structure_route_miles", None)
+    if struct_miles is None:
+        m = infra_mult if opt_infra_mult is None else opt_infra_mult
+        struct_miles = ((plan_result.total_cost or 0.0)
+                        - med["energization"] * m * track_miles
+                        - med["substation"] * m * n_subs) / (med["structure"] * m)
+        if not (-1e-6 <= struct_miles <= track_miles + 1e-6):
+            raise ValueError(f"backed-out structure {struct_miles:.2f} route-mi is "
+                             f"outside [0, {track_miles:.2f}] track-mi")
+        struct_miles = max(struct_miles, 0.0)
+    energ_miles = (_net_energized_track_miles(net_purchased)
+                   if net_purchased is not None else track_miles)
     rows = [
         {"Infrastructure_Type": "Catenary_Structure",
          "Cost_USD": med["structure"] * infra_mult * USD_PER_MUSD * struct_miles,
@@ -2431,7 +2935,7 @@ def _price_pool_for_year(pool, cost_fns, year):
     return pool.drop("Cost_USD").join(price_map, on="Locomotive_Type", how="left")
 
 
-def _build_fleet_tables(sims_list, cost_fns):
+def _build_fleet_tables(sims_list, cost_fns, samples=(0,)):
     """Build the ``loco_pool`` + ``consist_plan`` tables spanning the full plan.
 
     Enumerates every locomotive in every plan train (``sims_list`` order == the
@@ -2443,7 +2947,7 @@ def _build_fleet_tables(sims_list, cost_fns):
     Per-year re-pricing over the rollout is applied later by
     :func:`_price_pool_for_year`.
     """
-    plan = _load_full_consist_plan()
+    plan = _level_measured_plan(samples)
     pool_rows, cp_rows = [], []
     loco_id = 0
     for idx, ts in enumerate(sims_list):
@@ -2479,16 +2983,16 @@ def _year_scenario(scenario_year, sims, loco_pool, consist_plan, region_elec_j,
     (via ``emissions_factors``) attribute emissions by region.
     """
     mult = ENERGY_LEVELS[energy_lvl]
-    # Central ("med") prices are the AEO2026 trajectory at this rollout year; the
-    # gap multipliers widen low/high. Electricity is $/kWh here.
-    diesel_price = _aeo_diesel_price(scenario_year) * mult["diesel"]
-    elec_price = _aeo_elec_price(scenario_year) * mult["elec"]
+    # Central ("med") prices are each zone's trajectory at this rollout year; the
+    # gap multipliers widen low/high. Electricity is priced per node from the node's
+    # zone; diesel once, as the terminal-zone mean.
+    diesel_price = corridor_diesel_price(scenario_year) * mult["diesel"]
     regions = list(region_elec_j.keys())
-    # Electricity priced per grid-region node; diesel priced once (mean is used).
     # calculate_energy_cost multiplies electricity kWh by Price/100, so the
     # electricity price is in CENTS/kWh; diesel is $/gallon.
     nodal_energy_prices = pl.DataFrame(
-        [{"Node": r, "Fuel": "Electricity", "Price": elec_price * 100.0}
+        [{"Node": r, "Fuel": "Electricity",
+          "Price": zone_elec_price(node_zone(r), scenario_year) * mult["elec"] * 100.0}
          for r in regions]
         + [{"Node": "corridor", "Fuel": "Diesel", "Price": diesel_price}]
     )
@@ -2529,9 +3033,9 @@ _ANNUAL_METRICS = [
 
 
 def _variant_metrics_df(tag, loco_type, cost_fns, energy, plan_result, built_subs,
-                        region_frac, *, arch, demand_lvl, demand_mult, infra_lvl,
+                        region_frac, *, arch, demand_lvl, demand_samples, infra_lvl,
                         infra_mult, energy_lvl, net_purchased=None,
-                        stationary_sessions=None):
+                        stationary_sessions=None, opt_infra_mult=None):
     """Run the metrics calculator for ONE simulated variant at ONE economic point
     (infra cost x energy price); return its tidy long-format metrics cross-joined
     with a single-row provenance frame.
@@ -2554,30 +3058,35 @@ def _variant_metrics_df(tag, loco_type, cost_fns, energy, plan_result, built_sub
     mult = ENERGY_LEVELS[energy_lvl]
     ps = _plan_summary()
     rollout_years = [METRICS_START_YEAR + k for k in range(METRICS_ROLLOUT_YEARS)]
-    emissions_factors = _mc.interpolate_emissions_factors_cambium(
+    ef_by_region = _mc.interpolate_emissions_factors_cambium(
         [GRID_REGION_WEST, GRID_REGION_EAST], rollout_years, CAMBIUM_SCENARIO)
     infra_df = (None if tag == "diesel"
                 else _infrastructure_costs_df(plan_result, built_subs, arch,
-                                              infra_mult, net_purchased=net_purchased))
+                                              infra_mult, net_purchased=net_purchased,
+                                              opt_infra_mult=opt_infra_mult))
     full_miles = (plan_result.energized_track_miles or 0.0
                   if plan_result is not None else 0.0)
     purchased_miles = (_net_energized_track_miles(net_purchased)
                        if net_purchased is not None else full_miles)
     excl_miles = max(full_miles - purchased_miles, 0.0)
-    # Full plan == one week of traffic; the demand multiplier scales it by
-    # shortening the represented window (annualization = 365.25 / simulation_days),
-    # scaling sim diesel and refuel electricity together.
-    simulation_days = PLAN_DAYS / max(demand_mult, 1e-9)
-    n_locos = int(round(ps["total_locos"] * demand_mult))
+    # A demand level's sims ALREADY contain its extra trains -- one sample's
+    # worth per sample, concatenated by `_merge_plan_runs` -- so the represented
+    # window stays one week and annualization is the plain 365.25 / PLAN_DAYS.
+    # The previous design faked demand by shrinking this window instead, which
+    # scaled energy without ever putting more trains on the corridor.
+    _lvl = _level_plan_summary(demand_samples)
+    simulation_days = PLAN_DAYS
+    n_locos = int(_lvl["total_locos"])
     loco_cost_ref = float(cost_fns[loco_type](METRICS_START_YEAR))  # representative
     _log(f"METRICS [{tag}] {arch}/{demand_lvl}/infra-{infra_lvl}/energy-{energy_lvl}: "
-         f"{METRICS_ROLLOUT_YEARS}-yr rollout of {ps['n_trains']} trains "
+         f"{METRICS_ROLLOUT_YEARS}-yr rollout of {_lvl['n_trains']} trains "
          f"(loco ${loco_cost_ref/1e6:.2f}M @{METRICS_START_YEAR})")
     sims = alt.SpeedLimitTrainSimVec(list(energy["sims"]))
     # Consist plan is year-invariant; the loco pool's Cost_USD is set per rollout
     # year (by locomotive TYPE) so purchases are priced at their year of purchase in
     # the DCF rollover -- exact for mixed BEL + diesel-helper consists.
-    loco_pool_base, consist_plan = _build_fleet_tables(energy["sims"], cost_fns)
+    loco_pool_base, consist_plan = _build_fleet_tables(
+        energy["sims"], cost_fns, demand_samples)
     # Grid-side stationary (terminal) charging energy, week total, so the metrics
     # calculator sees it in the electricity total and reports it as
     # Electricity_Stationary_Charging (total grid electricity minus catenary draw).
@@ -2586,6 +3095,15 @@ def _variant_metrics_df(tag, loco_type, cost_fns, energy, plan_result, built_sub
         stationary_j = float(
             stationary_sessions.get_column("Refuel_Energy_J").sum() or 0.0)
     region_elec_j = _split_electricity(energy, region_frac, stationary_j)
+    # Emissions factors keyed by the same "<region>|<zone>" nodes the electricity is
+    # priced on, copying each node's region.
+    emissions_factors = composite_emissions(ef_by_region, list(region_elec_j))
+    elec_total_j = sum(region_elec_j.values())
+    elec_price_start = (
+        sum(zone_elec_price(node_zone(n), METRICS_START_YEAR) * j for n, j in region_elec_j.items())
+        / elec_total_j if elec_total_j > 0
+        else sum(zone_elec_price(node_zone(n), METRICS_START_YEAR) for n in region_elec_j)
+        / len(region_elec_j)) * mult["elec"]
     scenarios = [
         _year_scenario(
             year, sims,
@@ -2604,16 +3122,22 @@ def _variant_metrics_df(tag, loco_type, cost_fns, energy, plan_result, built_sub
         "loco_cost_usd": loco_cost_ref,
         "architecture": arch,
         "demand_level": demand_lvl,
-        "demand_multiplier": demand_mult,
+        "demand_samples": len(demand_samples),
+        "demand_multiplier": float(len(demand_samples)),
         "infra_level": infra_lvl,
         "infra_multiplier": infra_mult,
         "energy_level": energy_lvl,
-        "diesel_price_usd_per_gal": _aeo_diesel_price(METRICS_START_YEAR) * mult["diesel"],
-        "elec_price_usd_per_kwh": _aeo_elec_price(METRICS_START_YEAR) * mult["elec"],
+        # Start-year prices: diesel is the terminal-zone mean; electricity is the
+        # draw-weighted mean over the pricing nodes, which are listed with shares.
+        "diesel_price_usd_per_gal": corridor_diesel_price(METRICS_START_YEAR) * mult["diesel"],
+        "elec_price_usd_per_kwh": elec_price_start,
+        "elec_price_nodes": ";".join(
+            f"{n}:{(j / elec_total_j if elec_total_j > 0 else 0.0):.3f}"
+            for n, j in region_elec_j.items()),
         "discount_rate": DISCOUNT_RATE,
         "rollout_years": METRICS_ROLLOUT_YEARS,
         "start_year": METRICS_START_YEAR,
-        "n_trains": ps["n_trains"],
+        "n_trains": _lvl["n_trains"],
         "n_locos": n_locos,
         "energized_track_miles": (plan_result.energized_track_miles or 0.0)
         if plan_result is not None else 0.0,
@@ -2718,10 +3242,10 @@ def _opt_outputs_df(result) -> pl.DataFrame:
     return df.join(summary, how="cross")
 
 
-def _train_timeseries_df(sims) -> pl.DataFrame:
+def _train_timeseries_df(sims, samples=(0,)) -> pl.DataFrame:
     """Concatenate every walked sim's ``to_dataframe()`` with ``train_id`` /
     ``train_index`` columns (the plan train id when available, else the index)."""
-    plan = _load_full_consist_plan()
+    plan = _level_measured_plan(samples)
     parts = []
     for idx, ts in enumerate(sims):
         tid = str(plan[idx]["Train_ID"]) if idx < len(plan) else str(idx)
@@ -2794,9 +3318,9 @@ def _stationary_charging_df(refuel_sessions) -> pl.DataFrame:
 def _serialize_variant_run(folder, *, tag, net, result, metrics_df, sims,
                            feed_distance_miles, render_pdf, plan_label,
                            departure_seconds=None, substation_meta=None,
-                           refuel_sessions=None):
+                           refuel_sessions=None, samples=(0,)):
     """Write one run's outputs to ``folder`` as Parquet: optimization outputs
-    (catenary variants only), the network + substation locations (+ a network YAML
+    (catenary variants only), the network + substation locations (+ a network msgpack
     for later PDF rebuilds), the metrics, and the concatenated per-train sim series.
     Catenary variants also get a sparse per-substation dynamic load series; the BEL
     variant additionally gets the planner-scheduled stationary charging sessions.
@@ -2808,11 +3332,15 @@ def _serialize_variant_run(folder, *, tag, net, result, metrics_df, sims,
     _network_links_df(net).write_parquet(folder / "network_links.parquet")
     _substations_df(built_ids).write_parquet(folder / "substations.parquet")
     try:
-        net.to_file(str(folder / "network.yaml"))
+        # msgpack rather than yaml: ~5x smaller and far faster to write, which matters
+        # when a sweep writes one of these per run. Lossless; read back with
+        # `alt.Network.from_file`.
+        net.to_file(str(folder / "network.msgpack"))
     except Exception as exc:  # noqa: BLE001 - network file is a convenience artifact
-        _log(f"  network.yaml write FAILED for {folder.name}: {exc}")
+        _log(f"  network.msgpack write FAILED for {folder.name}: {exc}")
     metrics_df.write_parquet(folder / "metrics.parquet")
-    _train_timeseries_df(sims).write_parquet(folder / "train_timeseries.parquet")
+    _train_timeseries_df(sims, samples).write_parquet(
+        folder / "train_timeseries.parquet")
     if substation_meta is not None and departure_seconds is not None:
         try:
             _substation_load_series_df(

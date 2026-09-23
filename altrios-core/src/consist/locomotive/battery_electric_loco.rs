@@ -84,18 +84,22 @@ impl BatteryElectricLoco {
                 self.res
                     .solve_energy_consumption(res_prop_req, res_aux_req, dt)?;
             } else {
-                // Braking/coasting: keep the catenary idle (grid draw zero) so
-                // behavior matches the no-catenary configuration -- the battery
-                // absorbs regen up to its charge limit and the rest is dissipated
-                // by the dynamic brake. (Regen-to-grid is intentionally not
-                // implemented here.)
-                cat_int.set_pwr_in_req(si::Power::ZERO, dt)?;
+                // Braking/coasting: the battery absorbs regen first, up to its
+                // charge limit; the remainder returns to the wire when it is
+                // receptive (the drivetrain's regen limit already includes the
+                // wire's capacity only in that case, so `to_cat` is zero under a
+                // non-receptive wire and the rest went to the dynamic brake).
+                let pwr_charge_max =
+                    *self.res.state.pwr_charge_max.get_fresh(|| format_dbg!())?;
+                let to_res = pwr_elec_prop_in.max(-pwr_charge_max);
+                let to_cat = pwr_elec_prop_in - to_res;
+                cat_int.set_pwr_in_req(to_cat, dt)?;
                 self.res.solve_energy_consumption(
-                    pwr_elec_prop_in,
+                    to_res,
                     pwr_aux
                         .min(
                             *self.res.state.pwr_prop_max.get_fresh(|| format_dbg!())?
-                                - pwr_elec_prop_in,
+                                - to_res,
                         )
                         .max(si::Power::ZERO),
                     dt,
@@ -245,8 +249,14 @@ impl LocoTrait for BatteryElectricLoco {
             *self.res.state.pwr_prop_max.get_fresh(|| format_dbg!())? + cat_pwr_out_max,
             None,
         )?;
-        self.edrv
-            .set_cur_pwr_regen_max(*self.res.state.pwr_charge_max.get_fresh(|| format_dbg!())?)?;
+        // Regen sinks: the pack, plus the wire when it is receptive.
+        let cat_regen_max = match self.cat_int.as_ref() {
+            Some(c) if c.receptive => cat_pwr_out_max,
+            _ => si::Power::ZERO,
+        };
+        self.edrv.set_cur_pwr_regen_max(
+            *self.res.state.pwr_charge_max.get_fresh(|| format_dbg!())? + cat_regen_max,
+        )?;
 
         // power rate is never limiting in BEL, but assuming dt will be same
         // in next time step, we can synthesize a rate

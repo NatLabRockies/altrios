@@ -54,14 +54,14 @@ ELECTRICITY_PRICE_FILE = alt.resources_root() / "metrics_inputs" / "EIA_Electric
 LIQUID_FUEL_PRICE_FILE = alt.resources_root() / "metrics_inputs" / "EIA_Liquid_Fuel_Prices.csv"
 BATTERY_PRICE_FILE = alt.resources_root() / "metrics_inputs" / "NLR_ATB_Battery_Cost_Forecasts.csv"
 
-# Year at which the EIA price series is normalized to 1.0 before being scaled by the
-# regional reference prices below. Must exist in ELECTRICITY_PRICE_FILE and
-# LIQUID_FUEL_PRICE_FILE; the AEO2026 tables start at 2025.
+# Regional energy prices. Every location's "Electricity Price Region" and "Liquid Fuel
+# Price Region" names a zone in ENERGY_PRICE_ZONE_FILE (US state or PADD region, Canadian
+# province). A zone's observed price in EIA_PRICE_REFERENCE_YEAR (real 2025 USD; diesel
+# USD/gal, industrial electricity cents/kWh) is scaled through time by the ratio of its
+# trajectory: the AEO2026 reference case (ELECTRICITY_PRICE_FILE / LIQUID_FUEL_PRICE_FILE)
+# for US zones, and the province's Canada's Energy Future 2026 Current Measures end-use
+# price (CER_ENERGY_PRICE_FILE) for Canadian zones. The reference year must exist in the
+# AEO tables, which start at 2025. See metrics_inputs/README.md for sources.
 EIA_PRICE_REFERENCE_YEAR = 2025
-# Regional (Minnesota) prices at EIA_PRICE_REFERENCE_YEAR, in the same units as the EIA
-# series they scale (diesel USD/gal, industrial electricity cents/kWh). The AEO2026 tables
-# are quoted in real 2025 dollars, so the original 2022 reference values are re-expressed
-# in 2025 dollars rather than re-sourced.
-EIA_REFERENCE_PRICE_REGION = "MN"
-EIA_REFERENCE_DIESEL_PRICE = 3.616 * utilities.USD_2022_TO_2025
-EIA_REFERENCE_ELECTRICITY_PRICE = 9.19 * utilities.USD_2022_TO_2025
+ENERGY_PRICE_ZONE_FILE = alt.resources_root() / "metrics_inputs" / "Energy_Price_Zones.csv"
+CER_ENERGY_PRICE_FILE = alt.resources_root() / "metrics_inputs" / "CER_EF2026_End_Use_Prices.csv"

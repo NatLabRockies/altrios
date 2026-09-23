@@ -36,6 +36,9 @@ MWH_PER_MJ = KWH_PER_MJ / 1.0e3
 # base year). = AEO2026 Table 20 GDP chain-price index 2025 (1.383637, 2012=1.000)
 # / 2022 actual (1.27224).
 USD_2022_TO_2025 = 1.088
+# CPI-U annual averages (BLS, 1982-84=100): 2025 321.943 / 2024 313.689. The NREL 2025
+# battery cost projections are in 2024 USD; NREL itself converts dollar years with CPI.
+USD_2024_TO_2025 = 1.026
 
 
 def package_root() -> Path:

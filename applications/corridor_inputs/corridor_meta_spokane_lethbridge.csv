@@ -1,2 +1,2 @@
-corridor,corridor_km,measured_span_km,ruling_grade,speed_cap_mph,weekly_count,count_basis,flow_aggregation,count_if_min_flow,count_if_mean_flow,count_if_train,count_if_car,count_if_length,count_if_gross_ton
-spokane_lethbridge,618.8175642249543,442.0,0.011284766161316129,33.98377890798758,52,car,min,52,104,52,52,51,52
+corridor,corridor_km,measured_span_km,ruling_grade,speed_cap_mph,weekly_count,weekly_count_total,n_samples,stable_weekly_count,count_basis,observed_span_from,observed_span_to,observed_span_km,observed_span_median_hr,observed_span_trips,flow_aggregation,count_if_min_flow,count_if_mean_flow,count_if_train,count_if_car,count_if_length,count_if_gross_ton
+spokane_lethbridge,618.8175642249543,442.0,0.011418782300094426,33.98377890798758,52,104,2,65,car,"Moyie Springs, ID","Coalhurst, AB",441.6689873933269,30.77791666666667,556,min,52,104,52,52,51,52
