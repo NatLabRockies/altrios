@@ -266,6 +266,65 @@ def increase_link_speed_limits(network_dict: dict, link_indices: list[int], new_
             non_max_vals[link_idx] = val_to_assign
     return updated_network_dict, non_max_vals
 
+def convert_network(
+    src: Union[str, Path],
+    dest: Optional[Union[str, Path]] = None,
+    dest_format: str = "msgpack",
+    overwrite: bool = False,
+    verify: bool = True,
+) -> Path:
+    """
+    Converts a rail network file to another serialization format, losslessly.
+
+    `msgpack` is the recommended format for large, machine-generated networks: it is roughly
+    5x smaller than `yaml` and substantially faster to read and write, which matters most for
+    high-resolution networks that carry lat/lon and OSM IDs. `yaml` remains preferable for small,
+    hand-edited networks, where being human-readable and diffable is worth the size.
+
+    Note that `json` is NOT lossless here: it is written at full precision but parsed back up to
+    1 ULP off, so a round trip perturbs roughly 10% of the float fields.
+
+    # Arguments
+    src: path to the existing network file; format is inferred from its extension
+    dest: path to write; defaults to `src` with its suffix replaced by `dest_format`
+    dest_format: any format accepted by `Network.to_file` -- e.g. "msgpack", "yaml"
+    overwrite: if False (default), refuses to overwrite an existing `dest`
+    verify: if True (default), reads `dest` back and checks it matches `src`
+
+    # Returns
+    The path that was written.
+
+    # Note
+    `src` is never modified or removed; delete the original yourself once you are satisfied
+    with the converted file.
+    """
+    src = Path(src)
+    if dest is None:
+        dest = src.with_suffix(f".{dest_format}")
+    dest = Path(dest)
+
+    if dest.resolve() == src.resolve():
+        raise ValueError(f"`dest` must differ from `src`: {src}")
+    if dest.exists() and not overwrite:
+        raise FileExistsError(f"{dest} already exists; pass `overwrite=True` to replace it")
+
+    # `skip_init=True` avoids re-running validation that the source network already passed;
+    # this is a format conversion, not an import of untrusted data.
+    network = alt.Network.from_file(str(src), skip_init=True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    network.to_file(str(dest))
+
+    if verify:
+        roundtripped = alt.Network.from_file(str(dest), skip_init=True)
+        # Lines are sorted before comparing because `speed_sets` is a hash map, whose serialized
+        # key order is not stable from one load to the next.
+        if sorted(roundtripped.to_yaml().splitlines()) != sorted(network.to_yaml().splitlines()):
+            raise RuntimeError(
+                f"round trip through {dest_format!r} did not preserve the network: {src} -> {dest}"
+            )
+
+    return dest
+
 def copy_demo_files(demo_path: Path = Path("demos")):
     """
     Copies demo files from package directory into local directory.
