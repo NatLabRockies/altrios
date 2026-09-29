@@ -36,6 +36,25 @@ pub struct ReversibleEnergyStorage {
     /// Max output (and input) power battery can produce (accept)
     pub pwr_out_max: si::Power,
 
+    /// Max INPUT (charge) power the battery can accept, when it differs from
+    /// [Self::pwr_out_max].
+    ///
+    /// `None` (the default, and what every pre-existing model file
+    /// deserializes to) means charge and discharge share
+    /// [Self::pwr_out_max], which is the original symmetric behaviour.
+    ///
+    /// This exists because on a battery-electric locomotive
+    /// [Self::pwr_out_max] is doing two unrelated jobs: it carries the
+    /// TRACTION rating (e.g. 3.281 MW = 4,400 hp on the FLXdrive-class unit
+    /// this study models) and, symmetrically, the charge acceptance. Those are
+    /// not the same physical limit. Discharge is set by what the drive can use;
+    /// charge acceptance is a cell property, conventionally up to ~1C
+    /// continuous before lithium plating makes it "fast charging". Tying them
+    /// together understates en-route charging under catenary by a third on a
+    /// range-sized pack. Setting this leaves the discharge path untouched.
+    #[serde(default)]
+    pub pwr_in_max: Option<si::Power>,
+
     /// Total energy capacity of battery of full discharge SOC of 0.0 and 1.0
     pub energy_capacity: si::Energy,
 
@@ -298,6 +317,8 @@ impl From<res_legacy::ReversibleEnergyStorageLegacy> for ReversibleEnergyStorage
             eta_interp_grid: value.eta_interp_grid,
             eta_interp_values: value.eta_interp_values,
             pwr_out_max: value.pwr_out_max,
+            // Legacy files predate the split, so charge stays symmetric.
+            pwr_in_max: None,
             energy_capacity: value.energy_capacity,
             min_soc: value.min_soc,
             max_soc: value.max_soc,
@@ -456,6 +477,12 @@ impl ReversibleEnergyStorage {
         Ok(())
     }
 
+    /// Rating that bounds CHARGE power: [Self::pwr_in_max] when given,
+    /// otherwise [Self::pwr_out_max] (symmetric, the original behaviour).
+    pub fn pwr_charge_rating(&self) -> si::Power {
+        self.pwr_in_max.unwrap_or(self.pwr_out_max)
+    }
+
     /// # Arguments
     /// - `dt`: simulation time step size
     /// - `buffer`: buffer below static maximum SOC above which charging is disabled
@@ -481,11 +508,12 @@ impl ReversibleEnergyStorage {
             if *self.state.soc.get_stale(|| format_dbg!())?
                 <= *self.state.soc_chrg_buffer.get_fresh(|| format_dbg!())?
             {
-                self.pwr_out_max
+                self.pwr_charge_rating()
             } else if *self.state.soc.get_stale(|| format_dbg!())? < self.max_soc
                 && soc_buffer_delta > si::Ratio::ZERO
             {
-                self.pwr_out_max * (self.max_soc - *self.state.soc.get_stale(|| format_dbg!())?)
+                self.pwr_charge_rating()
+                    * (self.max_soc - *self.state.soc.get_stale(|| format_dbg!())?)
                     / soc_buffer_delta
             } else {
                 // current SOC is less than both
@@ -582,6 +610,8 @@ impl ReversibleEnergyStorage {
         pwr_aux_req: si::Power,
         dt: si::Time,
     ) -> anyhow::Result<()> {
+        // Read before `state` takes a mutable borrow of `self`.
+        let pwr_charge_rating = self.pwr_charge_rating();
         let state = &mut self.state;
 
         ensure!(
@@ -641,13 +671,15 @@ impl ReversibleEnergyStorage {
                 state.soc.get_fresh(||format_dbg!())?.get::<si::ratio>()
             );
         } else {
+            // CHARGING branch: bound by the charge rating, which may differ
+            // from `pwr_out_max`. The discharge branch above is untouched.
             ensure!(
-                utils::almost_ge_uom(&(pwr_prop_req + pwr_aux_req), &-self.pwr_out_max, Some(TOL)),
+                utils::almost_ge_uom(&(pwr_prop_req + pwr_aux_req), &-pwr_charge_rating, Some(TOL)),
                 format!(
-                    "{}\nres required power ({:.6} MW) exceeds static max power ({:.6} MW)",
+                    "{}\nres required power ({:.6} MW) exceeds static max charge power ({:.6} MW)",
                     format_dbg!(utils::almost_ge_uom(
                         &(pwr_prop_req + pwr_aux_req),
-                        &-self.pwr_out_max,
+                        &-pwr_charge_rating,
                         Some(TOL)
                     )),
                     (pwr_prop_req + pwr_aux_req).get::<si::megawatt>(),

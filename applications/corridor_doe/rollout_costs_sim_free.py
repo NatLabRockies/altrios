@@ -197,6 +197,91 @@ def annual_rows(year: int, w: dict, cost_fns, infra_df, nodes: Dict[str, float],
 
 
 BASELINE_IDLING = ("none", "not_applicable")
+
+# Battery-cost trajectories carried side by side. "Moderate" is the ATB central
+# case; "Advanced" is ATB's low-cost case -- about 8% under Moderate in 2025,
+# widening to roughly 40% by 2035 and holding there. Both are real published
+# trajectories, so no synthetic curve is needed.
+BATTERY_SCENARIOS = ("Moderate", "Advanced")
+
+# How capital enters the cash flow.
+#
+# "as_purchased" is the original: the whole fleet and all infrastructure are
+# bought in year 1, locomotives are bought again when their 20-year life runs
+# out, and whatever life is unused at the horizon comes back as a residual
+# credit. It is a correct net-present-value treatment but a lumpy one, and the
+# answer moves with where the 20-year boundary happens to land inside a 30-year
+# window.
+#
+# "levelized" spreads each asset's capital across its own service life as a
+# level annual charge (the capital recovery factor), which is what a reader
+# means by "spread over the operating lifetime". Each VINTAGE is charged at the
+# price of the year it is bought, so a declining battery trajectory still shows
+# up: the annual charge steps down when a cheaper vintage replaces an older one.
+# No residual term is needed -- an asset is paid for only across the years it is
+# actually used, by construction.
+CAPITAL_BASIS = "levelized"
+
+
+def _crf(rate: float, life: int) -> float:
+    """Capital recovery factor, on the rollout's own timing convention.
+
+    The textbook factor assumes payments at the END of each year. This rollout
+    discounts its first year at a factor of 1 -- every flow is start-of-year --
+    so the payment stream is an annuity DUE and the factor is divided by
+    (1 + rate). Without that the capital charge is overstated by exactly one
+    year's interest, 7%, and an asset held for its whole life would cost more
+    than its purchase price.
+    """
+    return rate / (1.0 - (1.0 + rate) ** -life) / (1.0 + rate)
+
+
+def levelized_investments(values: pl.DataFrame, rate: float, start_year: int) -> pl.DataFrame:
+    """Replace the purchase/retirement schedule with a level annual capital charge.
+
+    Emits the same `Cost_Purchases` metric the downstream total-cost and LCOTKM
+    steps consume, per asset subset and summed to "All", plus an explicit zero
+    `Cost_Retired_Assets` so the residual column still exists and reads zero.
+    """
+    assets = (values.filter(pl.col("Metric").str.starts_with("Count_"),
+                            pl.col("Subset") != "All")
+              .select("Subset", "Year", pl.col("Value").alias("Count")))
+    unit = (values.filter(pl.col("Metric") == "Unit_Cost")
+            .select("Subset", "Year", pl.col("Value").alias("Unit_Cost")))
+    life = (values.filter(pl.col("Metric") == "Lifespan")
+            .group_by("Subset").agg(pl.col("Value").min().cast(pl.Int32).alias("Life")))
+    price = {(r["Subset"], int(r["Year"])): r["Unit_Cost"] for r in unit.to_dicts()}
+    lives = {r["Subset"]: int(r["Life"]) for r in life.to_dicts()}
+    rows = []
+    for a in assets.to_dicts():
+        sub, yr, n = a["Subset"], int(a["Year"]), a["Count"]
+        n_life = lives.get(sub)
+        if not n_life or n is None:
+            continue
+        # The vintage in service this year, and the price it was bought at.
+        vintage = start_year + ((yr - start_year) // n_life) * n_life
+        cost = price.get((sub, vintage))
+        if cost is None:            # vintage outside the horizon: hold the last known
+            cost = price.get((sub, max(y for (s, y) in price if s == sub)))
+        rows.append({"Metric": "Cost_Purchases", "Units": "USD",
+                     "Value": n * cost * _crf(rate, n_life), "Subset": sub, "Year": yr})
+    out = pl.DataFrame(rows, schema={"Metric": pl.Utf8, "Units": pl.Utf8,
+                                     "Value": pl.Float64, "Subset": pl.Utf8, "Year": pl.Int32})
+    totals = (out.group_by("Year").agg(pl.col("Value").sum())
+              .with_columns(pl.lit("Cost_Purchases").alias("Metric"),
+                            pl.lit("USD").alias("Units"), pl.lit("All").alias("Subset")))
+    zero = totals.with_columns(pl.lit(0.0).alias("Value"),
+                               pl.lit("Cost_Retired_Assets").alias("Metric"))
+    # `calculate_rollout_lcotkm` charges the depreciated value of a pre-existing
+    # asset stock on top of the rollout's own cash flow. Levelizing has no such
+    # stock -- every asset is paid for across the years it serves -- so the term
+    # is zero here rather than absent, which the calculator requires.
+    initial = pl.DataFrame([{"Metric": "Asset_Value_Initial", "Units": "USD",
+                             "Value": 0.0, "Subset": "All",
+                             "Year": pl.Series([start_year - 1], dtype=pl.Int32)[0]}],
+                           schema=out.schema)
+    return pl.concat([values, out, totals.select(out.columns), zero.select(out.columns),
+                      initial], how="diagonal_relaxed")
 _RESULTS: Optional[pl.DataFrame] = None
 
 
@@ -228,7 +313,7 @@ def rollout_cell(row: dict, safe: str, layouts: pl.DataFrame) -> Optional[pl.Dat
     # run (out/sims/<safe>_grid_nodes.json); otherwise the terminal-zone fallback.
     nodes = rc.grid_draw_shares(None, row["Corridor"], safe)
     dz = rc.diesel_zones(row["Corridor"])
-    cost_fns = rc.cost_functions(row)
+    cost_fns_by_scenario = {sc: rc.cost_functions(row, sc) for sc in BATTERY_SCENARIOS}
     cells = (pl.read_csv(HERE / "experiments.csv", infer_schema_length=None)
              .filter(pl.col("Sim_Key") == row["Sim_Key"])
              .unique(subset=["Infra_Level", "Energy_Level"]))
@@ -242,11 +327,14 @@ def rollout_cell(row: dict, safe: str, layouts: pl.DataFrame) -> Optional[pl.Dat
             variants = [{"Anti_Idling": "none", "Dwell_Scope": "All",
                          "Diesel_Usage__MJ": w["diesel_mj"], "Diesel_MJ_Adjusted": w["diesel_mj"]}]
         for v in variants:
-            frames.append(_rollout_variant(row, cell, w, v, cost_fns, infra_df, nodes, dz, years))
+            for sc, cost_fns in cost_fns_by_scenario.items():
+                frames.append(_rollout_variant(row, cell, w, v, cost_fns, infra_df,
+                                               nodes, dz, years, sc))
     return pl.concat(frames, how="diagonal_relaxed")
 
 
-def _rollout_variant(row, cell, w, v, cost_fns, infra_df, nodes, dz, years) -> pl.DataFrame:
+def _rollout_variant(row, cell, w, v, cost_fns, infra_df, nodes, dz, years,
+                     battery_scenario="Moderate") -> pl.DataFrame:
     """One (cost cell, anti-idling variant): the calculator's DCF over annual rows
     built with the variant's adjusted diesel. The sweep's unadjusted diesel must
     match the per-cell file the baseline is built from, or the variants would be
@@ -265,7 +353,10 @@ def _rollout_variant(row, cell, w, v, cost_fns, infra_df, nodes, dz, years) -> p
                 "Subset": pl.Utf8, "Year": pl.Int32},
     )
     # The calculator's own DCF, exactly as `metric_calculator.main` runs it.
-    values = mc.calculate_rollout_investments(values)
+    if CAPITAL_BASIS == "levelized":
+        values = levelized_investments(values, cat.DISCOUNT_RATE, cat.METRICS_START_YEAR)
+    else:
+        values = mc.calculate_rollout_investments(values)
     values = mc.calculate_rollout_total_costs(values)
     values = mc.calculate_rollout_lcotkm(values)
     values = (values.filter(pl.col("Value").is_not_null()).unique()
@@ -286,6 +377,8 @@ def _rollout_variant(row, cell, w, v, cost_fns, infra_df, nodes, dz, years) -> p
         "Rollout_Years": cat.METRICS_ROLLOUT_YEARS,
         "Start_Year": cat.METRICS_START_YEAR,
         "Discount_Rate": cat.DISCOUNT_RATE,
+        "Battery_Cost_Scenario": battery_scenario,
+        "Capital_Basis": CAPITAL_BASIS,
         "Loco_Unit_Cost_USD_Start": float(cost_fns[list(cost_fns)[0]](cat.METRICS_START_YEAR)),
         "Loco_Cost_Basis": ("diesel unit + ATB pack (assumption)"
                             if row["Powertrain"] == "hybrid" else "altrios defaults"),
@@ -295,9 +388,9 @@ def _rollout_variant(row, cell, w, v, cost_fns, infra_df, nodes, dz, years) -> p
         "n_trains": w["n_trains"],
         "Source": "sim-free one-off (rollout_costs_sim_free.py)",
     }])
-    logger.info("  %s | infra=%s energy=%s | %s/%s: %d rows", row["Sim_Key"],
-                cell["Infra_Level"], cell["Energy_Level"], v["Anti_Idling"],
-                v["Dwell_Scope"], values.height)
+    logger.info("  %s | infra=%s energy=%s batt=%s | %s/%s: %d rows", row["Sim_Key"],
+                cell["Infra_Level"], cell["Energy_Level"], battery_scenario,
+                v["Anti_Idling"], v["Dwell_Scope"], values.height)
     return provenance.join(values, how="cross")
 
 

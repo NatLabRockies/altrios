@@ -263,7 +263,7 @@ def build() -> pl.DataFrame:
             "Energy_Level", "Diesel_Multiplier", "Electricity_Multiplier",
             "Layout_Fingerprint",
             "Anti_Idling", "Idle_Source", "Shutdown_Threshold_Seconds",
-            "Restart_Penalty_MJ_Per_Event",
+            "Restart_Penalty_MJ_Per_Event", "Cycle_Off_Minutes", "Cycle_On_Minutes",
             "Network_Path", "Locations_Path", "System_Voltage_V",
             "Electrification_Type", "Structure_MUSD_Per_Route_Mi",
             "Energization_MUSD_Per_Track_Mi", "Substation_MUSD_Each",

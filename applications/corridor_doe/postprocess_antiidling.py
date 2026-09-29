@@ -267,6 +267,30 @@ def discrepancy_idle(cells: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _cycle_seconds():
+    """Length of one off/on engine cycle, in seconds; 0 when not cycling."""
+    return (pl.col("Cycle_Off_Minutes").fill_null(0.0)
+            + pl.col("Cycle_On_Minutes").fill_null(0.0)) * 60.0
+
+
+def _engine_on_fraction():
+    """Share of eligible stopped time the engine is running despite shutdown."""
+    return (pl.when(_cycle_seconds() > 0)
+            .then(pl.col("Cycle_On_Minutes").fill_null(0.0) * 60.0 / _cycle_seconds())
+            .otherwise(pl.lit(0.0)))
+
+
+def _restart_events():
+    """Engine restarts over the eligible stopped time.
+
+    Cycling: one per off/on cycle, from cumulative eligible dwell. Not cycling
+    (a true single shutdown): one per eligible stop, as before.
+    """
+    return (pl.when(_cycle_seconds() > 0)
+            .then(pl.col("eligible_dwell_seconds") / _cycle_seconds())
+            .otherwise(pl.col("eligible_stops")))
+
+
 def expand(
     experiments: pl.DataFrame,
     metrics: pl.DataFrame,
@@ -379,6 +403,21 @@ def expand(
             .then(pl.col("eligible_fuel_MJ"))
             .when(pl.col("Idle_Source") == pl.lit("apu"))
             .then(pl.col(apu_col) * pl.col("Eligible_Dwell_Share"))
+            # Shutdown WITHOUT an APU or battery cannot simply stay off. The
+            # engine has to be cycled back on periodically to keep air-brake
+            # pressure up and the rest of the hotel load alive, so only part of
+            # the eligible stopped time is genuinely engine-off. The duty cycle
+            # comes from `in/anti_idling.csv` (30 min off, 15 min on), and the
+            # engine-on share of that cycle still burns main-engine idle fuel.
+            #
+            # This is the whole reason an APU earns anything: before it, the
+            # no-APU case was credited with a free, permanent shutdown, so the
+            # APU had nothing left to save and showed no advantage. Applied
+            # CUMULATIVELY over eligible stopped time rather than per stop,
+            # which is exact for stops longer than a cycle and a reasonable
+            # average for shorter ones.
+            .when(pl.col("Idle_Source") == pl.lit("shutdown"))
+            .then(pl.col("eligible_fuel_MJ") * _engine_on_fraction())
             .otherwise(pl.lit(0.0))
             .alias("Idle_Fuel_Replacement_MJ")
         )
@@ -386,8 +425,11 @@ def expand(
             (pl.col("eligible_fuel_MJ") - pl.col("Idle_Fuel_Replacement_MJ"))
             .clip(lower_bound=0.0)
             .alias("Idle_Fuel_Saved_MJ"),
+            # One restart per CYCLE, not per stop, when the engine is cycling:
+            # a four-hour stop on a 45-minute cycle restarts the engine about
+            # five times, not once.
             pl.when(pl.col("Idle_Source") == pl.lit("shutdown"))
-            .then(pl.col("eligible_stops") * pl.col("Restart_Penalty_MJ_Per_Event"))
+            .then(_restart_events() * pl.col("Restart_Penalty_MJ_Per_Event"))
             .otherwise(pl.lit(0.0))
             .alias("Restart_Fuel_MJ"),
         )

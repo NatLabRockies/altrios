@@ -23,9 +23,22 @@ liquid_fuel_prices_eia = (
     .select(["Year", "   Diesel Fuel (distillate fuel oil) 6/"])
     .rename({"   Diesel Fuel (distillate fuel oil) 6/": "Price"})
 )
-battery_prices_nlr_atb = (pl.read_csv(source=defaults.BATTERY_PRICE_FILE)).filter(
-    pl.col("Scenario") == "Moderate"
-)
+# Every ATB battery-cost scenario. "Moderate" is the central case; "Advanced" is
+# the low-cost case (about 8% under Moderate in 2025, widening to ~40% by 2035 and
+# holding there) and "Conservative" the high one.
+battery_prices_nlr_atb_all = pl.read_csv(source=defaults.BATTERY_PRICE_FILE)
+BATTERY_SCENARIOS = sorted(battery_prices_nlr_atb_all["Scenario"].unique().to_list())
+
+
+def battery_prices(scenario: str = "Moderate") -> pl.DataFrame:
+    """The ATB battery-cost table for one scenario."""
+    if scenario not in BATTERY_SCENARIOS:
+        raise ValueError(f"unknown battery scenario {scenario!r}; have {BATTERY_SCENARIOS}")
+    return battery_prices_nlr_atb_all.filter(pl.col("Scenario") == scenario)
+
+
+# Backwards-compatible view: the central case, as before.
+battery_prices_nlr_atb = battery_prices("Moderate")
 # Regional price zones (US states / PADD regions / Canadian provinces): an observed
 # reference-year price per zone and the name of the trajectory that carries it through
 # time. Canadian trajectories come from Canada's Energy Future 2026 (CER).
@@ -1723,8 +1736,9 @@ def import_energy_prices_eia(
     return pl.DataFrame(out)
 
 
-def add_battery_costs(loco_info: pd.DataFrame, year: int) -> pd.DataFrame:
-    prices_to_use = battery_prices_nlr_atb.filter(
+def add_battery_costs(loco_info: pd.DataFrame, year: int,
+                      scenario: str = "Moderate") -> pd.DataFrame:
+    prices_to_use = battery_prices(scenario).filter(
         (pl.col("Year") - pl.lit(year)).abs().min()
         == (pl.col("Year") - pl.lit(year)).abs()
     )

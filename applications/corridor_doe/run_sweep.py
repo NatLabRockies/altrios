@@ -53,6 +53,7 @@ from altrios import history, metric_calculator, sim_manager
 from altrios.train_planner import data_prep, planner_config
 
 import catenary_policy  # noqa: E402  -- receptive wire flag + export credit
+import hybrid_controls_io  # noqa: E402  -- optional tuned hybrid controller
 
 HERE = Path(__file__).parent
 OUT = HERE / "out"
@@ -204,6 +205,42 @@ HELPER_MAX_SHARE = 1.0 / 3.0
 # catenary study used, keeping that arm comparable with it.
 BEL_CAT_PWR_MAX_WATTS = 5.0e6
 BEL_BATTERY_MWH = 9.6
+# Charge acceptance of the battery-electric pack, as a multiple of capacity.
+#
+# ALTRIOS rates a pack with ONE number for both directions, and on this
+# locomotive that number (3.281 MW) is the TRACTION rating -- 4,400 hp, the
+# FLXdrive-class figure this arm models. Reusing it as a charge limit is not a
+# battery property: it is a drivetrain specification doing a second job, and it
+# caps en-route intake under catenary below what any cell chemistry requires.
+#
+# 1C is the conventional continuous-charge ceiling, the threshold above which
+# the literature calls charging "fast" and lithium plating at the anode becomes
+# the binding concern. It holds for both LFP and NMC, so it does not presume a
+# chemistry, and it is conservative against the ~3C that lithium-titanium-oxide
+# battery trains (Stadler FLIRT Akku / Class 756) sustain from the wire. It is
+# deliberately BELOW the 2C this study assumes for hybrid packs, which are sized
+# for power where this one is sized for range.
+#
+# On the 9.6 MWh pack this is 9.6 MW, above the 5 MW pantograph, so current
+# collection remains the effective limit; the constraint would bind for packs
+# under 5 MWh. Applied via `res.pwr_in_max`, which leaves discharge untouched.
+BEL_CHARGE_C_RATE = 1.0
+
+
+def set_battery_charge_from_c_rate(loco: alt.Locomotive, c_rate: float) -> alt.Locomotive:
+    """Set the pack's CHARGE acceptance to ``c_rate`` times capacity.
+
+    Discharge is untouched: it stays on ``res.pwr_out_max``, which carries the
+    locomotive's traction rating.
+    """
+    d = loco.to_pydict()
+    kind = next(iter(d["loco_type"]))
+    body = d["loco_type"][kind] or {}
+    if "res" not in body:
+        raise ValueError(f"{kind} has no battery to rate")
+    capacity_wh = float(body["res"]["energy_capacity_joules"]) / 3600.0
+    body["res"]["pwr_in_max_watts"] = c_rate * capacity_wh
+    return alt.Locomotive.from_pydict(d)
 
 # Uniform catenary power limit, matching COMMON["uniform_power_limit_watts"].
 CATENARY_POWER_LIMIT_WATTS = 50.0e6
@@ -321,7 +358,18 @@ def set_battery_power_from_c_rate(loco: alt.Locomotive, c_rate: float) -> alt.Lo
     return alt.Locomotive.from_pydict(d)
 
 
-def build_locomotive(powertrain: str, battery_mwh: Optional[float]) -> alt.Locomotive:
+_CONTROLS_CACHE: Dict[str, object] = {}
+
+
+def hybrid_controls():
+    """Tuned hybrid controller settings, or None. Read once per process."""
+    if "v" not in _CONTROLS_CACHE:
+        _CONTROLS_CACHE["v"] = hybrid_controls_io.load()
+    return _CONTROLS_CACHE["v"]
+
+
+def build_locomotive(powertrain: str, battery_mwh: Optional[float],
+                     controls: Optional[Dict[str, float]] = None) -> alt.Locomotive:
     """The Rust locomotive for one powertrain level.
 
     Every powertrain gets the same starting tractive effort, so a difference
@@ -347,6 +395,7 @@ def build_locomotive(powertrain: str, battery_mwh: Optional[float]) -> alt.Locom
             BEL_CAT_PWR_MAX_WATTS
         )
         loco = set_battery_capacity(loco, BEL_BATTERY_MWH)
+        loco = set_battery_charge_from_c_rate(loco, BEL_CHARGE_C_RATE)
     elif powertrain == "catenary_dual":
         loco = alt.Locomotive.default_dual_mode_loco()
     else:
@@ -359,11 +408,16 @@ def build_locomotive(powertrain: str, battery_mwh: Optional[float]) -> alt.Locom
         loco = set_battery_capacity(loco, float(battery_mwh))
         loco = set_battery_power_from_c_rate(loco, HYBRID_PACK_C_RATE)
         loco.set_force_max_pounds(FORCE_MAX_POUNDS, "UpdateMu")
+    # Tuned controller last, so it overrides the library defaults on the fully
+    # sized locomotive. A no-op for every non-hybrid and when no tuned settings
+    # exist, which is why no caller has to branch on it.
+    loco = hybrid_controls_io.apply_to_locomotive(loco, controls or {})
     return loco
 
 
 def planner_config_for(
-    powertrain: str, battery_mwh: Optional[float]
+    powertrain: str, battery_mwh: Optional[float],
+    corridor: Optional[str] = None, scope: Optional[str] = None,
 ) -> planner_config.TrainPlannerConfig:
     """Planner config whose locomotive types cover this powertrain.
 
@@ -373,11 +427,22 @@ def planner_config_for(
     the second row here plus the right value in the plan.
     """
     fuel = "Electricity" if powertrain == "catenary_bel" else "Diesel"
+    # Tuned hybrid controller, if one has been written by the controls sweep.
+    # `corridor` is optional so the diagnostic scripts that call this with two
+    # arguments keep working; without it the library defaults stand.
+    controls = {}
+    if powertrain == "hybrid" and corridor:
+        controls = hybrid_controls_io.values_for(
+            hybrid_controls(), corridor, scope or "fwd")
+        if controls:
+            logger.info("  tuned hybrid controller (%s/%s): %s",
+                        corridor, scope or "fwd",
+                        {k: round(v, 4) for k, v in controls.items()})
     types = {
         PLAN_LOCO_TYPE: {
             "Fuel_Type": fuel,
             "Min_Servicing_Time_Hr": 3.0,
-            "Rust_Loco": build_locomotive(powertrain, battery_mwh),
+            "Rust_Loco": build_locomotive(powertrain, battery_mwh, controls),
             "Cost_USD": alt.defaults.DIESEL_LOCO_COST_USD,
             "Lifespan_Years": alt.defaults.LOCO_LIFESPAN,
         }
@@ -954,7 +1019,8 @@ def run_simulation(row: dict, plans):
     under its stable level uses.
     """
     corridor = CORRIDORS[row["Corridor"]]
-    config = planner_config_for(row["Powertrain"], row["Battery_MWh"])
+    config = planner_config_for(row["Powertrain"], row["Battery_MWh"],
+                                corridor=row["Corridor"])
     network = network_for(row)
     location_map = alt.import_locations(str(NETWORKS / corridor.locations))
     if isinstance(plans, pl.DataFrame):
@@ -1191,6 +1257,13 @@ def _inputs_fingerprint(row: dict) -> str:
     loco = build_locomotive(row["Powertrain"], row.get("Battery_MWh"))
     h.update(json.dumps(_strip_history(loco.to_pydict()), sort_keys=True,
                         default=str).encode("utf-8"))
+    # The tuned controller lives in a CSV rather than in the locomotive built
+    # above, so hash the file itself: retuning must re-run the hybrid cells.
+    # HYBRID ONLY -- folding it into every powertrain would change the
+    # fingerprint of the diesel and catenary cells too, marking valid results
+    # stale and re-running hours of simulation for a file they never read.
+    if row["Powertrain"] == "hybrid":
+        h.update(hybrid_controls_io.fingerprint_bytes())
     return h.hexdigest()
 
 

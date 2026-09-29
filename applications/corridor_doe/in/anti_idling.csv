@@ -1,6 +1,6 @@
-Anti_Idling,Label,Applies_To_Powertrains,Idle_Source,Shutdown_Threshold_Seconds,Restart_Penalty_MJ_Per_Event,Source
-none,No anti-idling technology,diesel|hybrid|catenary_dual,baseline,0,0.0,simulated fuel burn at rest
-aess_none,Anti-idling; no APU or battery,diesel|hybrid|catenary_dual,shutdown,900,2.0,PLACEHOLDER threshold and restart penalty -- need sources
-aess_apu,Anti-idling with APU,diesel|hybrid|catenary_dual,apu,900,0.0,APU fuel from metric_calculator.calculate_apu_fuel_consumption; PLACEHOLDER threshold
-aess_battery,Anti-idling; battery as APU,hybrid,battery,900,0.0,PLACEHOLDER threshold; battery supplies hotel load
-not_applicable,No diesel engine to idle,catenary_bel,shutdown,0,0.0,battery-electric burns no fuel at rest
+Anti_Idling,Label,Applies_To_Powertrains,Idle_Source,Shutdown_Threshold_Seconds,Restart_Penalty_MJ_Per_Event,Cycle_Off_Minutes,Cycle_On_Minutes,Source
+none,No anti-idling technology,diesel|hybrid|catenary_dual,baseline,0,0.0,0,0,simulated fuel burn at rest
+aess_none,Anti-idling; no APU or battery,diesel|hybrid|catenary_dual,shutdown,900,2.0,30,15,PLACEHOLDER threshold and restart penalty -- need sources
+aess_apu,Anti-idling with APU,diesel|hybrid|catenary_dual,apu,900,0.0,0,0,APU fuel from metric_calculator.calculate_apu_fuel_consumption; PLACEHOLDER threshold
+aess_battery,Anti-idling; battery as APU,hybrid,battery,900,0.0,0,0,PLACEHOLDER threshold; battery supplies hotel load
+not_applicable,No diesel engine to idle,catenary_bel,baseline,0,0.0,0,0,battery-electric burns no fuel at rest -- baseline means no adjustment; it was shutdown with a 0 s threshold which is the most aggressive policy rather than an inapplicable one

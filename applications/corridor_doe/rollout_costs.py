@@ -88,12 +88,13 @@ ANNUAL_METRICS = [
 
 
 # ------------------------------------------------------------------ pricing
-def _atb_pack_usd(loco: alt.Locomotive, year: int) -> float:
+def _atb_pack_usd(loco: alt.Locomotive, year: int,
+                  battery_scenario: str = "Moderate") -> float:
     """The NREL battery-system cost (energy $/kWh + power $/kW components) for this
     locomotive's pack in ``year``, restated to the 2025 base year, as
     `metric_calculator.add_battery_costs` prices it -- without that function's BEL
     chassis term."""
-    prices = mc.battery_prices_nlr_atb.filter(
+    prices = mc.battery_prices(battery_scenario).filter(
         (pl.col("Year") - pl.lit(year)).abs().min()
         == (pl.col("Year") - pl.lit(year)).abs())
     def value(metric):
@@ -108,7 +109,7 @@ def _atb_pack_usd(loco: alt.Locomotive, year: int) -> float:
             * utilities.USD_2024_TO_2025 * defaults.RETAIL_PRICE_EQUIVALENT_MULTIPLIER)
 
 
-def cost_functions(row: dict):
+def cost_functions(row: dict, battery_scenario: str = "Moderate"):
     """``Locomotive_Type -> (year -> USD)`` for every type in this cell's pool.
 
     The sweep's pool labels its main units `Dual_Mode` (a planner convention,
@@ -126,7 +127,7 @@ def cost_functions(row: dict):
     elif powertrain == "catenary_dual":
         main = lambda _y: defaults.DUAL_MODE_LOCO_COST_USD  # noqa: E731
     elif powertrain == "catenary_bel":
-        main = cat._bel_with_cat_loco_cost
+        main = lambda y, _s=battery_scenario: cat._bel_with_cat_loco_cost(y, _s)  # noqa: E731
     elif powertrain == "hybrid":
         # No sourced hybrid price exists anywhere in the codebase. The stated
         # assumption: a conventional diesel unit plus its pack at the ATB price
@@ -134,7 +135,8 @@ def cost_functions(row: dict):
         # on top of the diesel chassis instead of the BEL chassis. Labelled as
         # an assumption in the outputs.
         loco = run_sweep.build_locomotive("hybrid", battery)
-        main = lambda y, _l=loco: defaults.DIESEL_LOCO_COST_USD + _atb_pack_usd(_l, y)  # noqa: E731
+        main = lambda y, _l=loco, _s=battery_scenario: (  # noqa: E731
+            defaults.DIESEL_LOCO_COST_USD + _atb_pack_usd(_l, y, _s))
     else:
         raise ValueError(f"unknown powertrain {powertrain!r}")
     return {run_sweep.PLAN_LOCO_TYPE: main, run_sweep.HELPER_LOCO_TYPE: diesel}

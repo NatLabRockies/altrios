@@ -368,8 +368,8 @@ class ModelObjectives:
                     # `np.nan` or trigger a constraint violation.
                     objectives[key].append(1.03e12)
         else:
-            raise Exception("this is here for debugging and should be deleted")
-            objectives[key].append(mod_sig)
+            # Scalar objective (no reference data): the model quantity itself.
+            objectives[key].append(1.04e12 if not walk_success else mod_sig)
         return obj_fn
 
 
@@ -447,7 +447,8 @@ if PYMOO_AVAILABLE:
         )
 
         f_columns = [
-            f"{str(key).split(' ')[0]}: {cast(Sequence, obj)[0].__name__}"
+            f"{str(key).split(' ')[0]}: "
+            f"{(cast(Sequence, obj)[0] if isinstance(obj, Sequence) else obj).__name__}"
             for key in problem.mod_obj.dfs
             for obj in problem.mod_obj.obj_fns
         ]

@@ -797,11 +797,18 @@ BEL_MAX_GAP_KWH = en.max_gap_kwh_from_battery(
 BEL_ROUNDTRIP_EFFICIENCY = 0.90   # pack round-trip eff (RES eta curve, one-way^2)
 # Charge model matched to ALTRIOS's physical caps. Per-mile charge is bounded by
 # BOTH the pantograph power (5 MW, gross wire delivery) and the battery
-# charge-acceptance = RES pwr_out_max_watts (3.281 MW on the default BEL RES,
-# symmetric charge/discharge), each converted to kWh/mi at the representative
+# charge-acceptance = RES pwr_in_max_watts (9.6 MW = 1C; the pack's own limit,
+# no longer the traction rating), each converted to kWh/mi at the representative
 # corridor speed. NET charge = min(gross - draw, charge-acceptance), floored.
 BEL_REPRESENTATIVE_SPEED_MPH = 32.0     # measured avg corridor speed
-SIM_BEL_RES_PWR_OUT_MAX_WATTS = 3.281e6  # default BEL RES charge/discharge limit
+# CHARGE acceptance of the BEL pack. This used to be the RES's single
+# `pwr_out_max` (3.281 e6), which is the locomotive's 4,400 hp TRACTION rating
+# and not a battery property at all. The sim now carries an explicit
+# `res.pwr_in_max` (run_sweep.BEL_CHARGE_C_RATE = 1C on the 9.6 MWh pack), so
+# this must track it or the layout sizing and the simulation disagree about how
+# fast a train refills between energized sections.
+SIM_BEL_RES_PWR_IN_MAX_WATTS = 9.6e6  # 1C on the 9.6 MWh pack
+SIM_BEL_RES_PWR_OUT_MAX_WATTS = 3.281e6  # traction rating; discharge only
 
 
 def _pwr_w_to_kwh_per_mi(power_w, mph):
@@ -813,7 +820,7 @@ def _pwr_w_to_kwh_per_mi(power_w, mph):
 BEL_GROSS_CHARGE_KWH_PER_MILE = _pwr_w_to_kwh_per_mi(
     5.0e6, BEL_REPRESENTATIVE_SPEED_MPH)
 BEL_CHARGE_ACCEPT_KWH_PER_MILE = _pwr_w_to_kwh_per_mi(
-    SIM_BEL_RES_PWR_OUT_MAX_WATTS, BEL_REPRESENTATIVE_SPEED_MPH)
+    SIM_BEL_RES_PWR_IN_MAX_WATTS, BEL_REPRESENTATIVE_SPEED_MPH)
 BEL_MIN_NET_CHARGE_KWH_PER_MILE = 20.0
 BEL_AVG_NET_CHARGE_KWH_PER_MILE = max(
     min(BEL_GROSS_CHARGE_KWH_PER_MILE - BEL_AVG_KWH_PER_MILE,
@@ -1096,7 +1103,17 @@ def _levelized_aeo_price(price_fn, start_year, lifespan, discount):
 # catenary investment scheme is future work); the calculator still rolls the
 # locomotive fleet and infrastructure over as assets reach end of life.
 METRICS_ROLLOUT_YEARS = 30
-METRICS_START_YEAR = _defaults.BASE_ANALYSIS_YEAR
+# First year of the cost rollout. Deliberately LATER than the simulation's own
+# base analysis year: the simulated week is a physical result and does not move,
+# while the investment it is priced against is assumed to begin in 2030. With a
+# 20-year locomotive life that puts the fleet replacement in 2050.
+#
+# CAVEAT the outputs must carry: every input trajectory ends in 2050 -- the ATB
+# battery series, the AEO diesel and electricity series, and the Cambium grid
+# emissions factors. Each holds its 2050 value flat thereafter (verified, not
+# assumed: none extrapolates or errors). So the last nine years of a 2030-2059
+# horizon, 30% of it, run on frozen 2050 prices and grid carbon.
+METRICS_START_YEAR = 2030
 # Infrastructure asset lifespans (years) fed to the rollover engine.
 STRUCTURE_LIFESPAN_YEARS = 50      # civil structures / foundations / poles
 ENERGIZATION_LIFESPAN_YEARS = 40   # contact + messenger wire / OCS hardware
@@ -2834,7 +2851,7 @@ def first_pass_densities(sample=0):
 # calculator's discounted-cash-flow engine (rollout_demo.py / sim_manager_demo.py
 # pattern), assuming METRICS_ROLLOUT_YEARS identical operating years.
 # ---------------------------------------------------------------------------
-def _bel_with_cat_loco_cost(year: int) -> float:
+def _bel_with_cat_loco_cost(year: int, battery_scenario: str = "Moderate") -> float:
     """BEL-with-catenary unit cost ($): the usual battery-electric cost (NREL ATB
     battery pack via ``metric_calculator.add_battery_costs``) plus the pantograph
     premium (``defaults.PANTOGRAPH_COST_USD``)."""
@@ -2842,7 +2859,7 @@ def _bel_with_cat_loco_cost(year: int) -> float:
 
     info_df = pd.DataFrame({"Rust_Loco": [_bel_with_cat_loco()],
                             "Cost_USD": [float("nan")]})
-    info_df = _mc.add_battery_costs(info_df, year)
+    info_df = _mc.add_battery_costs(info_df, year, scenario=battery_scenario)
     return float(info_df.at[0, "Cost_USD"]) + _defaults.PANTOGRAPH_COST_USD
 
 
