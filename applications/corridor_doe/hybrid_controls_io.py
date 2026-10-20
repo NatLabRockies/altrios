@@ -187,6 +187,14 @@ REGEN_FIELDS = (
     "speed_soc_regen_buffer_meters_per_second",
     "frac_of_max_pwr_to_run_fc",
     "speed_soc_disch_buffer_meters_per_second",
+    # Engine-on knobs, tuned from 2026-10-20. `speed_fc_forced_on` is the one
+    # that matters most: at the 5 mph core default "the train is moving" is
+    # itself a reason to run the engine, so light-load shutdown never happens
+    # and the other two are inert. A row that omits any of these leaves the
+    # locomotive at the core default, which is the engine-always-on behaviour.
+    "frac_pwr_demand_fc_forced_on",
+    "speed_soc_fc_on_buffer_meters_per_second",
+    "speed_fc_forced_on_meters_per_second",
 )
 
 
