@@ -284,7 +284,41 @@ def at_fraction(frac: float):
 # (free) substations anchor the corridor termini: west_terminus (Spokane) and
 # east_terminus (Lethbridge).
 SUBSTATION_MAX_POWER_WATTS = 50.0e6
-N_CANDIDATES = 30
+# Candidate density, PER ARCHITECTURE. A piece is COVERABLE only if its midpoint
+# lies within the feed distance of a BUILT substation, so the candidate set
+# bounds what any feed distance can reach -- and a set spaced for AC decides a DC
+# architecture's viability as a side effect.
+#
+# The feed radius is derived from a voltage-drop limit at the design train power
+# (d = V^2 (1-f) / (|Z| P_d)), so it falls as voltage falls: 23.8 mi for
+# 2x25 kV AT, 7.4 mi for 25 kV, 2.84 mi for 9 kV DC at this corridor's 29.2 MW
+# p95 consist. A 30-candidate set is ~3.8 route-miles apart, which is comfortably
+# inside the AC radii and OUTSIDE the DC one.
+#
+# Measured on Spokane-Lethbridge battery-electric at the derived 2.84 mi feed:
+#   30 candidates  (~3.8 mi) -> infeasible
+#   60 candidates  (~1.9 mi) -> infeasible
+#   120 candidates (~1.0 mi) -> optimal
+#   240 candidates (~0.5 mi) -> optimal
+# i.e. 9 kV is feasible at its own voltage once substations may be sited at the
+# density its own cost basis already assumes ("individually cheaper (~$6-10M) but
+# sited more densely"; "MODULAR, containerized ... the form that gives MVDC its
+# competitive rationale"). Raising it for AC would only lengthen the solve.
+N_CANDIDATES_BY_ARCH = {
+    "ac_25kv": 30,
+    "ac_2x25": 30,
+    "dc_9kv": 120,
+}
+N_CANDIDATES_DEFAULT = 30
+# A single override still wins, for diagnostics.
+N_CANDIDATES = int(os.environ.get("ALTRIOS_N_CANDIDATES") or N_CANDIDATES_DEFAULT)
+
+
+def n_candidates_for(arch: str | None) -> int:
+    """Candidate count for an architecture. `ALTRIOS_N_CANDIDATES` overrides."""
+    if os.environ.get("ALTRIOS_N_CANDIDATES"):
+        return int(os.environ["ALTRIOS_N_CANDIDATES"])
+    return N_CANDIDATES_BY_ARCH.get(str(arch), N_CANDIDATES_DEFAULT)
 substations = [
     cp.Substation(
         id="west_terminus", lat=at_fraction(0.0)[0], lon=at_fraction(0.0)[1],
@@ -297,19 +331,34 @@ substations = [
         grid_emissions_region="NorthernGrid_East",
     ),
 ]
-for _k in range(1, N_CANDIDATES + 1):
-    _frac = _k / (N_CANDIDATES + 1)
-    _lat, _lon = at_fraction(_frac)
-    substations.append(
-        cp.Substation(
-            id=f"c{_k:02d}", lat=_lat, lon=_lon,
-            max_power_watts=SUBSTATION_MAX_POWER_WATTS,
-            # Existing west_terminus catenary charging is attributed to
-            # NorthernGrid West; the existing east_terminus and every candidate
-            # substation are NorthernGrid East.
-            grid_emissions_region="NorthernGrid_East",
+def candidate_substations(n: int):
+    """`n` candidate substations evenly spaced along the corridor by fraction.
+
+    Ids are zero-padded to the width of `n` so they stay sortable past 99.
+    """
+    width = max(2, len(str(int(n))))
+    out = []
+    for k in range(1, int(n) + 1):
+        lat, lon = at_fraction(k / (int(n) + 1))
+        out.append(
+            cp.Substation(
+                id=f"c{k:0{width}d}", lat=lat, lon=lon,
+                max_power_watts=SUBSTATION_MAX_POWER_WATTS,
+                # Existing west_terminus catenary charging is attributed to
+                # NorthernGrid West; the existing east_terminus and every
+                # candidate substation are NorthernGrid East.
+                grid_emissions_region="NorthernGrid_East",
+            )
         )
-    )
+    return out
+
+
+def substations_for(arch: str | None):
+    """The two free termini plus this architecture's candidate set."""
+    return substations[:2] + candidate_substations(n_candidates_for(arch))
+
+
+substations.extend(candidate_substations(N_CANDIDATES))
 
 # Precompute per-link max grade once (used to scale traffic energy for cost mode).
 GRADE_BY_LINK = {L["idx_curr"]: max_grade(L) for L in links}
@@ -515,7 +564,10 @@ def run_opt(label: str, **kwargs):
     # links no train uses are excluded so the optimizer can't electrify
     # trafficless spurs/branches just for their grade. Callers may override.
     kwargs.setdefault("est_time_nets", _traffic_est_time_nets())
-    r = en.energize_optimized(network, substations, **kwargs)
+    # Caller may supply an architecture's own candidate set; otherwise the
+    # module default (see `N_CANDIDATES_BY_ARCH`).
+    subs = kwargs.pop("substations", None) or substations
+    r = en.energize_optimized(network, subs, **kwargs)
     _log(f"DONE   {label}  ({time.perf_counter() - t0:.1f}s, "
          f"status={str(r.status).split('.')[-1]})")
     return r

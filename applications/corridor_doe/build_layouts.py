@@ -205,6 +205,21 @@ def build_bel_layout(cat, arch, costs_row, densities, out_dir):
     # unelectrified stretches with too little in the pack.
     sug = en.suggest_optimization_inputs(
         arch, design_train_power_watts=cat._design_train_power_watts())
+    # DIAGNOSTIC OVERRIDES, unset in normal runs. The substation feed distance is
+    # DERIVED from a voltage-drop model at the design train power
+    # (d = V^2 (1-f) / (|Z| P_d)), and the minimum energized segment length is a
+    # modelling choice. When the MILP comes back infeasible those are the two
+    # candidates, and relaxing one at a time is the only way to attribute it
+    # rather than infer it. `dc_9kv` battery-electric is infeasible in presolve.
+    _feed_override = os.environ.get("ALTRIOS_BEL_FEED_MILES", "").strip()
+    _feed_mi = sug.substation_feed_distance_miles
+    if _feed_override:
+        _feed_mi = float(_feed_override)
+        logger.warning("OVERRIDE: substation feed distance %.2f -> %.2f mi",
+                       sug.substation_feed_distance_miles, _feed_mi)
+    _min_seg = float(os.environ.get("ALTRIOS_BEL_MIN_SEG_MILES")
+                     or (5.0 if cat.BEL_SOC_STATE_MODEL
+                         else max(5.0, cat.BEL_RECHARGE_MILES)))
     _gal, kwh = densities
     costs = cp.EnergizationOptCosts(
         structure_cost_per_mile=float(costs_row["Structure_MUSD_Per_Route_Mi"]),
@@ -228,7 +243,12 @@ def build_bel_layout(cat, arch, costs_row, densities, out_dir):
         dict(
             objective="min_cost",
             economics=econ,
-            substation_feed_distance_miles=sug.substation_feed_distance_miles,
+            substation_feed_distance_miles=_feed_mi,
+            # This architecture's own candidate set. A set spaced for AC decides
+            # a DC architecture's viability as a side effect: at the derived
+            # 2.84 mi feed, 9 kV is infeasible with 30 candidates (~3.8 mi
+            # apart) and optimal with 120 (~1.0 mi).
+            substations=cat.substations_for(arch),
             costs=costs,
             piece_opex_fn=cat.build_bel_opex_fn(tpd, cat.levelized_elec_price_by_link()),
             max_energized_gap_kwh=cat.BEL_MAX_GAP_KWH,
@@ -239,10 +259,7 @@ def build_bel_layout(cat, arch, costs_row, densities, out_dir):
             ),
             regen_energy_kwh_per_mile_by_link=cat.bel_regen_by_link(drain),
             battery_soc_state_model=cat.BEL_SOC_STATE_MODEL,
-            min_energized_length_miles=(
-                5.0 if cat.BEL_SOC_STATE_MODEL
-                else max(5.0, cat.BEL_RECHARGE_MILES)
-            ),
+            min_energized_length_miles=_min_seg,
             warmstart=True,
             **cat.COMMON,
         ),
@@ -254,7 +271,7 @@ def build_bel_layout(cat, arch, costs_row, densities, out_dir):
         "Powertrain": "catenary_bel",
         "Infra_Level": "ref",
         "Energy_Level": "ref",
-        "feed_distance_miles": sug.substation_feed_distance_miles,
+        "feed_distance_miles": _feed_mi,
         "system_voltage_volts": sug.system_voltage_volts,
         "electrification_type": sug.electrification_type,
         "optimize_seconds": time.perf_counter() - started,
@@ -347,6 +364,10 @@ def build_cell(cat, arch, costs_row, infra_row, energy_row, densities, out_dir):
         objective="min_cost",
         economics=econ,
         substation_feed_distance_miles=sug.substation_feed_distance_miles,
+        # Same architecture-specific candidate set as the battery-electric
+        # branch, so the dual-mode and BEL layouts for one architecture are
+        # chosen from the same sites.
+        substations=cat.substations_for(arch),
         costs=costs,
         piece_opex_fn=cat.build_opex_fn(
             diesel_by_link, elec_by_link, diesel_price, elec_price
