@@ -159,7 +159,12 @@ def wide_metrics(metrics: pl.DataFrame, dwell_scope: str = "All") -> pl.DataFram
 def stop_summary(
     stops: pl.DataFrame, thresholds: Sequence[float], dwell_scope: str = "All"
 ) -> pl.DataFrame:
-    """Eligible stop count and fuel per (Sim_Key, threshold).
+    """Eligible stop count and creditable idle fuel per (Sim_Key, threshold).
+
+    ``eligible_fuel_MJ`` and ``eligible_dwell_seconds`` count only the portion
+    of each eligible stop BEYOND the threshold, which is the only part an
+    anti-idling system can act on. The unclipped totals are kept beside them so
+    the correction is auditable.
 
     Computed once per distinct threshold rather than per cell, since many cells
     share one. Under the "En_Route" scope, stops at the origin and destination
@@ -173,11 +178,29 @@ def stop_summary(
     for threshold in sorted(set(float(t) for t in thresholds)):
         frames.append(
             stops.filter(pl.col("duration_seconds") >= threshold)
+            # Only the time PAST the threshold is creditable. A system set to
+            # act after 15 minutes idles through the first 15 minutes of every
+            # stop it acts on, so crediting the whole stop over-counts by
+            # `threshold` seconds per eligible stop -- which is largest exactly
+            # where eligible stops are most numerous and shortest. Fuel is
+            # prorated by the same share, since `fuel_MJ` is idle fuel for the
+            # whole stop and idle burn is flat in time.
+            .with_columns(
+                (pl.col("duration_seconds") - threshold).alias("creditable_seconds")
+            )
+            .with_columns(
+                (pl.col("fuel_MJ") * pl.col("creditable_seconds")
+                 / pl.col("duration_seconds")).alias("creditable_fuel_MJ")
+            )
             .group_by("Sim_Key")
             .agg(
                 pl.len().alias("eligible_stops"),
-                pl.col("fuel_MJ").sum().alias("eligible_fuel_MJ"),
-                pl.col("duration_seconds").sum().alias("eligible_dwell_seconds"),
+                pl.col("creditable_fuel_MJ").sum().alias("eligible_fuel_MJ"),
+                pl.col("creditable_seconds").sum().alias("eligible_dwell_seconds"),
+                # Kept for diagnostics: the pre-fix quantities, so the size of
+                # the correction is visible in the output rather than inferred.
+                pl.col("fuel_MJ").sum().alias("eligible_fuel_unclipped_MJ"),
+                pl.col("duration_seconds").sum().alias("eligible_dwell_unclipped_seconds"),
             )
             .with_columns(pl.lit(threshold).alias("Shutdown_Threshold_Seconds"))
         )
