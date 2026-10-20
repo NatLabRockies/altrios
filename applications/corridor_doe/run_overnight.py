@@ -21,6 +21,10 @@ The stages
                         corridors x (diesel, hybrid x4 battery sizes, and on
                         Spokane the catenary dual-mode and battery-electric
                         cells). Each runs in its own process (see ``run_all``).
+4. ``rollout_staged``   The staged-adoption counterpart of every rollout cell: a
+                        linear 15-year ramp, blended against the diesel baseline
+                        year by year and re-discounted. A sensitivity, not the
+                        headline, and nothing downstream depends on it.
 4. ``rollout_costs``    Multi-year discounted costs for every cell -- fleet,
                         catenary infrastructure and 30 years of energy -- from
                         ``altrios.metric_calculator``'s own DCF over the walked
@@ -77,6 +81,10 @@ STAGES = [
     ("build_experiments", HERE, ["python", "build_experiments.py"]),
     ("run_sweep", HERE, ["python", "run_all.py"]),
     ("rollout_costs", HERE, ["python", "rollout_costs.py"]),
+    # Staged adoption, as a sensitivity beside the instant-conversion headline.
+    # Reads `rollout_costs.csv` and blends each cell against its diesel baseline
+    # year by year, so it must follow `rollout_costs` and nothing follows it.
+    ("rollout_staged", HERE, ["python", "postprocess_staged.py"]),
     ("collect", HERE, ["python", "collect_results.py"]),
     ("postprocess", HERE, ["python", "postprocess_antiidling.py"]),
     ("catenary_deepdive", CATENARY,
