@@ -62,7 +62,6 @@ def _res_of(loco_pd: dict) -> Optional[dict]:
 
 def charging_sessions(plan: pl.DataFrame, sim_pydicts: list,
                       charger_efficiency: float,
-                      departure_soc_fn: Optional[Callable[[dict], Optional[float]]] = None,
                       charger_power_w: float = 750e3,
                       ) -> pl.DataFrame:
     """One row per (locomotive, departure) that needed charge: ``Node`` is the
@@ -73,8 +72,9 @@ def charging_sessions(plan: pl.DataFrame, sim_pydicts: list,
     ``TrainSimVec_Index`` set for walked trains; ``sim_pydicts`` the walked sims
     in vector order. Within a train the sim's locomotive vector is ordered by
     ``Locomotive_ID`` (the planner sorts the dispatched locomotives by ID before
-    building the consist). ``departure_soc_fn(sim_pydict)`` overrides the
-    planner's departure SOC (fraction) when it returns a value.
+    building the consist). Departure SOC has exactly one source -- the consist
+    plan's ``Departure_SOC_J``, which the train planner wrote under its own
+    headroom cap -- so there is no override hook here.
 
     ``Start_Hr``/``End_Hr`` time each session for charger sizing: it starts when
     the locomotive arrived from its previous trip and runs at ``charger_power_w``
@@ -93,14 +93,12 @@ def charging_sessions(plan: pl.DataFrame, sim_pydicts: list,
         if len(rows) != len(locos):
             raise ValueError(f"train sim {idx}: {len(locos)} locomotives in the sim, "
                              f"{len(rows)} in the consist plan")
-        override = departure_soc_fn(sim) if departure_soc_fn else None
         for r, loco in zip(rows, locos):
             res = _res_of(loco)
             if not res:
                 continue
             cap = float(res["energy_capacity_joules"])
-            e_dep = (float(override) * cap if override is not None
-                     else float(r["Departure_SOC_J"]))
+            e_dep = float(r["Departure_SOC_J"])
             walked.append(dict(
                 Locomotive_ID=int(r["Locomotive_ID"]), Locomotive_Type=str(r["Locomotive_Type"]),
                 Train_ID=r["Train_ID"], Origin=str(r["Origin_ID"]),

@@ -957,7 +957,7 @@ def assign_diesel_helpers(plan: pl.DataFrame, row: dict, network,
 
 
 def _dispatch_and_walk(plan: pl.DataFrame, corridor, config, network, location_map,
-                       stamp=None):
+                       stamp=None, charging_guidelines=None):
     """Dispatch and walk ONE sample: its own meet-pass problem, end to end.
 
     Kept separate from `run_simulation` because a corridor whose calibrated
@@ -995,10 +995,16 @@ def _dispatch_and_walk(plan: pl.DataFrame, corridor, config, network, location_m
         # history available downstream.
         walk_timed_paths=True,
         save_interval=SAVE_INTERVAL,
-        # `stamp` applies per-train tuned hybrid settings (origin x load class)
-        # and departure SOC; None for every other arm and when untuned.
+        # `stamp` applies per-train tuned hybrid CONTROLLER settings
+        # (origin x load class); None for every other arm and when untuned. It
+        # no longer touches departure SOC -- that is the planner's, set from
+        # `network_charging_guidelines` below, so there is exactly one owner.
         configure_sim=(trim_history if stamp is None
                        else (lambda sim: trim_history(stamp(sim)))),
+        # Allowable battery headroom per origin, destination, load class,
+        # locomotive type and pack size. The planner caps each departure SOC at
+        # `SOC_Max_J - headroom`.
+        network_charging_guidelines=charging_guidelines,
         measure_window_hr=window,
         debug=False,
     )
@@ -1074,11 +1080,21 @@ def run_simulation(row: dict, plans):
     network = network_for(row)
     location_map = alt.import_locations(str(NETWORKS / corridor.locations))
     stamp = None
+    charging_guidelines = None
     if row["Powertrain"] == "hybrid":
+        regen_table = hybrid_controls_io.load_regen()
         stamp = hybrid_controls_io.regen_configurer(
-            hybrid_controls_io.load_regen(), row["Corridor"], row["Battery_MWh"])
+            regen_table, row["Corridor"], row["Battery_MWh"])
+        # The calibration's departure SOCs, expressed as the planner's allowable
+        # headroom. Absent rows leave the pack departing as full as it arrived.
+        charging_guidelines = hybrid_controls_io.headroom_guidelines(
+            regen_table, row["Corridor"], row["Battery_MWh"])
         if stamp is not None:
-            logger.info("  per-group regen controls + departure SOC applied")
+            logger.info("  per-group regen controls applied")
+        if charging_guidelines is not None:
+            logger.info("  departure headroom: %s",
+                        dict(charging_guidelines.select(
+                            "Origin", "Allowable_Battery_Headroom_MWh").iter_rows()))
     if isinstance(plans, pl.DataFrame):
         plans = [plans]
 
@@ -1100,7 +1116,8 @@ def run_simulation(row: dict, plans):
                     logger.info("  sample %d of %d: %d trains", k, len(staged),
                                 plan["Train_ID"].n_unique())
                 parts.append(_dispatch_and_walk(plan, corridor, config, network,
-                                                location_map, stamp))
+                                                location_map, stamp,
+                                                charging_guidelines))
             break
         except Exception as exc:  # noqa: BLE001 - escalate and try again
             if attempt >= len(ladder):
@@ -1127,9 +1144,10 @@ def run_simulation(row: dict, plans):
     # Terminal charging. Walking inside sim_manager produces no charging
     # sessions, so they are reconstructed from the walk: each battery-carrying
     # locomotive is charged at every departure from what it arrived with on its
-    # previous trip up to what it departs with (`terminal_charging`). Hybrids
-    # depart at their tuned per-group SOC when `in/hybrid_regen_controls.csv`
-    # exists, else at the planner's. The sessions replace the old fleet true-up
+    # previous trip up to what it departs with (`terminal_charging`). Departure
+    # SOC comes from the consist plan's `Departure_SOC_J`, which the planner set
+    # under its headroom cap -- there is no second source. The sessions replace
+    # the old fleet true-up
     # (net pack drawdown / charger efficiency) in `calculate_electricity_use`,
     # and are priced at their terminal in the rollout.
     #
@@ -1141,10 +1159,6 @@ def run_simulation(row: dict, plans):
     #
     # and `and` on a DataFrame raises "truth value of a DataFrame is ambiguous".
     # Consumers also filter it on its columns, which a schema-less frame lacks.
-    departure_soc = None
-    if row["Powertrain"] == "hybrid":
-        departure_soc = hybrid_controls_io.regen_departure_soc(
-            hybrid_controls_io.load_regen(), row["Corridor"], row["Battery_MWh"])
     charger_template = (terminal_charging.bel_charger_rows(refuel_facilities)
                         if refuel_facilities is not None else None)
     charger_w = (float(charger_template["Refueler_J_Per_Hr"][0]) / 3600.0
@@ -1153,7 +1167,7 @@ def run_simulation(row: dict, plans):
     if row["Powertrain"] in ("hybrid", "catenary_bel"):
         refuel_sessions = terminal_charging.charging_sessions(
             train_consist_plan, sims.to_pydict(),
-            alt.defaults.BEL_CHARGER_EFFICIENCY, departure_soc, charger_w)
+            alt.defaults.BEL_CHARGER_EFFICIENCY, charger_w)
     else:
         refuel_sessions = pl.DataFrame(schema=terminal_charging.SESSION_SCHEMA)
     # Facilities the metrics price: battery-electric chargers sized to the peak

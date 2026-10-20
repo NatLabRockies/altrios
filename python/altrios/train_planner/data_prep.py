@@ -595,7 +595,7 @@ def append_charging_guidelines(
     # permissive one; the least headroom is therefore the right reduction here.
     # Departure SOC is NOT set from this -- it is capped per dispatch, where the
     # destination and the train's weight are both known (see
-    # `headroom_joules_for_dispatch`).
+    # `dispatch_headroom_j`).
     per_node = (
         network_charging_guidelines
         .group_by(pl.col("Origin"))
@@ -631,38 +631,72 @@ def append_charging_guidelines(
     return refuelers, loco_pool
 
 
-def headroom_joules_for_dispatch(
+# Optional narrowing columns on `network_charging_guidelines`, in the order they
+# are applied. Each is independent: a table carrying none of them behaves as a
+# single rule per origin, which is the legacy schema.
+#
+#   Destination       direction of travel out of the origin
+#   Locomotive_Type   hybrid vs battery-electric (they need different reserves
+#                     even on the same grade, because the hybrid can also burn
+#                     fuel to avoid overfilling)
+#   Battery_MWh       pack size; a bigger pack holds the same descent in a
+#                     smaller SOC fraction
+#   Load_Class        "heavy"/"light"/"all" against `Tons_Per_Loco_Split`
+#
+# `"all"` and null are wildcards in every one of them.
+_HEADROOM_WILDCARDS = ("all", "any", "")
+
+
+def _narrow(rows: pl.DataFrame, column: str, value) -> pl.DataFrame:
+    """Keep the rows matching `value` in `column`; fall back to the wildcard rows,
+    then to `rows` unchanged. Unchanged (rather than empty) is deliberate: a
+    table that simply does not break out this dimension should still apply."""
+    if value is None or column not in rows.columns or rows.height == 0:
+        return rows
+    col = rows.get_column(column)
+    if col.dtype.is_numeric():
+        exact = rows.filter((pl.col(column) - float(value)).abs() < 1e-9)
+    else:
+        exact = rows.filter(pl.col(column).cast(pl.Utf8) == str(value))
+    if exact.height > 0:
+        return exact
+    wild = rows.filter(
+        pl.col(column).is_null()
+        | pl.col(column).cast(pl.Utf8).str.to_lowercase().is_in(_HEADROOM_WILDCARDS)
+    )
+    return wild if wild.height > 0 else rows
+
+
+def dispatch_headroom_j(
     network_charging_guidelines: pl.DataFrame | None,
+    dispatched: pl.DataFrame,
     origin: str,
-    destination: str | None,
+    destination: str | None = None,
     tons_per_loco: float | None = None,
-) -> float:
-    """Allowable battery headroom (J) for one dispatch.
+) -> pl.Series:
+    """Per-locomotive allowable battery headroom (J) for one dispatch.
 
-    Keyed on the ORIGIN-DESTINATION pair rather than the origin alone, because
-    the headroom a departure needs depends on the grade it is about to meet:
-    a terminal serving one descending and one climbing route needs different
-    reserves on each, and collapsing them with `.min()` would silently apply the
-    climbing route's zero to both.
+    THE one place departure state of charge is decided. The pack must leave a
+    terminal with room to absorb the regenerated energy the route ahead will
+    produce, and how much room depends on four things at once: which way the
+    train is going (`Destination`), how heavy it is (`Load_Class`), what kind of
+    locomotive is carrying the pack (`Locomotive_Type`) and how big that pack is
+    (`Battery_MWh`). Collapsing any of them -- as a per-origin `.min()` does --
+    applies one route's reserve to another's.
 
-    When the guidelines carry `Load_Class` and `Tons_Per_Loco_Split`, the row is
-    further selected by the train's tons per locomotive -- heavier trains shed
-    proportionally more potential energy on the same grade, so they need more of
-    the pack left empty. Tables without those columns behave as a single class.
-
-    Returns 0.0 when the guidelines are absent or have no row for the pair,
-    which leaves departure SOC uncapped.
+    Returns a Float64 Series aligned with `dispatched`, 0.0 wherever the
+    guidelines are absent or have no applicable row, which leaves that
+    locomotive's departure SOC uncapped.
     """
-    if network_charging_guidelines is None:
-        return 0.0
+    zeros = pl.Series("Battery_Headroom_J", [0.0] * dispatched.height, dtype=pl.Float64)
+    if network_charging_guidelines is None or dispatched.height == 0:
+        return zeros
     g = network_charging_guidelines
+    if "Allowable_Battery_Headroom_MWh" not in g.columns:
+        return zeros
+    # Shared narrowing: everything that does not vary within the consist.
     rows = g.filter(pl.col("Origin").cast(pl.Utf8) == str(origin))
-    if destination is not None and "Destination" in g.columns:
-        by_od = rows.filter(pl.col("Destination").cast(pl.Utf8) == str(destination))
-        if by_od.height > 0:
-            rows = by_od
-    if rows.height == 0:
-        return 0.0
+    rows = _narrow(rows, "Destination", destination)
     if (
         tons_per_loco is not None
         and "Load_Class" in rows.columns
@@ -670,14 +704,44 @@ def headroom_joules_for_dispatch(
     ):
         split = rows.get_column("Tons_Per_Loco_Split").drop_nulls()
         if split.len() > 0:
-            want = "heavy" if tons_per_loco >= float(split[0]) else "light"
-            by_class = rows.filter(pl.col("Load_Class").cast(pl.Utf8) == want)
-            if by_class.height == 0:
-                by_class = rows.filter(pl.col("Load_Class").cast(pl.Utf8) == "all")
-            if by_class.height > 0:
-                rows = by_class
-    mwh = float(rows.get_column("Allowable_Battery_Headroom_MWh").max())
-    return mwh * 1e6 / utilities.MWH_PER_MJ
+            rows = _narrow(
+                rows,
+                "Load_Class",
+                "heavy" if tons_per_loco >= float(split[0]) else "light",
+            )
+    if rows.height == 0:
+        return zeros
+    # Per-locomotive narrowing: type and pack size, cached by the pair so a
+    # 100-unit consist of one type does one lookup.
+    types = (
+        dispatched.get_column("Locomotive_Type").cast(pl.Utf8).to_list()
+        if "Locomotive_Type" in dispatched.columns
+        else [None] * dispatched.height
+    )
+    caps_mwh = (
+        [
+            None if c is None else float(c) * utilities.MWH_PER_MJ / 1e6
+            for c in dispatched.get_column("Capacity_J").to_list()
+        ]
+        if "Capacity_J" in dispatched.columns
+        else [None] * dispatched.height
+    )
+    cache: dict = {}
+    out = []
+    for loco_type, mwh in zip(types, caps_mwh):
+        key = (loco_type, None if mwh is None else round(mwh, 9))
+        if key not in cache:
+            r = _narrow(_narrow(rows, "Locomotive_Type", loco_type), "Battery_MWh", mwh)
+            cache[key] = (
+                0.0
+                if r.height == 0
+                else float(r.get_column("Allowable_Battery_Headroom_MWh").max())
+                * 1e6
+                / utilities.MWH_PER_MJ
+            )
+        out.append(cache[key])
+    return pl.Series("Battery_Headroom_J", out, dtype=pl.Float64)
+
 
 def get_freight_to_car_mapping(rail_vehicles: list[alt.RailVehicle]) -> dict[str, str]:
     # Create mapping from freight types to car types

@@ -443,7 +443,6 @@ def terminal_charging_j(row: dict, safe: str, sims=None) -> Dict[str, float]:
     if safe in _TERMINAL_CACHE:
         return _TERMINAL_CACHE[safe]
     import run_sweep  # noqa: F401 -- puts the DoE modules on the path
-    import hybrid_controls_io
     import terminal_charging as tc
     sidecar = json.loads((SIMS / f"{safe}_sidecar.json").read_text(encoding="utf-8"))
     if "terminal_charging_j" in sidecar:
@@ -454,14 +453,10 @@ def terminal_charging_j(row: dict, safe: str, sims=None) -> Dict[str, float]:
         plan = pl.read_csv(SIMS / f"{safe}_plan.csv", infer_schema_length=None)
         if sims is None:
             sims = alt.SpeedLimitTrainSimVec.from_file(str(SIMS / f"{safe}_sims.msgpack"))
-        dep = None
-        if row["Powertrain"] == "hybrid":
-            mwh = row.get("Battery_MWh")
-            dep = hybrid_controls_io.regen_departure_soc(
-                hybrid_controls_io.load_regen(), row["Corridor"],
-                None if mwh in (None, "", "nan") else float(mwh))
+        # Departure SOC is read straight off the persisted plan: the planner
+        # stamped it under its headroom cap, so no reconstruction is needed.
         sessions = tc.charging_sessions(plan, sims.to_pydict(),
-                                        defaults.BEL_CHARGER_EFFICIENCY, dep)
+                                        defaults.BEL_CHARGER_EFFICIENCY)
         out = tc.energy_by_node(sessions)
     _TERMINAL_CACHE[safe] = out
     return out

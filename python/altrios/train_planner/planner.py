@@ -659,8 +659,6 @@ def run_train_planner(
                         freight_type_to_car_type = freight_type_to_car_type
                     )
 
-                    # Get initial state of charge for selected locomotives
-                    loco_start_soc_j = dispatched.get_column("SOC_J")
 
                     # Create ordering of locomotives for processing
                     dispatch_order = (
@@ -674,40 +672,49 @@ def run_train_planner(
                     # Sort dispatched locomotives by ID
                     dispatched = dispatched.sort("Locomotive_ID")
 
-                    # Cap departure SOC at the allowable battery headroom for
-                    # this origin-destination pair and load class, so the pack
-                    # leaves the terminal with room to absorb the regen the grade
-                    # ahead will produce. Only ever LOWERS the SOC the pool
-                    # tracked, so a locomotive is never dispatched with more
-                    # charge than it actually accumulated.
+                    # Departure state of charge. `dispatch_headroom_j` is the
+                    # ONLY place it is decided: it resolves the allowable
+                    # headroom for this origin-destination pair, load class,
+                    # locomotive type and pack size, and the cap below can only
+                    # ever LOWER the SOC the pool tracked -- a locomotive is
+                    # never dispatched with more charge than it accumulated.
+                    #
+                    # The capped joules are what goes into both the sim and the
+                    # consist plan (`Departure_SOC_J`), so downstream charging
+                    # accounting bills exactly what was dispatched.
                     n_dispatched = max(dispatched.height, 1)
                     tons_per_loco = (
                         float(this_train["Tons_Per_Train"]) / n_dispatched
                         if this_train.get("Tons_Per_Train") is not None
                         else None
                     )
-                    headroom_j = data_prep.headroom_joules_for_dispatch(
+                    headroom_j = data_prep.dispatch_headroom_j(
                         network_charging_guidelines,
+                        dispatched,
                         this_train["Origin"],
                         this_train.get("Destination"),
                         tons_per_loco,
                     )
-                    # Calculate state of charge as percentage of capacity
-                    loco_start_soc_pct = dispatched.select(
-                        (
-                            pl.max_horizontal(
-                                [
-                                    pl.min_horizontal(
-                                        [
-                                            pl.col("SOC_J"),
-                                            pl.col("SOC_Max_J") - headroom_j,
-                                        ]
-                                    ),
-                                    pl.col("SOC_Min_J"),
-                                ]
-                            )
-                            / pl.col("Capacity_J")
-                        ).alias("Departure_SOC_J")
+                    capped = dispatched.with_columns(
+                        headroom_j.alias("Dispatch_Headroom_J")
+                    ).select(
+                        pl.max_horizontal(
+                            [
+                                pl.min_horizontal(
+                                    [
+                                        pl.col("SOC_J"),
+                                        pl.col("SOC_Max_J")
+                                        - pl.col("Dispatch_Headroom_J"),
+                                    ]
+                                ),
+                                pl.col("SOC_Min_J"),
+                            ]
+                        ).alias("Departure_SOC_J"),
+                        pl.col("Locomotive_ID"),
+                        pl.col("Capacity_J"),
+                    )
+                    loco_start_soc_pct = capped.select(
+                        pl.col("Departure_SOC_J") / pl.col("Capacity_J")
                     ).to_series()
 
                     # Create list of locomotive objects from configuration
@@ -852,6 +859,24 @@ def run_train_planner(
                     est_time_nets.append(est_time_net)
 
                     # Update locomotive pool with post-dispatch state
+                    # The capped departure, keyed by locomotive so the pool and
+                    # the consist plan both see exactly what was dispatched. Null
+                    # on every locomotive that stayed behind.
+                    # Mapped rather than joined: `selected` is a positional mask
+                    # over `loco_pool`, so the row order must not move.
+                    _dep_by_id = dict(
+                        capped.select("Locomotive_ID", "Departure_SOC_J").iter_rows()
+                    )
+                    loco_pool = loco_pool.with_columns(
+                        pl.Series(
+                            "Departure_SOC_J",
+                            [
+                                _dep_by_id.get(i)
+                                for i in loco_pool.get_column("Locomotive_ID").to_list()
+                            ],
+                            dtype=pl.Float64,
+                        )
+                    )
                     loco_pool = loco_pool.with_columns(
                         # Update location to destination for dispatched locomotives
                         pl.when(selected)
@@ -885,13 +910,19 @@ def run_train_planner(
                         .then(pl.col("Times_Dispatched") + 1)
                         .otherwise(pl.col("Times_Dispatched"))
                         .alias("Times_Dispatched"),
-                        # Update SOC based on energy usage, respecting min/max constraints
+                        # Update SOC based on energy usage, respecting min/max
+                        # constraints. The trip starts from the CAPPED departure:
+                        # charge held back for regen headroom was never in the
+                        # pack, so it cannot come back off the far end.
                         pl.when(selected)
                         .then(
                             pl.max_horizontal(
                                 pl.col("SOC_Min_J"),
                                 pl.min_horizontal(
-                                    pl.col("SOC_J") - pl.lit(energy_use_j),
+                                    pl.coalesce(
+                                        [pl.col("Departure_SOC_J"), pl.col("SOC_J")]
+                                    )
+                                    - pl.lit(energy_use_j),
                                     pl.col("SOC_Max_J"),
                                 ),
                             )
@@ -903,9 +934,8 @@ def run_train_planner(
                     # Create new rows for the train consist plan
                     new_rows = (loco_pool
                         .filter(selected)
-                        .select("Locomotive_ID", "Locomotive_Type")
+                        .select("Locomotive_ID", "Locomotive_Type", "Departure_SOC_J")
                         .with_columns(
-                            loco_start_soc_j.alias("Departure_SOC_J"),
                             pl.lit(train_id_counter).alias("Train_ID"),
                             pl.lit(current_time).alias("Departure_Time_Planned_Hr"),
                             pl.lit(current_time + travel_time).alias("Arrival_Time_Planned_Hr")
@@ -914,6 +944,7 @@ def run_train_planner(
                         .rename({"Origin": "Origin_ID", "Destination": "Destination_ID"})
                         .select(train_consist_plan.columns)
                     )
+                    loco_pool = loco_pool.drop("Departure_SOC_J")
 
                     # Add new rows to the train consist plan
                     train_consist_plan = pl.concat(

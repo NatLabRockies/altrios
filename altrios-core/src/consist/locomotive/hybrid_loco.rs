@@ -130,6 +130,34 @@ impl LocoTrait for Box<HybridLoco> {
                         format_dbg!()
                     )
                 })?, || format_dbg!())?;
+                // Shutdown delay. Both timers are advanced here, from the
+                // PREVIOUS step's resolved causes, because a delay is by
+                // definition a hold-over from the past -- this step's causes
+                // are not known until `get_pwr_gen_and_res` runs.
+                // `time_since_fc_cause` resets to zero on any step a physical
+                // cause fired and otherwise accumulates; the engine is held on
+                // while it is still inside the delay. The timer can only ADD a
+                // reason to run, so a cause arriving in this step starts the
+                // engine regardless of either timer.
+                let engine_was_on = *self.fc.state.engine_on.get_stale(|| format_dbg!())?;
+                let had_cause = *rgwb.state.fc_cause_latch.get_stale(|| format_dbg!())?;
+                let since = if had_cause {
+                    si::Time::ZERO
+                } else {
+                    *rgwb.state.time_since_fc_cause.get_stale(|| format_dbg!())? + dt
+                };
+                rgwb.state
+                    .time_since_fc_cause
+                    .update(since, || format_dbg!())?;
+                let delay = rgwb.fc_shutdown_delay.with_context(|| {
+                    anyhow!(
+                        "{}  Expected `ResGreedyWithBuffers::init` to have been called beforehand.",
+                        format_dbg!()
+                    )
+                })?;
+                rgwb.state
+                    .shutdown_delay_pending
+                    .update(engine_was_on && since < delay, || format_dbg!())?;
             }
         };
 
@@ -487,6 +515,17 @@ impl HybridPowertrainControls {
                     .state
                     .fc_temperature_too_low
                     .mark_fresh(|| format_dbg!())?;
+                // Every physical cause for this step is now set. Latch whether
+                // any of them fired, so the next step's shutdown delay knows how
+                // long it has been since the engine last had a real reason to run.
+                let physical = rgwdb
+                    .state
+                    .fc_on_from_physical_causes()
+                    .with_context(|| format_dbg!())?;
+                rgwdb
+                    .state
+                    .fc_cause_latch
+                    .update(physical, || format_dbg!())?;
                 if !rgwdb.state.fc_on().with_context(|| format_dbg!())? {
                     // engine is off, and `em_pwr` has already been limited within bounds
                     ensure!(
@@ -626,6 +665,14 @@ pub struct RESGreedyWithDynamicBuffers {
     /// Minimum time engine must remain on if it was on during the previous
     /// simulation time step.
     pub fc_min_time_on: Option<si::Time>,
+    /// How long the engine keeps running after the last reason to run it went
+    /// away, before it is allowed to shut down. This is a SHUTDOWN DELAY, not a
+    /// minimum-off lockout: it only ever keeps a running engine running, so a
+    /// mandatory restart (cold engine, low SOC, propulsion demand the pack
+    /// cannot serve) is never blocked by a timer. A lockout would have been the
+    /// other way round -- it would hold the engine off through a demand spike --
+    /// which is both unsafe and not what a real unit does.
+    pub fc_shutdown_delay: Option<si::Time>,
     /// Fraction of the battery's current discharge limit that may be spent on
     /// aux (hotel) load before the engine is forced on. Keeps discharge headroom
     /// in reserve for traction.
@@ -776,7 +823,15 @@ impl Init for RESGreedyWithDynamicBuffers {
         init_opt_default!(self, speed_soc_regen_buffer, 10. * uc::MPH);
         init_opt_default!(self, speed_soc_regen_buffer_coeff, 1.0 * uc::R);
         init_opt_default!(self, regen_bypasses_buffer, true);
-        init_opt_default!(self, fc_min_time_on, uc::S * 5.0);
+        // 60 s, not the 5 s this defaulted to. Five seconds is shorter than a
+        // single dispatch transient, so it did nothing: the engine could restart
+        // within one step of shutting down. Sixty seconds is the light-load
+        // shutdown spec and roughly what a road unit's start logic allows.
+        init_opt_default!(self, fc_min_time_on, uc::S * 60.0);
+        // Hold a running engine for half a minute after the last reason to run
+        // it clears. Together with the 60 s minimum run time this bounds the
+        // cycling rate; neither timer can keep the engine OFF.
+        init_opt_default!(self, fc_shutdown_delay, uc::S * 30.0);
         // Force FC to be on all the time by default
         // Was 0.0 mph, which made `train_speed > speed_fc_forced_on` true for ANY
         // movement and kept the engine running whenever the train was not stopped.
@@ -831,6 +886,18 @@ pub struct RGWDBState {
     aux_power_demand: TrackedState<bool>,
     /// SOC is below min buffer so FC is charging RES
     charging_for_low_soc: TrackedState<bool>,
+    /// A running engine is inside its shutdown delay: every physical reason to
+    /// run has gone away, but not for long enough yet. Keeps the engine from
+    /// chattering on and off across a sequence of short light-load dips.
+    shutdown_delay_pending: TrackedState<bool>,
+    /// True on any step where a PHYSICAL cause demanded the engine, i.e. the
+    /// `fc_on` causes excluding the two timers. Latched so the next step can
+    /// measure how long it has been since one last fired.
+    fc_cause_latch: TrackedState<bool>,
+    /// Time since [Self::fc_cause_latch] was last true. Reset to zero on every
+    /// step a physical cause fires, and compared against
+    /// [RESGreedyWithDynamicBuffers::fc_shutdown_delay].
+    pub time_since_fc_cause: TrackedState<si::Time>,
 
     /// buffer at which FC is forced on
     pub soc_fc_on_buffer: TrackedState<si::Ratio>,
@@ -847,19 +914,32 @@ impl RGWDBState {}
 impl Init for RGWDBState {}
 impl SerdeAPI for RGWDBState {}
 
-impl FuelConverterOn for RGWDBState {
-    /// If any of the causes are true, engine must be on
-    fn fc_on(&self) -> anyhow::Result<bool> {
+impl RGWDBState {
+    /// OR of the PHYSICAL reasons to run the engine -- everything except the
+    /// minimum-run-time and shutdown-delay timers. This is what the timers are
+    /// measured against, and it is also the set a mandatory restart comes from,
+    /// so no timer may ever suppress it.
+    fn fc_on_from_physical_causes(&self) -> anyhow::Result<bool> {
         Ok(*self.fc_temperature_too_low.get_fresh(|| format_dbg!())?
             || *self
                 .train_speed_above_threshold
                 .get_fresh(|| format_dbg!())?
-            || *self.on_time_too_short.get_fresh(|| format_dbg!())?
             || *self.propulsion_power_demand.get_fresh(|| format_dbg!())?
             || *self
                 .propulsion_power_demand_soft
                 .get_fresh(|| format_dbg!())?
             || *self.aux_power_demand.get_fresh(|| format_dbg!())?
             || *self.charging_for_low_soc.get_fresh(|| format_dbg!())?)
+    }
+}
+
+impl FuelConverterOn for RGWDBState {
+    /// If any of the causes are true, engine must be on. The two timers
+    /// (`on_time_too_short`, `shutdown_delay_pending`) can only ever ADD to the
+    /// physical causes, never mask one.
+    fn fc_on(&self) -> anyhow::Result<bool> {
+        Ok(self.fc_on_from_physical_causes()?
+            || *self.on_time_too_short.get_fresh(|| format_dbg!())?
+            || *self.shutdown_delay_pending.get_fresh(|| format_dbg!())?)
     }
 }

@@ -22,7 +22,10 @@ BEL_CHARGER_EFFICIENCY = 0.9
 # PANTOGRAPH_COST_USD). Diesel fuelers are priced at zero on the assumption that
 # the fueling plant already exists, which is why only chargers carry capital.
 BEL_CHARGER_COST_USD = BEL_CHARGE_RATE_KW * 1000 * utilities.USD_2022_TO_2025 # NLR Cost of Charging (Borlaug) showing ~linear trend on kW; #ICCT report showing little change through 2030
-BEL_CHARGER_LIFESPAN = 15
+# 20 yr, matched to LOCO_LIFESPAN so the rollout's charger and locomotive
+# replacement cycles land together and the levelized capital of a charging
+# site is not split across two different annuity horizons.
+BEL_CHARGER_LIFESPAN = 20
 
 BASE_ANALYSIS_YEAR = 2025
 DISCOUNT_RATE = 0.07

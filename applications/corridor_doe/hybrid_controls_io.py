@@ -170,13 +170,17 @@ def write_from_chosen(chosen_params: Dict[str, Dict[str, float]],
 # same stamping the calibration's fixed-path re-walk does, which reproduces the
 # DoE's walk exactly.
 #
-# `Soc_Dep` is the departure state of charge for that group. No hybrid chargers
-# exist in the DoE, so the calibration chose these subject to mean departure
-# SOC <= mean arrival SOC at each terminal: the energy is what the arriving
-# locomotives brought in. Load class is by tonnage per locomotive against
+# `Soc_Dep` is the departure state of charge the calibration chose for that
+# group. It is NOT stamped from here: departure SOC is set in exactly one place,
+# the train planner, via `network_charging_guidelines`
+# (`data_prep.dispatch_headroom_j`). `headroom_guidelines` below converts these
+# rows into that table. Stamping it here as well would have the planner set a
+# departure SOC, this hook overwrite it, and terminal charging bill the
+# overwritten one. Load class is by tonnage per locomotive against
 # `Tons_Per_Loco_Split` (heavy at or above it).
 #
-# ABSENT FILE = library controller, 0.95 departure SOC (the previous behaviour).
+# ABSENT FILE = library controller and no headroom, i.e. depart as full as the
+# pack arrived (the previous behaviour).
 REGEN_CONTROLS_PATH = HERE / "in" / "hybrid_regen_controls.csv"
 REGEN_FIELDS = (
     "speed_soc_regen_buffer_coeff",
@@ -248,23 +252,64 @@ def regen_configurer(table: Optional[pl.DataFrame], corridor: str,
             for f in REGEN_FIELDS:
                 if row.get(f) is not None:
                     rg[f] = float(row[f])
-            body["res"]["state"]["soc"] = float(row["Soc_Dep"])
+            # Departure SOC deliberately untouched -- see the note above.
         return alt.SpeedLimitTrainSim.from_pydict(d)
 
     return configure
 
 
-def regen_departure_soc(table: Optional[pl.DataFrame], corridor: str,
-                        battery_mwh: Optional[float]):
-    """``sim_pydict -> departure SOC (fraction) or None``: the tuned departure SOC
-    the stamper applied to this train, recovered from the walked sim (origin and
-    static mass do not change during a walk). For terminal charging accounting."""
-    lookup = _regen_group_lookup(table, corridor, battery_mwh)
-    if lookup is None:
+def headroom_guidelines(table: Optional[pl.DataFrame],
+                        corridor: Optional[str] = None,
+                        battery_mwh: Optional[float] = None,
+                        max_soc: float = 0.95) -> Optional[pl.DataFrame]:
+    """The calibration's departure SOCs as a `network_charging_guidelines` table.
+
+    The planner caps departure SOC at ``SOC_Max_J - headroom``, so a target SOC
+    of `Soc_Dep` on a pack of `Battery_MWh` is a headroom of
+    ``(max_soc - Soc_Dep) * Battery_MWh`` MWh. Negative values (a target above
+    the pack's own ceiling) clamp to zero.
+
+    One row per (origin, destination, load class, locomotive type, pack size).
+    The calibration tunes by ORIGIN, so every destination out of that origin
+    gets the same row -- `Destination` is carried as a wildcard rather than
+    enumerated, which keeps the table honest about what was actually measured
+    while leaving the column in place for when it is tuned per direction.
+    Likewise `Locomotive_Type` is a wildcard: the caller already narrows the
+    table to one corridor and pack size, so there is nothing left to
+    distinguish. Battery-electric terminals are simply absent from the
+    calibration, which the planner reads as no headroom -- depart as full as
+    the pack arrived -- until they are tuned in their own right.
+    """
+    if table is None or table.height == 0:
         return None
-
-    def soc(d: dict):
-        row = lookup(d)
-        return float(row["Soc_Dep"]) if row is not None else None
-
-    return soc
+    needed = {"Corridor", "Battery_MWh", "Origin_ID", "Load_Class", "Soc_Dep"}
+    missing = needed - set(table.columns)
+    if missing:
+        raise ValueError(f"regen controls table is missing {sorted(missing)}")
+    # Terminal names repeat across corridors, so the cell must be selected here:
+    # the planner keys on origin alone and would otherwise see another
+    # corridor's rows for the same name.
+    if corridor is not None:
+        table = table.filter(pl.col("Corridor") == corridor)
+    if battery_mwh is not None:
+        table = table.filter(
+            (pl.col("Battery_MWh") - float(battery_mwh)).abs() < 1e-9
+        )
+    if table.height == 0:
+        return None
+    out = table.select(
+        pl.col("Origin_ID").cast(pl.Utf8).alias("Origin"),
+        pl.lit("all").alias("Destination"),
+        pl.col("Load_Class").cast(pl.Utf8),
+        pl.col("Tons_Per_Loco_Split").cast(pl.Float64)
+        if "Tons_Per_Loco_Split" in table.columns
+        else pl.lit(None, dtype=pl.Float64).alias("Tons_Per_Loco_Split"),
+        pl.lit(None, dtype=pl.Utf8).alias("Locomotive_Type"),
+        pl.col("Battery_MWh").cast(pl.Float64),
+        pl.max_horizontal(
+            pl.lit(0.0),
+            (pl.lit(float(max_soc)) - pl.col("Soc_Dep").cast(pl.Float64))
+            * pl.col("Battery_MWh").cast(pl.Float64),
+        ).alias("Allowable_Battery_Headroom_MWh"),
+    )
+    return out.unique()
