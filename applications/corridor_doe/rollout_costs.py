@@ -91,6 +91,14 @@ ANNUAL_METRICS = [
 ]
 
 
+# ATB battery-cost trajectories. The price file also carries "Conservative",
+# but the study reports the central case and the low-cost one, so pricing all
+# three by default would add half again to this stage's runtime for a column
+# nothing reads. Pass `--battery-scenarios` to price others.
+BATTERY_SCENARIOS = ["Moderate", "Advanced"]
+KNOWN_BATTERY_SCENARIOS = list(mc.BATTERY_SCENARIOS)
+
+
 # ------------------------------------------------------------------ pricing
 def _atb_pack_usd(loco: alt.Locomotive, year: int,
                   battery_scenario: str = "Moderate") -> float:
@@ -525,7 +533,8 @@ def charger_facilities(row: dict, safe: str, experiments: pl.DataFrame,
 
 
 def rollout_cell(row: dict, safe: str, layouts: pl.DataFrame,
-                 emissions_cache: Dict[tuple, pl.DataFrame]) -> Optional[pl.DataFrame]:
+                 emissions_cache: Dict[tuple, pl.DataFrame],
+                 battery_scenario: str = "Moderate") -> Optional[pl.DataFrame]:
     """Every cost cell's discounted rollout for one simulation, or None if the
     sweep left no bundle for it."""
     bundle = SIMS / f"{safe}_sims.msgpack"
@@ -575,7 +584,7 @@ def rollout_cell(row: dict, safe: str, layouts: pl.DataFrame,
     emissions = (composite_emissions(emissions_cache[key], list(shares))
                  if emissions_cache[key] is not None else None)
 
-    cost_fns = cost_functions(row)
+    cost_fns = cost_functions(row, battery_scenario)
     experiments = pl.read_csv(HERE / "experiments.csv", infer_schema_length=None)
     chargers = charger_facilities(row, safe, experiments, sims)
     frames = []
@@ -605,6 +614,13 @@ def rollout_cell(row: dict, safe: str, layouts: pl.DataFrame,
             "Infra_Level": cell["Infra_Level"],
             "Infra_Multiplier": float(cell["Infra_Multiplier"]),
             "Energy_Level": cell["Energy_Level"],
+            # The battery-cost trajectory belongs in the cell key: without it
+            # the two share a key and every present-value aggregation sums
+            # across both, silently doubling capital.
+            "Battery_Cost_Scenario": battery_scenario,
+            # Stated, not derived: the rollout levelizes capital through the
+            # calculator's annuity rather than expensing it at purchase.
+            "Capital_Basis": "levelized",
             "Rollout_Years": cat.METRICS_ROLLOUT_YEARS,
             "Start_Year": cat.METRICS_START_YEAR,
             "Discount_Rate": cat.DISCOUNT_RATE,
@@ -631,6 +647,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--sim-key", help="run one simulation only")
     parser.add_argument("--out", type=Path, default=OUT / "rollout_costs.csv")
+    parser.add_argument(
+        "--battery-scenarios", default=",".join(BATTERY_SCENARIOS),
+        help="ATB battery-cost trajectories to price, comma separated. Both the "
+             "central and low-cost cases by default, because the findings "
+             "notebook reports each and keys its cells on which is which",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -640,17 +662,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         sims = sims.filter(pl.col("Sim_Key") == args.sim_key)
     layouts = pl.read_csv(OUT / "layouts" / "layouts.csv", infer_schema_length=None)
 
+    scenarios = [x.strip() for x in args.battery_scenarios.split(",") if x.strip()]
+    unknown = [x for x in scenarios if x not in KNOWN_BATTERY_SCENARIOS]
+    if unknown:
+        logger.error("unknown battery scenario(s) %s; have %s", unknown,
+                     KNOWN_BATTERY_SCENARIOS)
+        return 1
+    logger.info("battery-cost trajectories: %s", ", ".join(scenarios))
     emissions_cache: Dict[tuple, pl.DataFrame] = {}
     frames: List[pl.DataFrame] = []
     missing: List[str] = []
     for row in sims.to_dicts():
         safe = row["Sim_Key"].replace("|", "__").replace(".", "p")
         logger.info("=== %s ===", row["Sim_Key"])
-        frame = rollout_cell(row, safe, layouts, emissions_cache)
-        if frame is None:
+        got = False
+        for scenario in scenarios:
+            frame = rollout_cell(row, safe, layouts, emissions_cache, scenario)
+            if frame is None:
+                break
+            frames.append(frame)
+            got = True
+        if not got:
             missing.append(row["Sim_Key"])
             continue
-        frames.append(frame)
         # Written after every simulation so an interruption keeps what finished.
         pl.concat(frames, how="diagonal_relaxed").write_csv(args.out)
 
