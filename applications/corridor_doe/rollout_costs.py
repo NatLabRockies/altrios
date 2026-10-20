@@ -79,6 +79,10 @@ ANNUAL_METRICS = [
     ("Freight_Moved", "car-miles"),
     ("Count_Locomotives", "assets"),
     ("Count_Infrastructure", "assets"),
+    # Terminal chargers (battery-electric and hybrid cells): counts, unit cost
+    # and lifespan from the refuel facilities each ScenarioInfo carries, so the
+    # calculator's rollout prices them like locomotives and infrastructure.
+    ("Count_Refuelers", "assets"),
     ("Energy_Costs", "USD"),
     ("Energy", "MJ"),
     # Use-phase CO2-eq per year: GREET diesel factor, Cambium grid factor by
@@ -388,7 +392,7 @@ def energy_prices(year: int, energy_level: str, elec_nodes: Sequence[str],
 
 # ------------------------------------------------------------------ one cell
 def year_scenario(year, sims, pool, consist_plan, grid_j_by_node, energy_level,
-                  emissions_factors, infra_df, diesel_zone_list):
+                  emissions_factors, infra_df, diesel_zone_list, refuel_facilities=None):
     """One rollout year's ScenarioInfo, priced by zone at that year's trajectories."""
     nodes = list(grid_j_by_node)
     diesel_price, elec_cents = energy_prices(year, energy_level, nodes, diesel_zone_list)
@@ -410,11 +414,118 @@ def year_scenario(year, sims, pool, consist_plan, grid_j_by_node, energy_level,
     return mc.ScenarioInfo(
         sims=sims, simulation_days=SIMULATION_DAYS, annualize=True,
         scenario_year=year, loco_pool=pool, consist_plan=consist_plan,
-        refuel_facilities=None, refuel_sessions=sessions,
+        refuel_facilities=refuel_facilities, refuel_sessions=sessions,
         emissions_factors=emissions_factors, nodal_energy_prices=nodal_prices,
         count_unused_locomotives=True, train_planner_config=None,
         infrastructure_costs=infra_df,
     )
+
+
+# ------------------------------------------------------------------ terminal charging
+# Hybrid charger counts are scaled from a battery-electric cell's (see
+# `terminal_charging`). A corridor with no battery-electric cell borrows this
+# one's installed ports per unit of weekly terminal charging energy.
+REFERENCE_BEL_CORRIDOR = "spokane_lethbridge"
+REFERENCE_BEL_ARCHITECTURE = "ac_25kv"
+_TERMINAL_CACHE: Dict[str, dict] = {}
+
+
+def _safe(sim_key: str) -> str:
+    return sim_key.replace("|", "__").replace(".", "p")
+
+
+def terminal_charging_j(row: dict, safe: str, sims=None) -> Dict[str, float]:
+    """Grid joules of terminal charging per terminal for one simulation (week).
+
+    From the sidecar when the sweep recorded it; otherwise reconstructed from the
+    persisted plan and sims the same way the sweep now does, so cells simulated
+    before terminal charging was tracked are priced consistently."""
+    if safe in _TERMINAL_CACHE:
+        return _TERMINAL_CACHE[safe]
+    import run_sweep  # noqa: F401 -- puts the DoE modules on the path
+    import hybrid_controls_io
+    import terminal_charging as tc
+    sidecar = json.loads((SIMS / f"{safe}_sidecar.json").read_text(encoding="utf-8"))
+    if "terminal_charging_j" in sidecar:
+        out = {k: float(v) for k, v in (sidecar["terminal_charging_j"] or {}).items()}
+    elif row["Powertrain"] not in ("hybrid", "catenary_bel"):
+        out = {}
+    else:
+        plan = pl.read_csv(SIMS / f"{safe}_plan.csv", infer_schema_length=None)
+        if sims is None:
+            sims = alt.SpeedLimitTrainSimVec.from_file(str(SIMS / f"{safe}_sims.msgpack"))
+        dep = None
+        if row["Powertrain"] == "hybrid":
+            mwh = row.get("Battery_MWh")
+            dep = hybrid_controls_io.regen_departure_soc(
+                hybrid_controls_io.load_regen(), row["Corridor"],
+                None if mwh in (None, "", "nan") else float(mwh))
+        sessions = tc.charging_sessions(plan, sims.to_pydict(),
+                                        defaults.BEL_CHARGER_EFFICIENCY, dep)
+        out = tc.energy_by_node(sessions)
+    _TERMINAL_CACHE[safe] = out
+    return out
+
+
+def _bel_chargers(safe: str) -> Optional[pl.DataFrame]:
+    """The battery-electric cell's own chargers: the planner's electric refuelers
+    (persisted by the sweep), else rebuilt from the persisted pool's port count
+    with the planner's charger template."""
+    import run_sweep
+    path = SIMS / f"{safe}_refuelers.csv"
+    if path.exists():
+        ref = pl.read_csv(path, infer_schema_length=None)
+        ref = ref.filter(pl.col("Fuel_Type") == "Electricity")
+        return ref if ref.height else None
+    pool = pl.read_csv(SIMS / f"{safe}_loco_pool.csv", infer_schema_length=None)
+    elec = pool.filter(pl.col("Fuel_Type") == "Electricity")
+    if elec.height == 0:
+        return None
+    ports = float(elec["Port_Count"].max())
+    tpl = run_sweep.planner_config_for("catenary_bel", None).refueler_info
+    tpl = pl.from_pandas(tpl[tpl["Fuel_Type"] == "Electricity"].head(1))
+    nodes = sorted(pool["Node"].unique().to_list())
+    return pl.concat([tpl.with_columns(pl.lit(n).alias("Node"),
+                                       pl.lit(ports).alias("Port_Count")) for n in nodes],
+                     how="diagonal_relaxed")
+
+
+def charger_facilities(row: dict, safe: str, experiments: pl.DataFrame,
+                       sims=None) -> Optional[pl.DataFrame]:
+    """Refuel facilities whose capital the rollout prices: the battery-electric
+    cell's own chargers, or for a hybrid the reference battery-electric chargers
+    scaled by terminal charging energy (`terminal_charging.scaled_chargers`)."""
+    import terminal_charging as tc
+    if row["Powertrain"] == "catenary_bel":
+        return _bel_chargers(safe)
+    if row["Powertrain"] != "hybrid":
+        return None
+    own = terminal_charging_j(row, safe, sims)
+    if not own:
+        return None
+    bels = experiments.filter((pl.col("Powertrain") == "catenary_bel")
+                              & (pl.col("Architecture") == REFERENCE_BEL_ARCHITECTURE))
+    same = bels.filter(pl.col("Corridor") == row["Corridor"])
+    ref = same if same.height else bels.filter(pl.col("Corridor") == REFERENCE_BEL_CORRIDOR)
+    if ref.height == 0:
+        logger.warning("  no reference battery-electric cell; hybrid chargers unpriced")
+        return None
+    ref_row = ref.unique(subset=["Sim_Key"]).to_dicts()[0]
+    ref_safe = _safe(ref_row["Sim_Key"])
+    if not (SIMS / f"{ref_safe}_sidecar.json").exists():
+        logger.warning("  reference %s has no saved sims; hybrid chargers unpriced",
+                       ref_row["Sim_Key"])
+        return None
+    ref_chargers = _bel_chargers(ref_safe)
+    ref_j = terminal_charging_j(ref_row, ref_safe)
+    if ref_chargers is None or not ref_j:
+        return None
+    ref_ports = {r["Node"]: float(r["Port_Count"]) for r in ref_chargers.iter_rows(named=True)}
+    out = tc.scaled_chargers(ref_chargers, own, ref_j, ref_ports,
+                             same_corridor=bool(same.height))
+    logger.info("  hybrid chargers (installed-power equivalent ports): %s",
+                {r["Node"]: round(r["Port_Count"], 3) for r in out.iter_rows(named=True)})
+    return out if out.height else None
 
 
 def rollout_cell(row: dict, safe: str, layouts: pl.DataFrame,
@@ -440,7 +551,19 @@ def rollout_cell(row: dict, safe: str, layouts: pl.DataFrame,
                                float(sidecar["pantograph_j"]) + float(sidecar["line_loss_j"])))
     grid_j -= float(sidecar.get("grid_return_j", 0.0))
     shares = grid_draw_shares(sims, row["Corridor"], safe)
-    grid_by_node = {n: grid_j * s for n, s in shares.items()}
+    grid_by_node = {n: grid_j * s for n, s in shares.items()} if grid_j else {}
+    # Terminal (stationary) charging, priced and attributed at each terminal's
+    # own "<region>|<zone>" node. Battery-electric and hybrid cells only.
+    tz = {r["Node"]: grid_node(r["Grid_Region"], r["Electricity_Zone"])
+          for r in terminal_zones(row["Corridor"]).iter_rows(named=True)}
+    for term, j in terminal_charging_j(row, safe, sims).items():
+        if term in tz and j > 0:
+            grid_by_node[tz[term]] = grid_by_node.get(tz[term], 0.0) + j
+    if not grid_by_node:  # keep at least one pricing node (zero energy)
+        grid_by_node = {n: 0.0 for n in shares}
+    total_j = sum(grid_by_node.values())
+    shares = ({n: j / total_j for n, j in grid_by_node.items()} if total_j > 0
+              else {n: 1.0 / len(grid_by_node) for n in grid_by_node})
     dz = diesel_zones(row["Corridor"])
     # Cambium GEA regions, NOT location names. sim_manager keys its emissions
     # factors by location Node ("Spokane", "Lethbridge") after mapping each
@@ -457,6 +580,8 @@ def rollout_cell(row: dict, safe: str, layouts: pl.DataFrame,
                  if emissions_cache[key] is not None else None)
 
     cost_fns = cost_functions(row)
+    experiments = pl.read_csv(HERE / "experiments.csv", infer_schema_length=None)
+    chargers = charger_facilities(row, safe, experiments, sims)
     frames = []
     # Cost cells: infra x energy for catenary; energy only for the rest.
     cells = (pl.read_csv(HERE / "experiments.csv", infer_schema_length=None)
@@ -467,7 +592,8 @@ def rollout_cell(row: dict, safe: str, layouts: pl.DataFrame,
         infra_df = infrastructure_costs(cell, layouts)
         scenarios = [
             year_scenario(y, sims, price_pool(pool, cost_fns, y), plan,
-                          grid_by_node, cell["Energy_Level"], emissions, infra_df, dz)
+                          grid_by_node, cell["Energy_Level"], emissions, infra_df, dz,
+                          chargers)
             for y in years
         ]
         diesel_start, elec_start = energy_prices(cat.METRICS_START_YEAR, cell["Energy_Level"],

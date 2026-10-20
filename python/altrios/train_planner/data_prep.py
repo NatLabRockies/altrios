@@ -157,6 +157,7 @@ def append_loco_info(loco_info: pd.DataFrame) -> pd.DataFrame:
             "SOC_Min_J",
             "SOC_Max_J",
             "Capacity_J",
+            "Has_Battery",
         ]
     ):
         return loco_info
@@ -210,6 +211,18 @@ def append_loco_info(loco_info: pd.DataFrame) -> pd.DataFrame:
         else:
             return loco_type["res"]["energy_capacity_joules"]
 
+    def get_has_battery(loco: alt.Locomotive) -> bool:
+        """True when the locomotive carries a reversible energy storage system.
+
+        Used in preference to ``Fuel_Type`` wherever behavior depends on having a
+        battery rather than on which fuel the locomotive is accounted against: a
+        hybrid is ``Fuel_Type == "Diesel"`` but still has a pack whose state of
+        charge must be managed.
+        """
+        loco_dict = loco.to_pydict()
+        loco_type = next(iter(loco_dict["loco_type"].values()))
+        return "res" in loco_type.keys()
+
     loco_info.loc[:, "HP"] = loco_info.loc[:, "Rust_Loco"].apply(get_hp)
     loco_info.loc[:, "Loco_Mass_Tons"] = loco_info.loc[:, "Rust_Loco"].apply(
         get_mass_ton
@@ -218,6 +231,7 @@ def append_loco_info(loco_info: pd.DataFrame) -> pd.DataFrame:
     loco_info.loc[:, "SOC_Min_J"] = loco_info.loc[:, "Rust_Loco"].apply(get_min_soc)
     loco_info.loc[:, "SOC_Max_J"] = loco_info.loc[:, "Rust_Loco"].apply(get_max_soc)
     loco_info.loc[:, "Capacity_J"] = loco_info.loc[:, "Rust_Loco"].apply(get_capacity)
+    loco_info.loc[:, "Has_Battery"] = loco_info.loc[:, "Rust_Loco"].apply(get_has_battery)
     return loco_info
 
 
@@ -576,7 +590,13 @@ def append_charging_guidelines(
         network_charging_guidelines = network_charging_guidelines.join(
             active_ods, on=["Origin", "Destination"], how="inner"
         )
-    network_charging_guidelines = (
+    # Per-node headroom, for sizing CHARGE TARGETS only. A charger serves every
+    # destination out of its node, so it must not under-charge for the most
+    # permissive one; the least headroom is therefore the right reduction here.
+    # Departure SOC is NOT set from this -- it is capped per dispatch, where the
+    # destination and the train's weight are both known (see
+    # `headroom_joules_for_dispatch`).
+    per_node = (
         network_charging_guidelines
         .group_by(pl.col("Origin"))
         .agg(
@@ -585,36 +605,79 @@ def append_charging_guidelines(
         .rename({"Allowable_Battery_Headroom_MWh": "Battery_Headroom_J"})
         .with_columns(pl.col("Origin").cast(pl.Categorical))
     )
-    refuelers = refuelers.join(
-        network_charging_guidelines, left_on="Node", right_on="Origin", how="left"
-    ).with_columns(
-        pl.when(pl.col("Fuel_Type") == "Electricity")
+    # Gate on having a pack, not on Fuel_Type: a hybrid is accounted against
+    # diesel but still carries a battery whose headroom must be respected.
+    headroom_if_battery = (
+        pl.when(pl.col("Has_Battery"))
         .then(pl.col("Battery_Headroom_J"))
         .otherwise(0)
         .fill_null(0)
         .alias("Battery_Headroom_J")
     )
-    loco_pool = (
-        loco_pool.join(
-            network_charging_guidelines, left_on="Node", right_on="Origin", how="left"
-        )
-        .with_columns(
-            pl.when(pl.col("Fuel_Type") == "Electricity")
-            .then(pl.col("Battery_Headroom_J"))
-            .otherwise(0)
-            .fill_null(0)
-            .alias("Battery_Headroom_J")
-        )
-        .with_columns(
-            pl.max_horizontal(
-                [
-                    pl.col("SOC_Max_J") - pl.col("Battery_Headroom_J"),
-                    pl.col("SOC_Min_J"),
-                ]
-            ).alias("SOC_J")
-        )
+    refuelers = refuelers.join(
+        per_node, left_on="Node", right_on="Origin", how="left"
+    ).with_columns(
+        headroom_if_battery if "Has_Battery" in refuelers.columns
+        # Refueler rows carry no locomotive, so fall back to the fuel they serve.
+        else pl.when(pl.col("Fuel_Type") == "Electricity")
+        .then(pl.col("Battery_Headroom_J"))
+        .otherwise(0)
+        .fill_null(0)
+        .alias("Battery_Headroom_J")
     )
+    loco_pool = loco_pool.join(
+        per_node, left_on="Node", right_on="Origin", how="left"
+    ).with_columns(headroom_if_battery)
     return refuelers, loco_pool
+
+
+def headroom_joules_for_dispatch(
+    network_charging_guidelines: pl.DataFrame | None,
+    origin: str,
+    destination: str | None,
+    tons_per_loco: float | None = None,
+) -> float:
+    """Allowable battery headroom (J) for one dispatch.
+
+    Keyed on the ORIGIN-DESTINATION pair rather than the origin alone, because
+    the headroom a departure needs depends on the grade it is about to meet:
+    a terminal serving one descending and one climbing route needs different
+    reserves on each, and collapsing them with `.min()` would silently apply the
+    climbing route's zero to both.
+
+    When the guidelines carry `Load_Class` and `Tons_Per_Loco_Split`, the row is
+    further selected by the train's tons per locomotive -- heavier trains shed
+    proportionally more potential energy on the same grade, so they need more of
+    the pack left empty. Tables without those columns behave as a single class.
+
+    Returns 0.0 when the guidelines are absent or have no row for the pair,
+    which leaves departure SOC uncapped.
+    """
+    if network_charging_guidelines is None:
+        return 0.0
+    g = network_charging_guidelines
+    rows = g.filter(pl.col("Origin").cast(pl.Utf8) == str(origin))
+    if destination is not None and "Destination" in g.columns:
+        by_od = rows.filter(pl.col("Destination").cast(pl.Utf8) == str(destination))
+        if by_od.height > 0:
+            rows = by_od
+    if rows.height == 0:
+        return 0.0
+    if (
+        tons_per_loco is not None
+        and "Load_Class" in rows.columns
+        and "Tons_Per_Loco_Split" in rows.columns
+    ):
+        split = rows.get_column("Tons_Per_Loco_Split").drop_nulls()
+        if split.len() > 0:
+            want = "heavy" if tons_per_loco >= float(split[0]) else "light"
+            by_class = rows.filter(pl.col("Load_Class").cast(pl.Utf8) == want)
+            if by_class.height == 0:
+                by_class = rows.filter(pl.col("Load_Class").cast(pl.Utf8) == "all")
+            if by_class.height > 0:
+                rows = by_class
+    mwh = float(rows.get_column("Allowable_Battery_Headroom_MWh").max())
+    return mwh * 1e6 / utilities.MWH_PER_MJ
 
 def get_freight_to_car_mapping(rail_vehicles: list[alt.RailVehicle]) -> dict[str, str]:
     # Create mapping from freight types to car types

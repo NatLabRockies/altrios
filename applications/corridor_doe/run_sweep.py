@@ -54,6 +54,7 @@ from altrios.train_planner import data_prep, planner_config
 
 import catenary_policy  # noqa: E402  -- receptive wire flag + export credit
 import hybrid_controls_io  # noqa: E402  -- optional tuned hybrid controller
+import terminal_charging  # noqa: E402  -- per-locomotive terminal charging sessions
 
 HERE = Path(__file__).parent
 OUT = HERE / "out"
@@ -284,6 +285,8 @@ METRICS = [
     # postprocess_antiidling.py from the factors recorded below -- which is
     # also more transparent than a metric whose factors are implicit.
     ("Count_Locomotives", "assets"),
+    # The planner's refuelers (diesel fuelers and battery-electric chargers).
+    ("Count_Refuelers", "assets"),
 ]
 
 
@@ -339,8 +342,20 @@ def _strip_history(obj):
 # mover output. On these corridors it lets a 1 MWh pack take a median braking
 # event whole (2.5 MW per consist on Spokane; 0.7-3.8 MW per unit); 1C cannot,
 # and 3C+ runs into the pack-full limit and the 5 MW drivetrain cap. Not a DoE
-# factor by design -- one value, stated. Charge and discharge share the rating.
+# factor by design -- one value, stated. This is the DISCHARGE rating; charge
+# acceptance is HYBRID_CHARGE_C_RATE below.
 HYBRID_PACK_C_RATE = 2.0
+
+# Hybrid CHARGE acceptance (regen and engine charging), set apart from discharge
+# on 2026-10-18. A 0.25-2 MWh pack beside a 3.36 MW engine is a power-sized
+# buffer, so power-optimized cells are the coherent specification, and those
+# sustain 3C+ charge; braking events here last minutes, not hours. The single-
+# train brake diagnostic on loaded Spokane showed 2C refusing ~16 GJ of braking
+# per trip that 3C would mostly take. 3C rather than 4C keeps the claim inside
+# mainstream power-cell capability and the model's own efficiency map (0.94 at
+# 3C). Discharge stays at 2C: the 5 MW drive caps it and it rarely binds. Applied
+# via `res.pwr_in_max`. One stated value, not a DoE factor.
+HYBRID_CHARGE_C_RATE = 3.0
 
 
 def set_battery_power_from_c_rate(loco: alt.Locomotive, c_rate: float) -> alt.Locomotive:
@@ -407,12 +422,19 @@ def build_locomotive(powertrain: str, battery_mwh: Optional[float],
     if battery_mwh is not None:
         loco = set_battery_capacity(loco, float(battery_mwh))
         loco = set_battery_power_from_c_rate(loco, HYBRID_PACK_C_RATE)
+        if powertrain == "hybrid":
+            loco = set_battery_charge_from_c_rate(loco, HYBRID_CHARGE_C_RATE)
         loco.set_force_max_pounds(FORCE_MAX_POUNDS, "UpdateMu")
     # Tuned controller last, so it overrides the library defaults on the fully
     # sized locomotive. A no-op for every non-hybrid and when no tuned settings
     # exist, which is why no caller has to branch on it.
     loco = hybrid_controls_io.apply_to_locomotive(loco, controls or {})
     return loco
+
+
+# Refuelers per terminal while planning: high enough that the planner's queue
+# never binds (charger sizing happens afterwards, from the walked sessions).
+UNCONSTRAINED_PORTS_PER_NODE = 500
 
 
 def planner_config_for(
@@ -426,7 +448,19 @@ def planner_config_for(
     a consist plan may name either, so a mixed consist needs nothing more than
     the second row here plus the right value in the plan.
     """
-    fuel = "Electricity" if powertrain == "catenary_bel" else "Diesel"
+    # Hybrids are declared "Electricity" so the planner HOLDS them at a charger
+    # before departure: terminal charging is the binding hold (hours at charger
+    # rate) where diesel refuelling is minutes at 300 gal/min, so modelling the
+    # charge alone and leaving diesel implicit gets the dwell right. It also
+    # routes hybrid refuel sessions into `calculate_electricity_use`, which
+    # filters on Fuel_Type == "Electricity" -- without this their charging energy
+    # is invisible to the metrics and priced at zero.
+    #
+    # Trade-off accepted: `require_diesel` matches Fuel_Type on "(?i)diesel", so
+    # a hybrid no longer satisfies it. That flag is False by default and unused
+    # in this DoE. If it is ever enabled here, match on `Has_Battery` or widen
+    # the regex instead of reverting this.
+    fuel = ("Electricity" if powertrain in ("catenary_bel", "hybrid") else "Diesel")
     # Tuned hybrid controller, if one has been written by the controls sweep.
     # `corridor` is optional so the diagnostic scripts that call this with two
     # arguments keep working; without it the library defaults stand.
@@ -481,6 +515,18 @@ def planner_config_for(
         row["Fuel_Type"] = fuel_type
         rows.append(row)
     config.refueler_info = pd.concat(rows, ignore_index=True)
+    # Locomotives are REUSED from train to train: the plan fixes each train's
+    # locomotive count and type, and the planner draws units that have arrived,
+    # charged/refuelled and been serviced (see `TrainPlannerConfig.
+    # reuse_locomotives`). Repositioning between terminals is implicit and not
+    # simulated. The imported plans give every locomotive-trip its own ID, so
+    # without this the fleet was one unit per locomotive-trip (6-12x too big)
+    # and charger queues could never delay anything.
+    config.reuse_locomotives = True
+    # Ports are unconstrained while planning so no unit waits for a charger;
+    # chargers are then SIZED to the peak concurrent charging sessions the walk
+    # produces (`terminal_charging.sized_chargers`).
+    config.refuelers_per_incoming_corridor = UNCONSTRAINED_PORTS_PER_NODE
     return config
 
 
@@ -910,7 +956,8 @@ def assign_diesel_helpers(plan: pl.DataFrame, row: dict, network,
     )
 
 
-def _dispatch_and_walk(plan: pl.DataFrame, corridor, config, network, location_map):
+def _dispatch_and_walk(plan: pl.DataFrame, corridor, config, network, location_map,
+                       stamp=None):
     """Dispatch and walk ONE sample: its own meet-pass problem, end to end.
 
     Kept separate from `run_simulation` because a corridor whose calibrated
@@ -948,7 +995,10 @@ def _dispatch_and_walk(plan: pl.DataFrame, corridor, config, network, location_m
         # history available downstream.
         walk_timed_paths=True,
         save_interval=SAVE_INTERVAL,
-        configure_sim=trim_history,
+        # `stamp` applies per-train tuned hybrid settings (origin x load class)
+        # and departure SOC; None for every other arm and when untuned.
+        configure_sim=(trim_history if stamp is None
+                       else (lambda sim: trim_history(stamp(sim)))),
         measure_window_hr=window,
         debug=False,
     )
@@ -1023,6 +1073,12 @@ def run_simulation(row: dict, plans):
                                 corridor=row["Corridor"])
     network = network_for(row)
     location_map = alt.import_locations(str(NETWORKS / corridor.locations))
+    stamp = None
+    if row["Powertrain"] == "hybrid":
+        stamp = hybrid_controls_io.regen_configurer(
+            hybrid_controls_io.load_regen(), row["Corridor"], row["Battery_MWh"])
+        if stamp is not None:
+            logger.info("  per-group regen controls + departure SOC applied")
     if isinstance(plans, pl.DataFrame):
         plans = [plans]
 
@@ -1044,7 +1100,7 @@ def run_simulation(row: dict, plans):
                     logger.info("  sample %d of %d: %d trains", k, len(staged),
                                 plan["Train_ID"].n_unique())
                 parts.append(_dispatch_and_walk(plan, corridor, config, network,
-                                                location_map))
+                                                location_map, stamp))
             break
         except Exception as exc:  # noqa: BLE001 - escalate and try again
             if attempt >= len(ladder):
@@ -1056,37 +1112,64 @@ def run_simulation(row: dict, plans):
     merged = _merge_sample_runs(parts)
     train_consist_plan = merged["consist_plan"]
     loco_pool = merged["loco_pool"]
+    # The fleet is the units ever dispatched (warm-up and cool-down included);
+    # the pool also holds the never-used stock the reuse rule could draw on.
+    if "Times_Dispatched" in loco_pool.columns:
+        stock = loco_pool.height
+        loco_pool = loco_pool.filter(pl.col("Times_Dispatched") > 0)
+        logger.info("  fleet: %d units used of %d stock (locomotive reuse)",
+                    loco_pool.height, stock)
     refuel_facilities = merged["refuel_facilities"]
     grid_emissions_factors = merged["grid_emissions_factors"]
     nodal_energy_prices = merged["nodal_energy_prices"]
     sims = merged["sims"]
 
-    # Consequence of walking internally: no refuel sessions are produced.
-    # An EMPTY frame rather than None, deliberately: `calculate_ghg` contains
+    # Terminal charging. Walking inside sim_manager produces no charging
+    # sessions, so they are reconstructed from the walk: each battery-carrying
+    # locomotive is charged at every departure from what it arrived with on its
+    # previous trip up to what it departs with (`terminal_charging`). Hybrids
+    # depart at their tuned per-group SOC when `in/hybrid_regen_controls.csv`
+    # exists, else at the planner's. The sessions replace the old fleet true-up
+    # (net pack drawdown / charger efficiency) in `calculate_electricity_use`,
+    # and are priced at their terminal in the rollout.
+    #
+    # The frame is typed and, when there is nothing to charge, EMPTY rather than
+    # None, deliberately: `calculate_ghg` contains
     #
     #     elif (info.refuel_sessions is None) and (
     #         info.emissions_factors.select(pl.col("Node").n_unique() > 0))
     #
     # and `and` on a DataFrame raises "truth value of a DataFrame is ambiguous".
-    # It only fires when a cell uses electricity -- so diesel passes and every
-    # hybrid and catenary cell would crash. Passing a non-None frame makes the
-    # left operand False and Python short-circuits before touching the
-    # DataFrame. Electricity GHG is then computed without spatial resolution,
-    # which is exactly right when the factors cover one region and an
-    # approximation if they cover several; the node count is logged below so
-    # that is visible rather than assumed.
-    # Typed, not bare: consumers filter it on its columns (calculate_electricity_use
-    # does `filter(pl.col("Fuel_Type") == "Electricity")`), and a schema-less
-    # empty frame fails that lookup. Schema per the ScenarioInfo docstring.
-    refuel_sessions = pl.DataFrame(
-        schema={
-            "Locomotive_ID": pl.UInt32,
-            "Locomotive_Type": pl.Utf8,
-            "Fuel_Type": pl.Utf8,
-            "Node": pl.Utf8,
-            "Refuel_Energy_J": pl.Float64,
-        }
-    )
+    # Consumers also filter it on its columns, which a schema-less frame lacks.
+    departure_soc = None
+    if row["Powertrain"] == "hybrid":
+        departure_soc = hybrid_controls_io.regen_departure_soc(
+            hybrid_controls_io.load_regen(), row["Corridor"], row["Battery_MWh"])
+    charger_template = (terminal_charging.bel_charger_rows(refuel_facilities)
+                        if refuel_facilities is not None else None)
+    charger_w = (float(charger_template["Refueler_J_Per_Hr"][0]) / 3600.0
+                 if charger_template is not None and charger_template.height
+                 else alt.defaults.BEL_CHARGE_RATE_KW * 1e3)
+    if row["Powertrain"] in ("hybrid", "catenary_bel"):
+        refuel_sessions = terminal_charging.charging_sessions(
+            train_consist_plan, sims.to_pydict(),
+            alt.defaults.BEL_CHARGER_EFFICIENCY, departure_soc, charger_w)
+    else:
+        refuel_sessions = pl.DataFrame(schema=terminal_charging.SESSION_SCHEMA)
+    # Facilities the metrics price: battery-electric chargers sized to the peak
+    # concurrent sessions at each terminal. Hybrid chargers are scaled from the
+    # battery-electric cell's in the rollout (they need its result). Diesel
+    # fuelers carry no cost in the defaults and are not sized.
+    refuel_facilities = (
+        terminal_charging.sized_chargers(charger_template, refuel_sessions)
+        if row["Powertrain"] == "catenary_bel" else None)
+    if refuel_facilities is not None:
+        logger.info("  chargers sized to peak concurrent sessions: %s",
+                    dict(refuel_facilities.select("Node", "Port_Count").iter_rows()))
+    terminal_j = terminal_charging.energy_by_node(refuel_sessions)
+    if terminal_j:
+        logger.info("  terminal charging: %s",
+                    {n: f"{j / 3.6e9:,.1f} MWh" for n, j in terminal_j.items()})
 
     # The metric frames stamp Year from `scenario_year` as an integer, but the
     # emissions factors arrive with Year as a string, so the electricity-GHG
@@ -1119,6 +1202,10 @@ def run_simulation(row: dict, plans):
         refuel_facilities=refuel_facilities,
         refuel_sessions=refuel_sessions,
         emissions_factors=grid_emissions_factors,
+        # The pool is already the fleet (units ever dispatched), so count it whole:
+        # the measured week's consist plan alone would miss units that ran only in
+        # warm-up or cool-down.
+        count_unused_locomotives=True,
         nodal_energy_prices=nodal_energy_prices,
         train_planner_config=config,
     )
@@ -1216,6 +1303,11 @@ def run_simulation(row: dict, plans):
         "grid_return_j": float(grid_return_j),
         "grid_regions": regions,
         "n_trains": int(train_consist_plan["Train_ID"].n_unique()),
+        # Grid joules delivered by terminal chargers, per terminal (week total),
+        # and the planner's refuelers -- the charger capital the rollout prices.
+        "terminal_charging_j": terminal_j,
+        "refuel_facilities": refuel_facilities,
+        "charging_sessions": refuel_sessions,
     }
     return (
         meta.join(metrics, how="cross"),
@@ -1264,6 +1356,7 @@ def _inputs_fingerprint(row: dict) -> str:
     # stale and re-running hours of simulation for a file they never read.
     if row["Powertrain"] == "hybrid":
         h.update(hybrid_controls_io.fingerprint_bytes())
+        h.update(hybrid_controls_io.regen_fingerprint_bytes())
     return h.hexdigest()
 
 
@@ -1416,8 +1509,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # history spec already trimmed them to the vectors the study reads.
         sidecar["sims"].to_file(str(args.per_sim_dir / f"{safe}_sims.msgpack"))
         sidecar["loco_pool"].write_csv(args.per_sim_dir / f"{safe}_loco_pool.csv")
+        if sidecar.get("refuel_facilities") is not None:
+            sidecar["refuel_facilities"].with_columns(
+                pl.col(pl.Categorical).cast(pl.Utf8)
+            ).write_csv(args.per_sim_dir / f"{safe}_refuelers.csv")
+        if sidecar.get("charging_sessions") is not None and sidecar["charging_sessions"].height:
+            sidecar["charging_sessions"].write_csv(
+                args.per_sim_dir / f"{safe}_charging_sessions.csv")
         (args.per_sim_dir / f"{safe}_sidecar.json").write_text(json.dumps({
-            k: v for k, v in sidecar.items() if k not in ("sims", "loco_pool")
+            k: v for k, v in sidecar.items()
+            if k not in ("sims", "loco_pool", "refuel_facilities", "charging_sessions")
         }), encoding="utf-8")
         results.append(metrics)
         if events.height:

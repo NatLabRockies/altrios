@@ -60,9 +60,15 @@ impl BatteryElectricLoco {
                 // Positive traction with catenary available: the catenary covers
                 // propulsion first, then aux, and any leftover capacity charges
                 // the battery (bounded by the battery's max charge power, which
-                // already accounts for max SOC via the charge buffer).
-                let pwr_charge_max =
-                    *self.res.state.pwr_charge_max.get_fresh(|| format_dbg!())?;
+                // already accounts for max SOC via the charge buffer). Wire
+                // charging is discretionary, so it respects the regen buffer even
+                // when regen itself bypasses it.
+                let pwr_charge_max = match &self.pt_cntrl {
+                    BatteryPowertrainControls::RGWDB(rgwb) => *rgwb
+                        .state
+                        .pwr_charge_max_for_cat
+                        .get_fresh(|| format_dbg!())?,
+                };
                 // Ask the catenary for propulsion + aux + whatever the battery can
                 // absorb, so surplus capacity is used to charge the battery.
                 cat_int.set_pwr_in_req(pwr_elec_prop_in + pwr_aux + pwr_charge_max, dt)?;
@@ -228,12 +234,25 @@ impl LocoTrait for BatteryElectricLoco {
             }
         };
 
-        self.res.set_curr_pwr_out_max(
+        let regen_bypasses_buffer = match &self.pt_cntrl {
+            BatteryPowertrainControls::RGWDB(rgwb) => rgwb
+                .regen_bypasses_buffer
+                .with_context(|| format_dbg!())?,
+        };
+        let pwr_charge_max_buffered = self.res.set_curr_pwr_out_max_split(
             dt,
             pwr_aux.with_context(|| anyhow!(format_dbg!("`pwr_aux` not provided")))?,
             disch_buffer,
             chrg_buffer,
+            !regen_bypasses_buffer,
         )?;
+        match &mut self.pt_cntrl {
+            BatteryPowertrainControls::RGWDB(rgwb) => {
+                rgwb.state
+                    .pwr_charge_max_for_cat
+                    .update(pwr_charge_max_buffered, || format_dbg!())?;
+            }
+        };
         // If a catenary interface is present, update its max deliverable power and
         // add it to the drivetrain's max propulsion input, so the locomotive can
         // draw traction power from the catenary in addition to the battery.
@@ -372,6 +391,11 @@ pub struct RESGreedyWithDynamicBuffersBEL {
     pub speed_soc_regen_buffer: Option<si::Velocity>,
     /// Coefficient for modifying amount of regen buffer
     pub speed_soc_regen_buffer_coeff: Option<si::Ratio>,
+    /// When true (the default), the regen buffer limits only discretionary
+    /// charging from the catenary, so regen charges at the full rating up to
+    /// `max_soc`. False restores the original behaviour, where the buffer derates
+    /// all charging, regen included.
+    pub regen_bypasses_buffer: Option<bool>,
     #[serde(default)]
     pub state: RGWDBStateBEL,
     #[serde(default)]
@@ -388,6 +412,7 @@ impl Init for RESGreedyWithDynamicBuffersBEL {
         init_opt_default!(self, speed_soc_disch_buffer_coeff, 1.0 * uc::R);
         init_opt_default!(self, speed_soc_regen_buffer, 10. * uc::MPH);
         init_opt_default!(self, speed_soc_regen_buffer_coeff, 1.0 * uc::R);
+        init_opt_default!(self, regen_bypasses_buffer, true);
         Ok(())
     }
 }
@@ -411,6 +436,11 @@ impl SerdeAPI for RESGreedyWithDynamicBuffersBEL {}
 pub struct RGWDBStateBEL {
     /// time step index
     pub i: TrackedState<usize>,
+    /// Battery charge power available to CATENARY charging: the regen-buffer-
+    /// derated charge limit when
+    /// [RESGreedyWithDynamicBuffersBEL::regen_bypasses_buffer] is true, else the
+    /// battery's own (already derated) charge limit
+    pub pwr_charge_max_for_cat: TrackedState<si::Power>,
 }
 
 #[pyo3_api]

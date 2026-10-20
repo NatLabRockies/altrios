@@ -17,6 +17,50 @@ import altrios as alt
 from altrios import defaults
 
 
+def _select_reused_locomotives(
+    loco_pool: pl.DataFrame,
+    origin: str,
+    loco_types: list,
+    dispatch_time: float,
+):
+    """Pick units for one train under ``config.reuse_locomotives``.
+
+    For each locomotive type the plan asks for (one entry per unit), in order of
+    preference: units already in service and ``Ready`` at ``origin`` (earliest
+    arrival first); units in service and ``Ready`` at another node (implicit
+    repositioning, counted but not simulated); units never dispatched (at the
+    origin first). ``Ready`` means the planner's refueling queue and servicing are
+    both complete, so a battery unit is charged to its target.
+
+    Returns ``(selected mask aligned with loco_pool, number of implicit moves)``.
+    """
+    from collections import Counter
+
+    pool = loco_pool.with_row_index("__row").with_columns(
+        pl.col("Locomotive_Type").cast(pl.Utf8).alias("__type"),
+        (pl.col("Node").cast(pl.Utf8) == origin).alias("__local"),
+        (pl.col("Times_Dispatched") > 0).alias("__used"),
+    ).filter(pl.col("Status") == "Ready")
+    rows, moved = [], 0
+    for loco_type, n in Counter(loco_types).items():
+        cands = (pool.filter(pl.col("__type") == loco_type)
+                 .with_columns(
+                     pl.when(pl.col("__used") & pl.col("__local")).then(0)
+                     .when(pl.col("__used")).then(1)
+                     .when(pl.col("__local")).then(2)
+                     .otherwise(3).alias("__rank"))
+                 .sort("__rank", "Arrival_Time_Hr", "Locomotive_ID")
+                 .head(n))
+        if cands.height < n:
+            raise ValueError(
+                f"Locomotive reuse: {n} {loco_type} unit(s) needed at {origin} at hour "
+                f"{dispatch_time}, only {cands.height} Ready anywhere in the pool")
+        moved += cands.filter(pl.col("__rank") == 1).height
+        rows += cands.get_column("__row").to_list()
+    selected = pl.Series(np.isin(np.arange(loco_pool.height), rows))
+    return selected, moved
+
+
 def dispatch(
     dispatch_time: int,
     origin: str,
@@ -474,7 +518,8 @@ def run_train_planner(
                         "Departure_Time_Planned_Hr": "Hour"})
                 .drop(cs.starts_with("Refuel"))
                 .group_by(~cs.starts_with("Locomotive_"))
-                    .agg(pl.col("Locomotive_ID").unique().alias("Locomotive_IDs"))
+                    .agg(pl.col("Locomotive_ID").unique().alias("Locomotive_IDs"),
+                         pl.col("Locomotive_Type").cast(pl.Utf8).alias("Locomotive_Types"))
                 .with_columns(pl.sum_horizontal("Cars_Loaded", "Cars_Empty").alias("Number_of_Cars"))
             )            
 
@@ -525,6 +570,11 @@ def run_train_planner(
     # Accumulator for charging/refueling sessions produced during planning.
     refuel_sessions = refueling.empty_refuel_sessions()
 
+    # Locomotive reuse bookkeeping (``config.reuse_locomotives``).
+    reuse_moves = 0
+    if "Times_Dispatched" not in loco_pool.columns:
+        loco_pool = loco_pool.with_columns(pl.lit(0, dtype=pl.UInt32).alias("Times_Dispatched"))
+
     # Initialize train ID counter and result lists
     train_id_counter = 1
     speed_limit_train_sims = []
@@ -555,11 +605,19 @@ def run_train_planner(
                 # Only process trains with positive tonnage
                 if this_train["Number_of_Cars"] > 0:
                     # Handle locomotive selection differently in single train mode, OR when a consist plan was provided
-                    if consist_plan_in is not None:
-                       selected = loco_pool.select(
-                           pl.col("Locomotive_ID").is_in(this_train["Locomotive_IDs"])                    
-                       ).to_series()
-                       dispatched = loco_pool.filter(selected) 
+                    if consist_plan_in is not None and config.reuse_locomotives:
+                        selected, n_moved = _select_reused_locomotives(
+                            loco_pool, this_train["Origin"],
+                            [loco_map.get(t, t) if loco_map else t
+                             for t in this_train["Locomotive_Types"]],
+                            current_time)
+                        reuse_moves += n_moved
+                        dispatched = loco_pool.filter(selected)
+                    elif consist_plan_in is not None:
+                        selected = loco_pool.select(
+                            pl.col("Locomotive_ID").is_in(this_train["Locomotive_IDs"])
+                        ).to_series()
+                        dispatched = loco_pool.filter(selected)
                     elif config.single_train_mode:
                         # In single train mode, select all locomotives
                         selected = loco_pool.select(
@@ -616,9 +674,40 @@ def run_train_planner(
                     # Sort dispatched locomotives by ID
                     dispatched = dispatched.sort("Locomotive_ID")
 
+                    # Cap departure SOC at the allowable battery headroom for
+                    # this origin-destination pair and load class, so the pack
+                    # leaves the terminal with room to absorb the regen the grade
+                    # ahead will produce. Only ever LOWERS the SOC the pool
+                    # tracked, so a locomotive is never dispatched with more
+                    # charge than it actually accumulated.
+                    n_dispatched = max(dispatched.height, 1)
+                    tons_per_loco = (
+                        float(this_train["Tons_Per_Train"]) / n_dispatched
+                        if this_train.get("Tons_Per_Train") is not None
+                        else None
+                    )
+                    headroom_j = data_prep.headroom_joules_for_dispatch(
+                        network_charging_guidelines,
+                        this_train["Origin"],
+                        this_train.get("Destination"),
+                        tons_per_loco,
+                    )
                     # Calculate state of charge as percentage of capacity
                     loco_start_soc_pct = dispatched.select(
-                        (pl.col("SOC_J") / pl.col("Capacity_J")).alias("Departure_SOC_J")
+                        (
+                            pl.max_horizontal(
+                                [
+                                    pl.min_horizontal(
+                                        [
+                                            pl.col("SOC_J"),
+                                            pl.col("SOC_Max_J") - headroom_j,
+                                        ]
+                                    ),
+                                    pl.col("SOC_Min_J"),
+                                ]
+                            )
+                            / pl.col("Capacity_J")
+                        ).alias("Departure_SOC_J")
                     ).to_series()
 
                     # Create list of locomotive objects from configuration
@@ -658,9 +747,19 @@ def run_train_planner(
                         cd_area_vec=cd_area_vec,
                     )
 
-                    # Set state of charge for electric locomotives
+                    # Set state of charge for every locomotive carrying a pack.
+                    # Gated on the battery, not on Fuel_Type: a hybrid is
+                    # accounted against diesel but still has a state of charge.
+                    has_battery = (
+                        dispatched.get_column("Has_Battery").to_list()
+                        if "Has_Battery" in dispatched.columns
+                        else [
+                            ft == "Electricity"
+                            for ft in dispatched.get_column("Fuel_Type").to_list()
+                        ]
+                    )
                     for i, loco in enumerate(locos):
-                        if dispatched.get_column("Fuel_Type")[i] == "Electricity":
+                        if has_battery[i]:
                             loco_dict = loco.to_pydict()
                             loco_type = next(iter(loco_dict["loco_type"].keys()))
                             loco_dict["loco_type"][loco_type]["res"]["state"]["soc"] = (
@@ -782,6 +881,10 @@ def run_train_planner(
                         .then(pl.lit("Dispatched"))
                         .otherwise(pl.col("Status"))
                         .alias("Status"),
+                        pl.when(selected)
+                        .then(pl.col("Times_Dispatched") + 1)
+                        .otherwise(pl.col("Times_Dispatched"))
+                        .alias("Times_Dispatched"),
                         # Update SOC based on energy usage, respecting min/max constraints
                         pl.when(selected)
                         .then(
@@ -866,6 +969,10 @@ def run_train_planner(
         print(f"    {label:<28} {seconds:9.3f} s ({share:5.1f}%)")
     print(f"    {'other/overhead':<28} {total_elapsed - tracked:9.3f} s")
     print(f"    {'total run_train_planner':<28} {total_elapsed:9.3f} s")
+    if consist_plan_in is not None and config.reuse_locomotives:
+        print(f"Locomotive reuse: {int((loco_pool['Times_Dispatched'] > 0).sum())} units "
+              f"dispatched of {loco_pool.height} in the pool; {reuse_moves} implicit "
+              f"repositioning moves (not simulated)")
 
     # Return results
     return (

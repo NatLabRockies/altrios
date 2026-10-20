@@ -1497,9 +1497,14 @@ def run_pipeline():
             # charging is grid load and has to scale with the level's traffic
             # like everything else. Sim indices are offset per sample so the
             # departure map lines up with the concatenated sim vector.
+            # Charger template (cost, rate, lifespan): the planner's electric
+            # refueler row from the first sample; sized below.
             _refuel_parts, dep_by_index, _offset = [], {}, 0
+            chargers_bel = None
             for _s in demand_samples:
-                _rs, _dep = _planner_charge_pass(sched_net, location_map, _s)
+                _rs, _dep, _ch = _planner_charge_pass(sched_net, location_map, _s)
+                if chargers_bel is None and _ch is not None and _ch.height:
+                    chargers_bel = _ch
                 if _rs is not None and getattr(_rs, "height", 0):
                     _refuel_parts.append(_rs)
                 for _k, _v in (_dep or {}).items():
@@ -1508,15 +1513,22 @@ def run_pipeline():
             refuel_sessions_bel = (
                 pl.concat(_refuel_parts, how="diagonal_relaxed")
                 if _refuel_parts else None)
+            # Samples are concurrent traffic on one clock, so their sessions are
+            # sized together.
+            chargers_bel = _sized_bel_chargers(chargers_bel, refuel_sessions_bel)
+            if chargers_bel is not None:
+                _log("  BEL chargers sized to peak concurrent sessions: "
+                     + str(dict(chargers_bel.select("Node", "Port_Count").iter_rows())))
             if r_bel is None:
                 refuel_sessions_bel = None
+                chargers_bel = None
             dep_seconds = _departure_seconds(dep_by_index, lvl["n_trains"])
 
             def _do_variant(tag, net, result, built_objs, energy, region_frac,
                             loco_type, cost_fns, render_pdf, *, scenario,
                             infra_lvl, infra_mult, energy_lvl,
                             substation_meta=None, refuel_sessions=None,
-                            opt_infra_mult=None):
+                            opt_infra_mult=None, refuel_facilities=None):
                 try:
                     m = _variant_metrics_df(
                         tag, loco_type, cost_fns, energy, result, built_objs,
@@ -1524,7 +1536,8 @@ def run_pipeline():
                         demand_samples=demand_samples, infra_lvl=infra_lvl,
                         infra_mult=infra_mult, energy_lvl=energy_lvl,
                         net_purchased=net, stationary_sessions=refuel_sessions,
-                        opt_infra_mult=opt_infra_mult)
+                        opt_infra_mult=opt_infra_mult,
+                        refuel_facilities=refuel_facilities)
                     _serialize_variant_run(
                         RESULTS_DIR / f"{scenario}__{tag}", tag=tag, net=net,
                         result=result, metrics_df=m, sims=energy["sims"],
@@ -1585,7 +1598,8 @@ def run_pipeline():
                                     # costs whatever the cell's multiplier.
                                     opt_infra_mult=1.0,
                                     substation_meta=meta_bel,
-                                    refuel_sessions=refuel_sessions_bel)
+                                    refuel_sessions=refuel_sessions_bel,
+                                    refuel_facilities=chargers_bel)
 
             # Summary row: dual-mode reported at the reference (med/med) cell; BEL
             # from its single buildout.
@@ -2620,7 +2634,37 @@ def _bel_planner_config():
         cfg.refueler_info["Refueler_Type"] == "BEL_Charger"].copy()
     charger["Locomotive_Type"] = "Dual_Mode"
     cfg.refueler_info.update(charger)
+    # Reuse locomotives train to train (the plans give every locomotive-trip its
+    # own ID), with charger ports unconstrained while planning; chargers are then
+    # sized to the peak concurrent sessions (see `_sized_bel_chargers`).
+    cfg.reuse_locomotives = True
+    cfg.refuelers_per_incoming_corridor = PLANNING_PORTS_PER_NODE
     return cfg
+
+
+# Refuelers per terminal while planning: high enough never to bind.
+PLANNING_PORTS_PER_NODE = 500
+
+
+def _sized_bel_chargers(template, refuel_sessions):
+    """Electric chargers sized to the peak number of charging sessions in progress
+    at once at each terminal (no locomotive waits), from one planner charger row."""
+    if template is None or template.height == 0 or refuel_sessions is None \
+            or refuel_sessions.height == 0:
+        return None
+    sess = _stationary_charging_df(refuel_sessions)
+    rows = []
+    tpl = template.head(1).to_dicts()[0]
+    for (node,), g in sess.group_by(["node"]):
+        events = sorted([(a, 1) for a in g["start_hr"]] + [(b, -1) for b in g["end_hr"]],
+                        key=lambda e: (e[0], e[1]))
+        cur = peak = 0
+        for _, k in events:
+            cur += k
+            peak = max(peak, cur)
+        if peak:
+            rows.append({**tpl, "Node": str(node), "Port_Count": float(peak)})
+    return pl.DataFrame(rows) if rows else None
 
 
 def _planner_charge_pass(sim_network, location_map, sample=0):
@@ -2629,9 +2673,11 @@ def _planner_charge_pass(sim_network, location_map, sample=0):
     The planner schedules the plan onto ``sim_network`` (battery-electric consists),
     then :func:`run_speed_limit_train_sims` walks the realized timed paths and
     regenerates charging sessions from realized energy use. Returns
-    ``(refuel_sessions, departure_hr_by_index)`` where the second maps each
+    ``(refuel_sessions, departure_hr_by_index, chargers)`` where the second maps each
     ``TrainSimVec_Index`` to its actual departure hour (for aligning load curves on
-    a common wall-clock); ``(None, {})`` if the planner pass fails.
+    a common wall-clock) and the third is the planner's electric refuelers (the
+    terminal chargers whose capital the metrics price); ``(None, {}, None)`` if the
+    planner pass fails.
     """
     try:
         rail_vehicles, _ = _load_rail_vehicles()
@@ -2654,10 +2700,12 @@ def _planner_charge_pass(sim_network, location_map, sample=0):
         dep_by_index = {int(r["TrainSimVec_Index"]): float(r["dep_hr"])
                         for r in dep.iter_rows(named=True)
                         if r["dep_hr"] is not None}
-        return refuel_sessions, dep_by_index
+        chargers = (refuelers.with_columns(pl.col(pl.Categorical).cast(pl.Utf8))
+                    .filter(pl.col("Fuel_Type") == "Electricity"))
+        return refuel_sessions, dep_by_index, chargers
     except Exception as exc:  # noqa: BLE001 - charging export is non-fatal
         _log(f"  planner charging pass FAILED: {exc}")
-        return None, {}
+        return None, {}, None
 
 
 def _departure_seconds(dep_by_index, n_sims, sample=0):
@@ -2964,31 +3012,62 @@ def _build_fleet_tables(sims_list, cost_fns, samples=(0,)):
     Per-year re-pricing over the rollout is applied later by
     :func:`_price_pool_for_year`.
     """
+    from altrios.train_planner.reuse import assign_reused_ids
+
     plan = _level_measured_plan(samples)
-    pool_rows, cp_rows = [], []
-    loco_id = 0
+    # Locomotives are REUSED train to train (`assign_reused_ids`): the plan's
+    # per-train composition with fleet IDs drawn from units that have arrived and
+    # been serviced -- and, for battery units, recharged at full charger power --
+    # with implicit (unsimulated) repositioning between terminals. Previously
+    # every locomotive-trip was its own unit.
+    trains, per_train = [], {}
+    charge_w = _defaults.BEL_CHARGE_RATE_KW * 1e3
     for idx, ts in enumerate(sims_list):
-        loco_vec = ts.to_pydict()["loco_con"]["loco_vec"]
+        d = ts.to_pydict()
+        loco_vec = d["loco_con"]["loco_vec"]
         train = plan[idx] if idx < len(plan) else {}
-        train_id = str(train.get("Train_ID", idx))
-        train_type = train.get("Train_Type", "Manifest")
+        labels, extra = [], []
         for loco in loco_vec:
-            label = _classify_loco_type(loco)
-            loco_id += 1
-            pool_rows.append({
-                "Locomotive_ID": loco_id, "Locomotive_Type": label,
-                "Cost_USD": float(cost_fns[label](METRICS_START_YEAR)),
-                "Lifespan_Years": _defaults.LOCO_LIFESPAN,
-            })
+            labels.append(_classify_loco_type(loco))
+            body = next(iter(loco["loco_type"].values())) or {}
+            res = body.get("res") if isinstance(body, dict) else None
+            if labels[-1] == "BEL" and res:
+                deficit = (float(res.get("max_soc", 0.95)) - float(res["state"]["soc"])) \
+                    * float(res["energy_capacity_joules"])
+                extra.append(max(deficit, 0.0) / charge_w / 3600.0)
+            else:
+                extra.append(0.0)
+        dep_hr = float(train.get("Departure_Time_Planned_Hr", 0.0))
+        arr_hr = max(float(d["state"]["time_seconds"]) / 3600.0, dep_hr)
+        trains.append({"key": idx, "origin": train.get("Origin_ID"),
+                       "destination": train.get("Destination_ID"),
+                       "dep_hr": dep_hr, "arr_hr": arr_hr, "types": labels,
+                       "extra_hr": extra})
+        per_train[idx] = (str(train.get("Train_ID", idx)),
+                          train.get("Train_Type", "Manifest"), labels)
+    ids, stats = assign_reused_ids(trains, servicing_hr=3.0)
+    _log(f"  fleet with locomotive reuse: {stats['fleet']} "
+         f"({stats['moves']} implicit repositioning moves, not simulated)")
+    pool_rows, cp_rows, seen = [], [], set()
+    for idx, (train_id, train_type, labels) in per_train.items():
+        for uid, label in zip(ids[idx], labels):
+            if uid not in seen:
+                seen.add(uid)
+                pool_rows.append({
+                    "Locomotive_ID": uid, "Locomotive_Type": label,
+                    "Cost_USD": float(cost_fns[label](METRICS_START_YEAR)),
+                    "Lifespan_Years": _defaults.LOCO_LIFESPAN,
+                })
             cp_rows.append({
-                "Locomotive_ID": loco_id, "Train_ID": train_id,
+                "Locomotive_ID": uid, "Train_ID": train_id,
                 "TrainSimVec_Index": idx, "Train_Type": train_type,
             })
     return pl.DataFrame(pool_rows), pl.DataFrame(cp_rows)
 
 
 def _year_scenario(scenario_year, sims, loco_pool, consist_plan, region_elec_j,
-                   energy_lvl, emissions_factors, simulation_days, infra_df):
+                   energy_lvl, emissions_factors, simulation_days, infra_df,
+                   refuel_facilities=None):
     """One year's ScenarioInfo for the itemized-cost rollout over the full plan.
 
     The full consist plan stands in for one week of traffic (``simulation_days`` =
@@ -3023,7 +3102,7 @@ def _year_scenario(scenario_year, sims, loco_pool, consist_plan, region_elec_j,
     return _mc.ScenarioInfo(
         sims=sims, simulation_days=simulation_days, annualize=True,
         scenario_year=scenario_year, loco_pool=loco_pool,
-        consist_plan=consist_plan, refuel_facilities=None,
+        consist_plan=consist_plan, refuel_facilities=refuel_facilities,
         refuel_sessions=refuel_sessions, emissions_factors=emissions_factors,
         nodal_energy_prices=nodal_energy_prices, count_unused_locomotives=True,
         train_planner_config=None, infrastructure_costs=infra_df,
@@ -3052,7 +3131,8 @@ _ANNUAL_METRICS = [
 def _variant_metrics_df(tag, loco_type, cost_fns, energy, plan_result, built_subs,
                         region_frac, *, arch, demand_lvl, demand_samples, infra_lvl,
                         infra_mult, energy_lvl, net_purchased=None,
-                        stationary_sessions=None, opt_infra_mult=None):
+                        stationary_sessions=None, opt_infra_mult=None,
+                        refuel_facilities=None):
     """Run the metrics calculator for ONE simulated variant at ONE economic point
     (infra cost x energy price); return its tidy long-format metrics cross-joined
     with a single-row provenance frame.
@@ -3126,7 +3206,7 @@ def _variant_metrics_df(tag, loco_type, cost_fns, energy, plan_result, built_sub
             year, sims,
             _price_pool_for_year(loco_pool_base, cost_fns, year),
             consist_plan, region_elec_j, energy_lvl, emissions_factors,
-            simulation_days, infra_df)
+            simulation_days, infra_df, refuel_facilities)
         for year in rollout_years
     ]
     metrics = _mc.main(scenarios, annual_metrics=_ANNUAL_METRICS,

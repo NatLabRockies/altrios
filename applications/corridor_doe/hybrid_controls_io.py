@@ -157,3 +157,114 @@ def write_from_chosen(chosen_params: Dict[str, Dict[str, float]],
     path.parent.mkdir(parents=True, exist_ok=True)
     pl.DataFrame(rows).write_csv(path)
     return path
+
+
+# ---------------------------------------------------------------------------
+# Per-group regen calibration (2026-10-18): `in/hybrid_regen_controls.csv`
+#
+# Written by `Scripts/hybrid_controls/regen_calibration.py`. One row per
+# (corridor, pack size, origin, load class). Unlike the per-direction file
+# above, the values are stamped onto each TRAIN just before it is walked
+# (`sim_manager`'s `configure_sim` hook), because the planner reuses one
+# locomotive type across both directions and both load classes. That is the
+# same stamping the calibration's fixed-path re-walk does, which reproduces the
+# DoE's walk exactly.
+#
+# `Soc_Dep` is the departure state of charge for that group. No hybrid chargers
+# exist in the DoE, so the calibration chose these subject to mean departure
+# SOC <= mean arrival SOC at each terminal: the energy is what the arriving
+# locomotives brought in. Load class is by tonnage per locomotive against
+# `Tons_Per_Loco_Split` (heavy at or above it).
+#
+# ABSENT FILE = library controller, 0.95 departure SOC (the previous behaviour).
+REGEN_CONTROLS_PATH = HERE / "in" / "hybrid_regen_controls.csv"
+REGEN_FIELDS = (
+    "speed_soc_regen_buffer_coeff",
+    "speed_soc_regen_buffer_meters_per_second",
+    "frac_of_max_pwr_to_run_fc",
+    "speed_soc_disch_buffer_meters_per_second",
+)
+
+
+def load_regen(path: Optional[Path] = None) -> Optional[pl.DataFrame]:
+    path = Path(path) if path else REGEN_CONTROLS_PATH
+    if not path.exists():
+        return None
+    return pl.read_csv(path, infer_schema_length=None)
+
+
+def regen_fingerprint_bytes(path: Optional[Path] = None) -> bytes:
+    path = Path(path) if path else REGEN_CONTROLS_PATH
+    return path.read_bytes() if path.exists() else b"no-hybrid-regen-controls"
+
+
+def _regen_group_lookup(table: Optional[pl.DataFrame], corridor: str,
+                        battery_mwh: Optional[float]):
+    """``sim_pydict -> row`` for one corridor x pack cell (the tuned row for the
+    train's origin and load class), or None when the table has no rows for it."""
+    if table is None or battery_mwh is None:
+        return None
+    rows = table.filter((pl.col("Corridor") == corridor)
+                        & ((pl.col("Battery_MWh") - float(battery_mwh)).abs() < 1e-9))
+    if rows.height == 0:
+        logger.warning("hybrid regen controls: no rows for %s %.2f MWh", corridor, battery_mwh)
+        return None
+    by_key = {(r["Origin_ID"], r["Load_Class"]): r for r in rows.iter_rows(named=True)}
+    split = {r["Origin_ID"]: float(r["Tons_Per_Loco_Split"]) for r in rows.iter_rows(named=True)}
+
+    def lookup(d: dict):
+        origin = d["origs"][0]["Location ID"]
+        if origin not in split:
+            logger.warning("hybrid regen controls: %s has no rows for origin %r", corridor, origin)
+            return None
+        locos = d["loco_con"]["loco_vec"]
+        tons_per_loco = float(d["state"]["mass_static_kilograms"]) / 1000.0 / max(len(locos), 1)
+        cls = "heavy" if tons_per_loco >= split[origin] else "light"
+        return by_key.get((origin, cls)) or by_key.get((origin, "all"))
+
+    return lookup
+
+
+def regen_configurer(table: Optional[pl.DataFrame], corridor: str,
+                     battery_mwh: Optional[float]):
+    """A `sim -> sim` stamper for one corridor x pack cell, or None when the
+    table is absent or has no rows for the cell."""
+    lookup = _regen_group_lookup(table, corridor, battery_mwh)
+    if lookup is None:
+        return None
+
+    def configure(sim):
+        import altrios as alt
+
+        d = sim.to_pydict()
+        row = lookup(d)
+        if row is None:
+            return sim
+        for loco in d["loco_con"]["loco_vec"]:
+            body = loco["loco_type"].get("HybridLoco")
+            if not body:
+                continue
+            rg = body["pt_cntrl"]["RGWDB"]
+            for f in REGEN_FIELDS:
+                if row.get(f) is not None:
+                    rg[f] = float(row[f])
+            body["res"]["state"]["soc"] = float(row["Soc_Dep"])
+        return alt.SpeedLimitTrainSim.from_pydict(d)
+
+    return configure
+
+
+def regen_departure_soc(table: Optional[pl.DataFrame], corridor: str,
+                        battery_mwh: Optional[float]):
+    """``sim_pydict -> departure SOC (fraction) or None``: the tuned departure SOC
+    the stamper applied to this train, recovered from the walked sim (origin and
+    static mass do not change during a walk). For terminal charging accounting."""
+    lookup = _regen_group_lookup(table, corridor, battery_mwh)
+    if lookup is None:
+        return None
+
+    def soc(d: dict):
+        row = lookup(d)
+        return float(row["Soc_Dep"]) if row is not None else None
+
+    return soc

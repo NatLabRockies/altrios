@@ -32,6 +32,13 @@ class TrainPlannerConfig:
     - `loco_info`: `Dict`
     - `refueler_info`: `Dict`
     - `return_demand_generators`: `Dict`
+    - `reuse_locomotives`: With an imported consist plan (`consist_plan_in`), `False` (default)
+      dispatches each train with exactly the `Locomotive_ID`s the plan lists; `True` keeps only the
+      plan's locomotive COUNT and TYPE per train and draws the units from the pool: first units of
+      that type already in service and `Ready` at the origin (charged and serviced), then units in
+      service idle at another terminal (implicit repositioning: no move is simulated, no energy or
+      time is charged for it), and only then a unit never used before. The fleet is then the units
+      ever dispatched, not one unit per locomotive-trip.
     - `loco_type_shares`: Optional `Dict` mapping each `Locomotive_Type` in `loco_info` to its target
       share (e.g. `{"BEL": 0.5, "Diesel_Large": 0.5}`) of the auto-built locomotive pool. Requires
       exactly 2 locomotive types in `loco_info`; consumed by `data_prep.build_locopool`.
@@ -78,7 +85,8 @@ class TrainPlannerConfig:
             "Fuel_Type": "Electricity",
             "Min_Servicing_Time_Hr": 3.0,
             "Rust_Loco": alt.Locomotive.default_battery_electric_loco(),
-            "Cost_USD": defaults.BEL_MINUS_BATTERY_COST_USD,
+            # Retail-equivalent, to share a basis with DIESEL_LOCO_COST_USD above.
+            "Cost_USD": defaults.BEL_MINUS_BATTERY_LOCO_COST_USD,
             "Lifespan_Years": defaults.LOCO_LIFESPAN
             }
         }).transpose().reset_index(names='Locomotive_Type'))
@@ -100,6 +108,7 @@ class TrainPlannerConfig:
             "Lifespan_Years": defaults.LOCO_LIFESPAN
         }
     }).transpose().reset_index(names='Refueler_Type'))
+    reuse_locomotives: bool = False
     loco_type_shares: Optional[Dict] = None
     drag_coeff_function: Optional[Callable]= None
     dispatch_scheduler: Optional[Callable] = None

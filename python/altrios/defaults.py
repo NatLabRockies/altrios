@@ -18,6 +18,9 @@ DIESEL_REFUELER_COST_USD = 0.0
 BEL_CHARGE_RATE_KW = 750.0
 BEL_CHARGE_RATE_J_PER_HR = (BEL_CHARGE_RATE_KW / 1000.0 / utilities.MWH_PER_MJ) * 1e6 
 BEL_CHARGER_EFFICIENCY = 0.9
+# INSTALLED cost per the source, so no retail multiplier (same convention as
+# PANTOGRAPH_COST_USD). Diesel fuelers are priced at zero on the assumption that
+# the fueling plant already exists, which is why only chargers carry capital.
 BEL_CHARGER_COST_USD = BEL_CHARGE_RATE_KW * 1000 * utilities.USD_2022_TO_2025 # NLR Cost of Charging (Borlaug) showing ~linear trend on kW; #ICCT report showing little change through 2030
 BEL_CHARGER_LIFESPAN = 15
 
@@ -28,8 +31,24 @@ INCLUDE_EXISTING_ASSETS = True
 STRANDED_ASSET_RESALE_PCT = 0.5
 
 DIESEL_MANUFACTURE_COST_USD = 2950000 * utilities.USD_2022_TO_2025
-BEL_MINUS_BATTERY_COST_USD = DIESEL_MANUFACTURE_COST_USD * 0.5
 DIESEL_LOCO_COST_USD = DIESEL_MANUFACTURE_COST_USD * RETAIL_PRICE_EQUIVALENT_MULTIPLIER # Zenith et al.
+
+# Battery-electric locomotive LESS its pack. Two constants because the basis
+# matters and the old single name did not state which one it was:
+#   * `_MANUFACTURE_` is a manufacturing cost, the right input when the pack is
+#     added and the retail multiplier applied to the SUM (see
+#     `metric_calculator.add_battery_costs`).
+#   * `_LOCO_` is the retail-equivalent, the right value anywhere a locomotive
+#     price sits beside `DIESEL_LOCO_COST_USD` -- notably the train planner's
+#     default `loco_info`, where the two rows must share a basis or the BEL is
+#     silently 15% cheap against the diesel it is compared with.
+BEL_MINUS_BATTERY_MANUFACTURE_COST_USD = DIESEL_MANUFACTURE_COST_USD * 0.5
+BEL_MINUS_BATTERY_LOCO_COST_USD = (
+    BEL_MINUS_BATTERY_MANUFACTURE_COST_USD * RETAIL_PRICE_EQUIVALENT_MULTIPLIER
+)
+# DEPRECATED: kept so existing applications keep resolving. It is the
+# MANUFACTURING basis; use one of the two explicit names above instead.
+BEL_MINUS_BATTERY_COST_USD = BEL_MINUS_BATTERY_MANUFACTURE_COST_USD
 
 # Electrified locomotive capital (USD). No public list price exists for either;
 # both are derived from the diesel / BEL baselines above.
@@ -41,6 +60,8 @@ DUAL_MODE_LOCO_COST_USD = DIESEL_LOCO_COST_USD * (1.0 + DUAL_MODE_LOCO_PREMIUM_F
 # so it can draw from the overhead system (catenary-assist / charge-while-running).
 # A BEL-with-catenary's full cost = the usual battery-electric cost (see
 # metric_calculator.add_battery_costs) plus this premium.
+# INSTALLED cost, so no retail multiplier is applied: unlike the locomotive
+# bodies above this is a fitted-and-commissioned figure, not a factory cost.
 PANTOGRAPH_COST_USD = 150_000.0 * utilities.USD_2022_TO_2025
 
 LOCO_LIFESPAN = 20

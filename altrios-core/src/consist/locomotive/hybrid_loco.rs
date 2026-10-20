@@ -27,6 +27,10 @@ pub struct HybridLoco {
     #[serde(default)]
     #[has_state]
     pub pt_cntrl: HybridPowertrainControls,
+    /// which component carries the aux (hotel) load when both could. Defaults to
+    /// [HEVAuxControls::AuxOnResPriority], the behavior before this was wired up.
+    #[serde(default)]
+    pub aux_cntrl: HEVAuxControls,
 }
 
 #[pyo3_api]
@@ -50,6 +54,7 @@ impl Default for HybridLoco {
                 res
             },
             edrv: Default::default(),
+            aux_cntrl: Default::default(),
             pt_cntrl: Default::default(),
         }
     }
@@ -158,12 +163,25 @@ impl LocoTrait for Box<HybridLoco> {
             }
         };
 
-        self.res.set_curr_pwr_out_max(
+        let regen_bypasses_buffer = match &self.pt_cntrl {
+            HybridPowertrainControls::RGWDB(rgwb) => rgwb
+                .regen_bypasses_buffer
+                .with_context(|| format_dbg!())?,
+        };
+        let pwr_charge_max_buffered = self.res.set_curr_pwr_out_max_split(
             dt,
             pwr_aux.with_context(|| format!("{}\nExpected `pwr_aux` to be Some", format_dbg!()))?,
             disch_buffer,
             chrg_buffer,
+            !regen_bypasses_buffer,
         )?;
+        match &mut self.pt_cntrl {
+            HybridPowertrainControls::RGWDB(rgwb) => {
+                rgwb.state
+                    .pwr_charge_max_for_fc
+                    .update(pwr_charge_max_buffered, || format_dbg!())?;
+            }
+        };
 
         self.gen.set_cur_pwr_max_out(
             *self.fc.state.pwr_out_max.get_fresh(|| format_dbg!())?,
@@ -235,16 +253,24 @@ impl HybridLoco {
                 &self.gen,
                 &self.edrv.state,
                 &self.res,
+                pwr_aux,
             )
             .with_context(|| format_dbg!())?;
 
         let fc_on: bool = self.pt_cntrl.fc_on().with_context(|| format_dbg!())?;
+        // Aux (hotel) load goes to the engine when the controls prefer it AND the
+        // engine is running; otherwise the battery carries it. Previously the
+        // battery carried aux unconditionally, so the pack drained for hotel load
+        // even while the engine was turning -- biasing SOC down and overstating
+        // how hard the pack works.
+        let aux_on_fc: bool = fc_on && self.aux_cntrl.is_aux_on_fc_priority();
+        let pwr_aux_fc = if aux_on_fc { pwr_aux } else { si::Power::ZERO };
+        let pwr_aux_res = if aux_on_fc { si::Power::ZERO } else { pwr_aux };
         self.gen
             .set_pwr_in_req(
                 // TODO: maybe this should be zero if not loco_on
                 gen_pwr_out_req,
-                si::Power::ZERO,
-                // if fc_on { pwr_aux } else { si::Power::ZERO },
+                pwr_aux_fc,
                 fc_on,
                 dt,
             )
@@ -290,8 +316,7 @@ impl HybridLoco {
         self.res
             .solve_energy_consumption(
                 res_pwr_out_req,
-                pwr_aux,
-                // if !fc_on { pwr_aux } else { si::Power::ZERO },
+                pwr_aux_res,
                 dt,
             )
             .with_context(|| format_dbg!())?;
@@ -404,6 +429,7 @@ impl HybridPowertrainControls {
         gen: &Generator,
         edrv_state: &ElectricDrivetrainState,
         res: &ReversibleEnergyStorage,
+        pwr_aux: si::Power,
     ) -> anyhow::Result<(si::Power, si::Power)> {
         let fc_state = &fc.state;
         ensure!(
@@ -433,6 +459,7 @@ impl HybridPowertrainControls {
             Self::RGWDB(ref mut rgwdb) => {
                 // handle_fc_on_causes_for_temp(fc, rgwdb, hev_state)?;
                 rgwdb.handle_fc_on_causes_for_speed(train_speed)?;
+                rgwdb.handle_fc_on_causes_for_aux_demand(pwr_aux, &res.state)?;
                 rgwdb.handle_fc_on_causes_for_low_soc(res, train_mass, train_speed)?;
                 // `handle_fc_*` below here are asymmetrical for positive tractive power only
                 rgwdb.handle_fc_on_causes_for_pwr_demand(
@@ -444,6 +471,17 @@ impl HybridPowertrainControls {
                 let res_prop_pwr = pwr_res_and_gen_to_edrv
                     .min(*res.state.pwr_prop_max.get_fresh(|| format_dbg!())?)
                     .max(-*res.state.pwr_regen_max.get_fresh(|| format_dbg!())?);
+                // What the battery may take from the ENGINE: the regen-buffer-
+                // derated charge limit plus the aux share that
+                // `pwr_regen_max` carries over `pwr_charge_max`. Regen itself is
+                // bounded by the full `pwr_regen_max` above and below.
+                let pwr_regen_max_for_fc = (*rgwdb
+                    .state
+                    .pwr_charge_max_for_fc
+                    .get_fresh(|| format_dbg!())?
+                    + *res.state.pwr_regen_max.get_fresh(|| format_dbg!())?
+                    - *res.state.pwr_charge_max.get_fresh(|| format_dbg!())?)
+                .min(*res.state.pwr_regen_max.get_fresh(|| format_dbg!())?);
 
                 rgwdb
                     .state
@@ -467,8 +505,7 @@ impl HybridPowertrainControls {
                     let gen_pwr = if pwr_res_and_gen_to_edrv < si::Power::ZERO {
                         // negative tractive power
                         // max power system can receive from engine during negative traction
-                        (*res.state.pwr_regen_max.get_fresh(|| format_dbg!())?
-                            + pwr_res_and_gen_to_edrv)
+                        (pwr_regen_max_for_fc + pwr_res_and_gen_to_edrv)
                             // or peak efficiency power if it's lower than above
                             .min(pwr_gen_elec_out_for_eff_fc)
                             // but not negative
@@ -490,10 +527,7 @@ impl HybridPowertrainControls {
                                 .max(pwr_gen_elec_out_for_eff_fc)
                                 // but don't exceed what what the battery can
                                 // absorb + tractive demand
-                                .min(
-                                    pwr_res_and_gen_to_edrv
-                                        + *res.state.pwr_regen_max.get_fresh(|| format_dbg!())?,
-                                )
+                                .min(pwr_res_and_gen_to_edrv + pwr_regen_max_for_fc)
                         }
                     }
                     // and don't exceed what the fc -> gen can do
@@ -582,10 +616,20 @@ pub struct RESGreedyWithDynamicBuffers {
     pub speed_soc_regen_buffer: Option<si::Velocity>,
     /// Coefficient for modifying amount of regen buffer
     pub speed_soc_regen_buffer_coeff: Option<si::Ratio>,
+    /// When true (the default), the regen buffer limits only how far the ENGINE
+    /// may charge the battery, so headroom is reserved for braking without
+    /// throttling regen itself, which charges at the full rating up to `max_soc`.
+    /// False restores the original behaviour, where the buffer derates all
+    /// charging, regen included.
+    pub regen_bypasses_buffer: Option<bool>,
     // TODO: make it so that the engine never goes off at all
     /// Minimum time engine must remain on if it was on during the previous
     /// simulation time step.
     pub fc_min_time_on: Option<si::Time>,
+    /// Fraction of the battery's current discharge limit that may be spent on
+    /// aux (hotel) load before the engine is forced on. Keeps discharge headroom
+    /// in reserve for traction.
+    pub frac_res_disch_for_aux: Option<si::Ratio>,
     /// Speed at which [FuelConverter] is forced on.
     pub speed_fc_forced_on: Option<si::Velocity>,
     /// Fraction of total aux and powertrain rated power at which
@@ -667,6 +711,27 @@ impl RESGreedyWithDynamicBuffers {
         Ok(())
     }
 
+    /// Determines whether the engine must be on to carry the aux (hotel) load.
+    ///
+    /// True when aux demand exceeds `frac_res_disch_for_aux` of what the battery
+    /// can currently discharge. The fraction keeps a reserve for traction: a pack
+    /// sized for power, not for hotel load, should not spend its discharge
+    /// headroom on auxiliaries and then be unable to assist a grade.
+    fn handle_fc_on_causes_for_aux_demand(
+        &mut self,
+        pwr_aux: si::Power,
+        res_state: &ReversibleEnergyStorageState,
+    ) -> anyhow::Result<()> {
+        let frac: si::Ratio = self
+            .frac_res_disch_for_aux
+            .with_context(|| format_dbg!())?;
+        self.state.aux_power_demand.update(
+            pwr_aux > frac * *res_state.pwr_disch_max.get_fresh(|| format_dbg!())?,
+            || format_dbg!(),
+        )?;
+        Ok(())
+    }
+
     /// Determines whether enigne must be on for high speed
     fn handle_fc_on_causes_for_speed(&mut self, train_speed: si::Velocity) -> anyhow::Result<()> {
         self.state.train_speed_above_threshold.update(
@@ -707,11 +772,20 @@ impl Init for RESGreedyWithDynamicBuffers {
         init_opt_default!(self, speed_soc_disch_buffer_coeff, 1.0 * uc::R);
         init_opt_default!(self, speed_soc_fc_on_buffer, 100.0 * uc::MPH);
         init_opt_default!(self, speed_soc_fc_on_buffer_coeff, 1.0 * uc::R);
+        init_opt_default!(self, frac_res_disch_for_aux, 0.5 * uc::R);
         init_opt_default!(self, speed_soc_regen_buffer, 10. * uc::MPH);
         init_opt_default!(self, speed_soc_regen_buffer_coeff, 1.0 * uc::R);
+        init_opt_default!(self, regen_bypasses_buffer, true);
         init_opt_default!(self, fc_min_time_on, uc::S * 5.0);
         // Force FC to be on all the time by default
-        init_opt_default!(self, speed_fc_forced_on, uc::MPH * 0.0);
+        // Was 0.0 mph, which made `train_speed > speed_fc_forced_on` true for ANY
+        // movement and kept the engine running whenever the train was not stopped.
+        // At 5 mph the engine may shut down while creeping and switching, where
+        // the pack can carry both traction and aux; the aux cause above guards
+        // against dumping hotel load on a battery that cannot hold it. This is a
+        // starting value, not a calibrated one -- it is the threshold the
+        // light-load shutdown study varies.
+        init_opt_default!(self, speed_fc_forced_on, uc::MPH * 5.0);
         init_opt_default!(self, frac_pwr_demand_fc_forced_on, uc::R * 0.75);
         // 20% of peak power gets most of peak efficiency
         init_opt_default!(self, frac_of_max_pwr_to_run_fc, 0.2 * uc::R);
@@ -750,14 +824,21 @@ pub struct RGWDBState {
     propulsion_power_demand: TrackedState<bool>,
     /// Powertrain power demand exceeds optimal motor and/or battery output
     propulsion_power_demand_soft: TrackedState<bool>,
-    // TODO: actually use `aux_power_demand` and uncomment
-    // /// Aux power demand exceeds battery capability
-    // aux_power_demand: TrackedState<bool>,
+    /// Aux (hotel) power demand exceeds what the battery should serve, so the
+    /// engine must run to carry it. Without this cause the engine never starts
+    /// for aux alone, and shutting it down at low speed silently dumps the whole
+    /// hotel load on the pack.
+    aux_power_demand: TrackedState<bool>,
     /// SOC is below min buffer so FC is charging RES
     charging_for_low_soc: TrackedState<bool>,
 
     /// buffer at which FC is forced on
     pub soc_fc_on_buffer: TrackedState<si::Ratio>,
+
+    /// Battery charge power available to ENGINE charging: the regen-buffer-derated
+    /// charge limit when [RESGreedyWithDynamicBuffers::regen_bypasses_buffer] is
+    /// true, else the battery's own (already derated) charge limit
+    pub pwr_charge_max_for_fc: TrackedState<si::Power>,
 }
 
 #[pyo3_api]
@@ -778,7 +859,7 @@ impl FuelConverterOn for RGWDBState {
             || *self
                 .propulsion_power_demand_soft
                 .get_fresh(|| format_dbg!())?
-            // || *self.aux_power_demand.get_fresh(|| format_dbg!())?
+            || *self.aux_power_demand.get_fresh(|| format_dbg!())?
             || *self.charging_for_low_soc.get_fresh(|| format_dbg!())?)
     }
 }

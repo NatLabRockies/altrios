@@ -492,6 +492,43 @@ impl ReversibleEnergyStorage {
         dt: si::Time,
         chrg_buffer: si::Energy,
     ) -> anyhow::Result<()> {
+        self.set_pwr_charge_max_split(pwr_aux, dt, chrg_buffer, true)
+            .map(|_| ())
+    }
+
+    /// Like [Self::set_curr_pwr_out_max], but when `derate_charge` is false the
+    /// charge buffer does NOT derate [ReversibleEnergyStorageState::pwr_charge_max]
+    /// (which then bounds regen at the full rating up to `max_soc`); the
+    /// buffer-derated limit is instead returned, for the caller to apply to
+    /// discretionary charging only (engine charging in a hybrid, wire charging in a
+    /// battery-electric). [ReversibleEnergyStorageState::soc_chrg_buffer] records the
+    /// buffer ceiling either way.
+    pub fn set_curr_pwr_out_max_split(
+        &mut self,
+        dt: si::Time,
+        pwr_aux: si::Power,
+        disch_buffer: si::Energy,
+        chrg_buffer: si::Energy,
+        derate_charge: bool,
+    ) -> anyhow::Result<si::Power> {
+        let pwr_charge_max_buffered = self
+            .set_pwr_charge_max_split(pwr_aux, dt, chrg_buffer, derate_charge)
+            .with_context(|| format_dbg!())?;
+        self.set_pwr_disch_max(pwr_aux, dt, disch_buffer)
+            .with_context(|| format_dbg!())?;
+        Ok(pwr_charge_max_buffered)
+    }
+
+    /// Sets the charge limits and returns the buffer-derated charge limit. With
+    /// `derate_charge` the derated value is also what is stored (the original
+    /// behaviour); without it the stored limit ignores the buffer.
+    fn set_pwr_charge_max_split(
+        &mut self,
+        pwr_aux: si::Power,
+        dt: si::Time,
+        chrg_buffer: si::Energy,
+        derate_charge: bool,
+    ) -> anyhow::Result<si::Power> {
         // to protect against excessive topping off of the battery
         let soc_buffer_delta = (chrg_buffer
             / (self.energy_capacity * (self.max_soc - self.min_soc)))
@@ -500,26 +537,31 @@ impl ReversibleEnergyStorage {
         self.state
             .soc_chrg_buffer
             .update(self.max_soc - soc_buffer_delta, || format_dbg!())?;
-        let pwr_max_for_dt = ((self.max_soc - *self.state.soc.get_stale(|| format_dbg!())?)
-            * self.energy_capacity
-            / dt)
+        let soc = *self.state.soc.get_stale(|| format_dbg!())?;
+        let pwr_max_for_dt = ((self.max_soc - soc) * self.energy_capacity / dt)
             .max(si::Power::ZERO);
+        let pwr_charge_max_buffered = if soc
+            <= *self.state.soc_chrg_buffer.get_fresh(|| format_dbg!())?
+        {
+            self.pwr_charge_rating()
+        } else if soc < self.max_soc && soc_buffer_delta > si::Ratio::ZERO {
+            self.pwr_charge_rating() * (self.max_soc - soc) / soc_buffer_delta
+        } else {
+            // current SOC is less than both
+            si::Power::ZERO
+        }
+        .min(pwr_max_for_dt);
+        let pwr_charge_max_unbuffered = if soc < self.max_soc {
+            self.pwr_charge_rating().min(pwr_max_for_dt)
+        } else {
+            si::Power::ZERO
+        };
         self.state.pwr_charge_max.update(
-            if *self.state.soc.get_stale(|| format_dbg!())?
-                <= *self.state.soc_chrg_buffer.get_fresh(|| format_dbg!())?
-            {
-                self.pwr_charge_rating()
-            } else if *self.state.soc.get_stale(|| format_dbg!())? < self.max_soc
-                && soc_buffer_delta > si::Ratio::ZERO
-            {
-                self.pwr_charge_rating()
-                    * (self.max_soc - *self.state.soc.get_stale(|| format_dbg!())?)
-                    / soc_buffer_delta
+            if derate_charge {
+                pwr_charge_max_buffered
             } else {
-                // current SOC is less than both
-                si::Power::ZERO
-            }
-            .min(pwr_max_for_dt),
+                pwr_charge_max_unbuffered
+            },
             || format_dbg!(),
         )?;
 
@@ -540,7 +582,7 @@ impl ReversibleEnergyStorage {
             *self.state.pwr_charge_max.get_fresh(|| format_dbg!())? + pwr_aux,
             || format_dbg!(),
         )?;
-        Ok(())
+        Ok(pwr_charge_max_buffered)
     }
 
     /// # Arguments
