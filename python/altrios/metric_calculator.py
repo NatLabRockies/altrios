@@ -1675,6 +1675,12 @@ def zone_energy_price(zone: str, fuel: str, year: int) -> float:
     its trajectory's ratio of ``year`` to the reference year, so regional level and
     national (or provincial) real-price movement are combined the same way for every
     zone on either side of the border.
+
+    Diesel is then reduced by ``defaults.RAILROAD_DIESEL_DEDUCTION_USD_PER_GAL``:
+    every diesel reference price in the file is a retail PUMP price (EIA retail
+    on-highway for US zones, StatCan self-service stations for Canadian ones) and
+    a railroad buys below it. This is the one place that deduction is applied, so
+    it is also the one place to audit it.
     """
     row = energy_price_zones.filter((pl.col("Zone") == zone) & (pl.col("Fuel") == fuel))
     if row.height == 0:
@@ -1682,7 +1688,31 @@ def zone_energy_price(zone: str, fuel: str, year: int) -> float:
     row = row.row(0, named=True)
     trajectory = price_trajectory(row["Trajectory"], fuel)
     reference = _series_price_at(trajectory, int(row["Reference_Year"]))
-    return float(row["Reference_Price"]) * _series_price_at(trajectory, year) / reference
+    price = float(row["Reference_Price"]) * _series_price_at(trajectory, year) / reference
+    if fuel == "Diesel":
+        # ESCALATE FIRST, THEN STRIP. The reference tables and the AEO/CER
+        # trajectories are all retail pump prices; a railroad buys at a delivered
+        # price roughly `RAILROAD_DIESEL_DEDUCTION_USD_PER_GAL` below that, and
+        # that spread is a per-gallon wedge (fixed excise taxes, station margin,
+        # rack-to-pump distribution), not a percentage of the fuel price. Holding
+        # it constant in real terms is therefore the defensible assumption, and
+        # subtracting it AFTER the trajectory is what does that.
+        #
+        # It also gets the escalation right. If retail grows 11.5% to 2050 while
+        # a fixed wedge does not, the commodity underneath grew faster than
+        # 11.5%; the railroad's price, which excludes most of that wedge,
+        # escalates faster too (about 17% on the US zones). Stripping BEFORE the
+        # trajectory would instead escalate the railroad price at the retail
+        # rate, implicitly assuming the spread grows with crude -- which
+        # understates late-horizon diesel cost by ~5% on the US zones and
+        # flatters diesel against the electric arms.
+        #
+        # Floored at a dollar a gallon rather than allowed to go negative: a
+        # deduction larger than a zone's price means the deduction and the
+        # reference disagree about what they measure, and silently pricing fuel
+        # at zero would hide that.
+        price = max(price - defaults.RAILROAD_DIESEL_DEDUCTION_USD_PER_GAL, 1.0)
+    return price
 
 
 def location_price_zones(location_map: Dict[str, List[alt.Location]]) -> pl.DataFrame:

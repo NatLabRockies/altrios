@@ -27,6 +27,31 @@ BEL_CHARGER_COST_USD = BEL_CHARGE_RATE_KW * 1000 * utilities.USD_2022_TO_2025 # 
 # site is not split across two different annuity horizons.
 BEL_CHARGER_LIFESPAN = 20
 
+# Railroads do not pay the retail pump price the reference tables quote. Deducted
+# from every Diesel zone's price AFTER its trajectory is applied (see
+# `metric_calculator.zone_energy_price`), because the spread is a per-gallon
+# wedge rather than a fraction of the fuel price, and is therefore held constant
+# in real terms. That ordering also makes the railroad's price escalate FASTER
+# than retail, which is correct: a fixed wedge dilutes retail growth, so the
+# commodity underneath it grows faster than the retail series does.
+#
+# BASIS: the retail-to-delivered SPREAD, not a tax build-up. Taken from the
+# weighted average of STB Form R-1 Schedule 750 ("Consumption of Diesel Fuel",
+# dollars and gallons by locomotive service class) across BNSF, GTC, NS and SOO
+# against EIA retail on-highway diesel for the same year. Validated against Union
+# Pacific's 10-K, where the Schedule 750 method reproduces the reported average
+# fuel price to half a cent ($3.084 vs $3.09 for 2023).
+#
+# Most of the spread is retail margin, station overhead and the rack-versus-pump
+# difference, NOT tax -- which is why it is applied to Canadian zones too. The
+# Canadian tax picture differs in detail (railways pay REDUCED provincial rates,
+# 6.5 c/L AB, 6.3 c/L MB, 4.5 c/L ON, rather than the road rate, and the federal
+# fuel charge has been zero for everyone since 2025-04-01), but recoverable
+# GST/HST alone exceeds those differentials, so the US spread is if anything
+# conservative there. Documented as a spread rather than a tax sum deliberately:
+# the tax framing does not survive scrutiny, the spread one does.
+RAILROAD_DIESEL_DEDUCTION_USD_PER_GAL = 1.20
+
 BASE_ANALYSIS_YEAR = 2025
 DISCOUNT_RATE = 0.07
 RETAIL_PRICE_EQUIVALENT_MULTIPLIER = 1.15
