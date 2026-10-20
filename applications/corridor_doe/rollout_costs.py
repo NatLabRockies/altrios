@@ -94,23 +94,24 @@ ANNUAL_METRICS = [
 # ------------------------------------------------------------------ pricing
 def _atb_pack_usd(loco: alt.Locomotive, year: int,
                   battery_scenario: str = "Moderate") -> float:
-    """The NREL battery-system cost (energy $/kWh + power $/kW components) for this
-    locomotive's pack in ``year``, restated to the 2025 base year, as
-    `metric_calculator.add_battery_costs` prices it -- without that function's BEL
-    chassis term."""
+    """Retail-equivalent cost of this locomotive's battery pack in ``year``,
+    in the 2025 base year -- `metric_calculator.pack_cost_usd`, the same pricing
+    `add_battery_costs` uses, without that function's chassis term.
+
+    The retail multiplier IS applied here, because nothing else is being added:
+    for the hybrid the chassis is priced separately and already carries its own.
+    """
     prices = mc.battery_prices(battery_scenario).filter(
         (pl.col("Year") - pl.lit(year)).abs().min()
         == (pl.col("Year") - pl.lit(year)).abs())
-    def value(metric):
-        return prices.filter(pl.col("Metric") == metric).get_column("Value")[0]
+    usd_per_kwh = (prices.filter(pl.col("Metric") == "USD_Per_kWh")
+                   .get_column("Value")[0])
     inner = next(iter(loco.to_pydict()["loco_type"].values()))
     res = inner.get("res")
     if not res:
         return 0.0
-    kw = res["pwr_out_max_watts"] / 1000
-    kwh = res["energy_capacity_joules"] * 1e-6 * utilities.KWH_PER_MJ
-    return ((kw * value("USD_Per_kW") + kwh * value("USD_Per_kWh"))
-            * utilities.USD_2024_TO_2025 * defaults.RETAIL_PRICE_EQUIVALENT_MULTIPLIER)
+    return (mc.pack_cost_usd(res, usd_per_kwh)
+            * defaults.RETAIL_PRICE_EQUIVALENT_MULTIPLIER)
 
 
 def cost_functions(row: dict, battery_scenario: str = "Moderate"):

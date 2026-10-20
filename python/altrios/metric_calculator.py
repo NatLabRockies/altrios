@@ -1766,6 +1766,65 @@ def import_energy_prices_eia(
     return pl.DataFrame(out)
 
 
+# --------------------------------------------------------------- battery pack
+# The ATB's `USD_Per_kWh` is NOT a battery price. It is the duration-regression
+# slope of a grid storage PROJECT (NREL 2025, Fig 2), and `USD_Per_kW` prices a
+# bi-directional grid inverter, transformer, switchgear, substation and a
+# 2.4-mile transmission line -- none of which a locomotive has. Using the ATB
+# formula as written made a 2C locomotive pack cost $976/kWh, 97% of it the
+# power term. See `Scripts/fixed_cost_basis.md` for the full derivation.
+#
+#   pack $/kWh = ATB_$per_kWh x ATB_PACK_COST_SHARE x m(P/E)
+#
+# ATB_PACK_COST_SHARE = 210/241 recovers NREL 2025's battery-CABINET line (Fig 1)
+# from the energy component (Fig 2): cells, modules, BMS, thermal management,
+# racks, enclosure, fire suppression, manufacturer margin and freight -- a
+# delivered pack. What it drops is grid interconnection plus the energy-allocated
+# project soft costs (developer profit, EPC overhead, contingency, sales tax),
+# which is the residual between the two figures and nothing else.
+#
+# m(P/E) is the high-rate duty premium, fitted to the BatPaC v5.0 manual's own
+# Dashboard series (Fig 3.11: rated power held at 300 kW while energy steps
+# 60->120 kWh), R^2 0.9994, normalized to the ATB's 4-hour (0.25C) reference.
+# Because it is a RATIO, BatPaC's profit-and-warranty markup and its 500,000-
+# packs-per-year volume assumption cancel: no double count against the retail
+# multiplier and no import of BatPaC's absolute levels.
+ATB_PACK_COST_SHARE = 210.0 / 241.0
+_BATPAC_PE_INTERCEPT = 83.34
+_BATPAC_PE_SLOPE = 7.912
+_ATB_REFERENCE_PE = 0.25
+
+
+def pack_duty_multiplier(power_to_energy: float) -> float:
+    """BatPaC pack-cost multiplier at this power-to-energy ratio, relative to the
+    ATB's 4-hour reference. 1.070 at 1C, 1.162 at 2C, 1.255 at 3C, 1.348 at 4C."""
+    return ((_BATPAC_PE_INTERCEPT + _BATPAC_PE_SLOPE * float(power_to_energy))
+            / (_BATPAC_PE_INTERCEPT + _BATPAC_PE_SLOPE * _ATB_REFERENCE_PE))
+
+
+def pack_cost_usd(res: dict, usd_per_kwh: float) -> float:
+    """MANUFACTURING cost of one battery pack, in the 2025 base year, from a
+    locomotive pydict's ``res`` body and the ATB energy component for the year.
+
+    The retail-price-equivalent multiplier is NOT applied here: callers that add
+    a chassis must apply it to the SUM, not to the pack alone.
+
+    P/E uses whichever of charge and discharge is larger -- the pack has to be
+    built for its worst duty, and in this DoE the hybrids charge faster (3C) than
+    they discharge (2C), so taking discharge alone would under-price them.
+    """
+    kwh = res["energy_capacity_joules"] * 1e-6 * utilities.KWH_PER_MJ
+    if kwh <= 0:
+        return 0.0
+    disch_kw = (res.get("pwr_out_max_watts") or 0.0) / 1000
+    charge_kw = (res.get("pwr_in_max_watts") or 0.0) / 1000
+    power_to_energy = max(disch_kw, charge_kw) / kwh
+    return (kwh * usd_per_kwh * ATB_PACK_COST_SHARE
+            * pack_duty_multiplier(power_to_energy)
+            # NREL 2025 battery cost projections are 2024 USD; restate in 2025.
+            * utilities.USD_2024_TO_2025)
+
+
 def add_battery_costs(loco_info: pd.DataFrame, year: int,
                       scenario: str = "Moderate") -> pd.DataFrame:
     prices_to_use = battery_prices(scenario).filter(
@@ -1775,23 +1834,13 @@ def add_battery_costs(loco_info: pd.DataFrame, year: int,
     usd_per_kWh = prices_to_use.filter(pl.col("Metric") == "USD_Per_kWh").get_column(
         "Value"
     )[0]
-    usd_per_kW = prices_to_use.filter(pl.col("Metric") == "USD_Per_kW").get_column(
-        "Value"
-    )[0]
-
     for idx, row in loco_info.iterrows():
         loco_dict = row["Rust_Loco"].to_pydict()
         loco_type = next(iter(loco_dict["loco_type"].values()))
         if "res" in loco_type:
-            kW = loco_type["res"]["pwr_out_max_watts"] / 1000
-            kWh = (
-                loco_type["res"]["energy_capacity_joules"] * 1e-6 * utilities.KWH_PER_MJ
-            )
             loco_info.at[idx, "Cost_USD"] = (
-                defaults.BEL_MINUS_BATTERY_COST_USD
-                # NREL 2025 battery cost projections (energy $/kWh + power $/kW components
-                # of a utility-scale system) are 2024 USD; restate in the 2025 base year.
-                + (kW * usd_per_kW + kWh * usd_per_kWh) * utilities.USD_2024_TO_2025
+                defaults.BEL_MINUS_BATTERY_MANUFACTURE_COST_USD
+                + pack_cost_usd(loco_type["res"], usd_per_kWh)
             ) * defaults.RETAIL_PRICE_EQUIVALENT_MULTIPLIER
     return loco_info
 
