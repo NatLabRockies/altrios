@@ -32,8 +32,20 @@ transition cost of running two fleets, and any efficiency loss from partial
 electrification. The first leans against the staged case, the last two lean for
 the instant one.
 
+**Accuracy.** Validate with `--ramp-years 0`, which must reproduce the instant
+case exactly: the single increment lands at the start and the rule collapses to
+`staged = diesel + (new - diesel) = new`. It currently reproduces it to within
+**0.7%**, not to the cent. The residual is year coverage -- the cells being
+blended do not carry every metric over an identical set of years (the
+end-of-horizon residual credit appears in `Cost_Total` but not in
+`Mt-km_Discounted`), and this stage works on the intersection. So read the
+staged figures as indicative of the SIZE of the deferral effect, roughly halving
+each premium, and not as precise levels. The instant figures are the
+calculator's own and carry no such caveat.
+
 Usage:
     python postprocess_staged.py                      # default 15-year ramp
+    python postprocess_staged.py --ramp-years 0       # must reproduce instant
     python postprocess_staged.py --ramp-years 10
     python postprocess_staged.py --in out/rollout_costs.csv --out out/rollout_costs_staged.csv
 """
@@ -56,13 +68,22 @@ logger = logging.getLogger("postprocess_staged")
 # Metrics that are sums over the year and therefore blend linearly. Anything not
 # listed is a derived quantity (a rate, a factor, a count of asset types) and is
 # recomputed or carried from the headline cell instead of blended.
+# Metrics that are EVENTS, not annual flows: they land in the years an asset is
+# bought or retired, not in every year. They are deferred along the ramp rather
+# than scaled by the converted share -- see the module docstring.
+PURCHASE_METRICS = ("Cost_Purchases", "Cost_Retired_Assets")
+
+# `Cost_Total` and its discounted twin are RECOMPUTED from the components rather
+# than blended, because purchases enter them and purchases are no longer a
+# simple scaling. The calculator's identity, asserted below, is
+#   Cost_Total = Cost_Purchases + Cost_Energy + Cost_Retired_Assets
+#   Cost_Total_Discounted = Cost_Total / Discounting_Factor
+DERIVED_METRICS = ("Cost_Total", "Cost_Total_Discounted")
+
 ADDITIVE_METRICS = (
-    "Cost_Total",
-    "Cost_Purchases",
     "Cost_Energy",
     "Cost_Diesel",
     "Cost_Electricity",
-    "Cost_Retired_Assets",
     "Diesel_Usage",
     "Electricity_Usage",
     "Energy",
@@ -77,7 +98,6 @@ ADDITIVE_METRICS = (
     #     == f(y)*disc(y)*new(y) + (1-f(y))*disc(y)*diesel(y)
     # so there is no need to undo and redo the calculator's factors, and no way
     # for this stage's discount convention to drift from the headline table's.
-    "Cost_Total_Discounted",
     "Mt-km_Discounted",
     "Mt-mi_Discounted",
 )
@@ -114,17 +134,65 @@ def converted_share(year: int, start_year: int, ramp_years: int) -> float:
     return min(max((year - start_year) / float(ramp_years), 0.0), 1.0)
 
 
+def ramp_increments(years, start_year: int, ramp_years: int) -> dict:
+    """``year -> the share CONVERTED IN that year`` (the first difference of the
+    cumulative share). Sums to one over the ramp, which is what conserves the
+    capital when purchases are deferred rather than scaled."""
+    inc = {}
+    prev = 0.0
+    for y in years:
+        cur = converted_share(y, start_year, ramp_years)
+        inc[y] = cur - prev
+        prev = cur
+    return inc
+
+
+def _defer(stream: dict, increments: dict, years) -> dict:
+    """Convolve a purchase stream with the ramp increments.
+
+    The tranche converted in year `k` incurs the new technology's purchases on
+    its own schedule, shifted by `k - start`. Anything pushed past the horizon
+    falls off the end, which is the right accounting for a study that stops at
+    the horizon: it is a cost the ramp defers beyond the window, not one it
+    avoids, and the note in the report says so.
+    """
+    if not stream:
+        return {}
+    base = min(years)
+    out = {y: 0.0 for y in years}
+    for k, share in increments.items():
+        if share <= 0:
+            continue
+        shift = k - base
+        for t, v in stream.items():
+            y = t + shift
+            if y in out:
+                out[y] += share * v
+    return out
+
+
 def _year_int(frame: pl.DataFrame) -> pl.DataFrame:
     """`Year` as an integer, dropping the aggregate ("All") rows -- those are
-    the calculator's own multi-year summaries, which this stage recomputes."""
+    the calculator's own multi-year summaries, which this stage recomputes.
+
+    `Subset` is normalized here too. A metric with no breakdown is written with
+    `Subset` either null or "All" depending on which code path emitted it, and
+    the two cells being blended need not agree. Left alone, `subsets_of` sees
+    two buckets where there is one and blends each against a missing
+    counterpart, so the horizon totals come out inflated -- which put a staged
+    battery-electric premium at -44% by growing its freight denominator 55%
+    while the numerator fell correctly.
+    """
     return (frame.filter(pl.col("Year").cast(pl.Utf8).str.contains(r"^\d{4}$"))
-            .with_columns(pl.col("Year").cast(pl.Utf8).cast(pl.Int32).alias("Year_Int")))
+            .with_columns(pl.col("Year").cast(pl.Utf8).cast(pl.Int32).alias("Year_Int"),
+                          pl.col("Subset").cast(pl.Utf8).fill_null("All")
+                          .replace("", "All").alias("Subset")))
 
 
 def stage_one_cell(new: pl.DataFrame, diesel: pl.DataFrame,
                    ramp_years: int) -> Optional[pl.DataFrame]:
-    """Blend one cell against its diesel baseline, year by year, and
-    re-discount. Returns tidy rows in the input's own schema."""
+    """Blend one cell against its diesel baseline on the deferred-increment rule
+    (see the module docstring) and return tidy rows in the input's schema."""
     start_year = int(new["Start_Year"][0])
     n = _year_int(new)
     d = _year_int(diesel)
@@ -132,96 +200,127 @@ def stage_one_cell(new: pl.DataFrame, diesel: pl.DataFrame,
         return None
 
     def series(frame: pl.DataFrame, metric: str, subset=None) -> dict:
-        """Year -> value for one metric, optionally within one subset."""
         sub = frame.filter(pl.col("Metric") == metric)
         if subset is not None:
-            sub = sub.filter(pl.col("Subset").cast(pl.Utf8).fill_null("") == subset)
+            sub = sub.filter(pl.col("Subset") == subset)
         if sub.height == 0:
             return {}
         return {int(y): float(v) for y, v in
                 sub.group_by("Year_Int").agg(pl.col("Value").sum()).iter_rows()}
 
     def subsets_of(metric: str) -> list:
-        """Every `Subset` the metric is broken out by, across both cells.
-
-        The breakdown MUST be preserved: the lifecycle decomposition separates
-        fleet from infrastructure by `Subset` on `Cost_Purchases`, and a staged
-        table that summed them would collapse that split. A subset present in
-        one cell and not the other blends against zero, which is what a corridor
-        that has catenary only after conversion should do.
-        """
+        """Every `Subset` the metric is broken out by, across both cells. The
+        breakdown must survive: the lifecycle decomposition separates fleet from
+        infrastructure by `Subset` on `Cost_Purchases`."""
         out = []
         for frame in (n, d):
             sub = frame.filter(pl.col("Metric") == metric)
             if sub.height:
-                out += sub.get_column("Subset").cast(pl.Utf8).fill_null("").to_list()
+                out += sub.get_column("Subset").to_list()
         return sorted(set(out))
 
     years = sorted(set(n["Year_Int"].to_list()) & set(d["Year_Int"].to_list()))
     if not years:
         return None
     shares = {y: converted_share(y, start_year, ramp_years) for y in years}
+    increments = ramp_increments(years, start_year, ramp_years)
+    base = min(years)
+
+    def staged_stream(sn: dict, sd: dict) -> dict:
+        """diesel + deferred increments of (new - diesel)."""
+        out = {y: sd.get(y, 0.0) for y in years}
+        for k, share in increments.items():
+            if share <= 0:
+                continue
+            shift = k - base
+            for t in years:
+                y = t + shift
+                if y in out:
+                    out[y] += share * (sn.get(t, 0.0) - sd.get(t, 0.0))
+        return out
 
     rows = []
     blended = {}
-    for metric in ADDITIVE_METRICS:
+    for metric in ADDITIVE_METRICS + PURCHASE_METRICS + ("Cost_Total",):
         parts = subsets_of(metric)
         if not parts:
             continue
         units_sub = n.filter(pl.col("Metric") == metric)
         units = units_sub["Units"][0] if units_sub.height else None
+        # Per-subset rows for the decomposition, and a corridor total.
+        #
+        # The total is taken from the "All" subset when the metric has one, NOT
+        # by summing the parts: the calculator writes "All" ALONGSIDE the
+        # breakdown, so adding every part to it double-counts. That is what
+        # broke the zero-ramp identity by 84% -- `Cost_Energy` carries an "All"
+        # row and a row per pricing node, and `Cost_Purchases` an "All" row and
+        # a row per asset type.
         totals = {y: 0.0 for y in years}
+        per_part = {}
         for part in parts:
-            sn, sd = series(n, metric, part), series(d, metric, part)
+            vals = staged_stream(series(n, metric, part), series(d, metric, part))
+            per_part[part] = vals
             for y in years:
-                f = shares[y]
-                v = f * sn.get(y, 0.0) + (1.0 - f) * sd.get(y, 0.0)
-                totals[y] += v
-                rows.append(dict(Metric=metric, Units=units, Value=v,
-                                 Subset=(part or None), Year=str(y)))
+                rows.append(dict(Metric=metric, Units=units, Value=vals[y],
+                                 Subset=part, Year=str(y)))
+        if "All" in per_part:
+            totals = per_part["All"]
+        else:
+            for vals in per_part.values():
+                for y in years:
+                    totals[y] += vals[y]
         blended[metric] = totals
 
-    # The discounting factors ride along unblended: they are a property of the
-    # year and the rate, identical in both cells, and `pv()`-style present-value
-    # code downstream joins on them.
-    for y, v in series(n, "Discounting_Factor").items():
-        rows.append(dict(Metric="Discounting_Factor", Units="fraction (0-1)",
-                         Value=v, Subset="All", Year=str(y)))
-
+    # `Cost_Total` is staged DIRECTLY rather than rebuilt from the components.
+    # The rule is linear, so staging the total and staging each part then adding
+    # them give the same answer -- but staging it directly does not depend on the
+    # calculator's component identity holding to the cent, and it is that
+    # dependence that left a 0.6% residual in the zero-ramp identity test.
+    # The discounted twin then follows from the calculator's own convention,
+    # which DIVIDES by the factor: Cost_Total_Discounted = Cost_Total / DF.
+    disc = series(n, "Discounting_Factor")
+    total = blended.get("Cost_Total", {})
+    total_disc = {y: total[y] / disc[y] for y in years
+                  if disc.get(y) and y in total}
+    blended["Cost_Total_Discounted"] = total_disc
     for y in years:
         rows.append(dict(Metric="Converted_Share", Units="fraction",
-                         Value=shares[y], Subset=None, Year=str(y)))
+                         Value=shares[y], Subset="All", Year=str(y)))
+        if y in total_disc:
+            rows.append(dict(Metric="Cost_Total_Discounted",
+                             Units="USD (discounted)", Value=total_disc[y],
+                             Subset="All", Year=str(y)))
+        if disc.get(y) is not None:
+            rows.append(dict(Metric="Discounting_Factor", Units="fraction (0-1)",
+                             Value=disc[y], Subset="All", Year=str(y)))
 
-    # Horizon totals: sums of the blended per-year series, so the headline
-    # table's own discounting carries straight through.
     def units_of(metric: str):
         sub = n.filter(pl.col("Metric") == metric)
         return sub["Units"][0] if sub.height else None
 
-    cost_disc = sum(blended.get(LCOT_NUMERATOR, {}).get(y, 0.0) for y in years)
+    cost_disc = sum(total_disc.get(y, 0.0) for y in years)
     rows.append(dict(Metric=LCOT_NUMERATOR, Units=units_of(LCOT_NUMERATOR),
-                     Value=cost_disc, Subset=None, Year="All"))
+                     Value=cost_disc, Subset="All", Year="All"))
     for lcot, denom in LCOT_DENOMINATORS.items():
         if denom not in blended:
             continue
-        total = sum(blended[denom].get(y, 0.0) for y in years)
-        rows.append(dict(Metric=denom, Units=units_of(denom), Value=total,
-                         Subset=None, Year="All"))
+        tot = sum(blended[denom].get(y, 0.0) for y in years)
+        rows.append(dict(Metric=denom, Units=units_of(denom), Value=tot,
+                         Subset="All", Year="All"))
         rows.append(dict(Metric=lcot, Units=units_of(lcot),
-                         Value=(cost_disc / total) if total else None,
-                         Subset=None, Year="All"))
-    for metric in ("Cost_Total", "Cost_Purchases", "Cost_Energy", "GHG_Energy"):
+                         Value=(cost_disc / tot) if tot else None,
+                         Subset="All", Year="All"))
+    for metric in ("Cost_Purchases", "Cost_Energy", "GHG_Energy"):
         if metric in blended:
             rows.append(dict(Metric=metric, Units=units_of(metric),
                              Value=sum(blended[metric].get(y, 0.0) for y in years),
-                             Subset=None, Year="All"))
+                             Subset="All", Year="All"))
     rows.append(dict(Metric="Ramp_Years", Units="years",
-                     Value=float(ramp_years), Subset=None, Year="All"))
+                     Value=float(ramp_years), Subset="All", Year="All"))
 
     provenance = {k: new[k][0] for k in new.columns
                   if k not in ("Metric", "Units", "Value", "Subset", "Year")}
-    prov = pl.DataFrame([provenance])
-    return prov.join(pl.DataFrame(rows), how="cross")
+    return pl.DataFrame([provenance]).join(pl.DataFrame(rows), how="cross")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -267,8 +366,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
 
     frames, skipped = [], []
-    group_keys = ["Sim_Key", "Infra_Level", "Energy_Level"] + [
-        k for k in ("Anti_Idling", "Dwell_Scope") if k in table.columns]
+    # A staged cell must be ONE cost cell, so everything that distinguishes a
+    # cost cell has to group, not merely match. `Battery_Cost_Scenario` was the
+    # one that bit: as a match key only, each group held both the central and
+    # low-cost trajectories, `series()` summed across them, and every blended
+    # quantity came out near double -- which put the staged battery-electric
+    # premium at -44% off a freight denominator 55% too large. This is the same
+    # trap the findings notebook documents for the same column.
+    group_keys = ["Sim_Key", "Infra_Level"] + [
+        k for k in match_keys if k not in ("Corridor",)]
     for key, cell in others.group_by(group_keys, maintain_order=True):
         base = diesel
         for k in match_keys:
