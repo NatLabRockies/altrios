@@ -131,14 +131,31 @@ def stage_one_cell(new: pl.DataFrame, diesel: pl.DataFrame,
     if n.height == 0 or d.height == 0:
         return None
 
-    def series(frame: pl.DataFrame, metric: str) -> dict:
+    def series(frame: pl.DataFrame, metric: str, subset=None) -> dict:
+        """Year -> value for one metric, optionally within one subset."""
         sub = frame.filter(pl.col("Metric") == metric)
+        if subset is not None:
+            sub = sub.filter(pl.col("Subset").cast(pl.Utf8).fill_null("") == subset)
         if sub.height == 0:
             return {}
-        # Several rows per year when a metric is broken out by subset (node,
-        # locomotive type); the corridor total is their sum.
         return {int(y): float(v) for y, v in
                 sub.group_by("Year_Int").agg(pl.col("Value").sum()).iter_rows()}
+
+    def subsets_of(metric: str) -> list:
+        """Every `Subset` the metric is broken out by, across both cells.
+
+        The breakdown MUST be preserved: the lifecycle decomposition separates
+        fleet from infrastructure by `Subset` on `Cost_Purchases`, and a staged
+        table that summed them would collapse that split. A subset present in
+        one cell and not the other blends against zero, which is what a corridor
+        that has catenary only after conversion should do.
+        """
+        out = []
+        for frame in (n, d):
+            sub = frame.filter(pl.col("Metric") == metric)
+            if sub.height:
+                out += sub.get_column("Subset").cast(pl.Utf8).fill_null("").to_list()
+        return sorted(set(out))
 
     years = sorted(set(n["Year_Int"].to_list()) & set(d["Year_Int"].to_list()))
     if not years:
@@ -148,19 +165,28 @@ def stage_one_cell(new: pl.DataFrame, diesel: pl.DataFrame,
     rows = []
     blended = {}
     for metric in ADDITIVE_METRICS:
-        sn, sd = series(n, metric), series(d, metric)
-        if not sn and not sd:
+        parts = subsets_of(metric)
+        if not parts:
             continue
-        vals = {}
-        for y in years:
-            f = shares[y]
-            vals[y] = f * sn.get(y, 0.0) + (1.0 - f) * sd.get(y, 0.0)
-        blended[metric] = vals
-        units = (n.filter(pl.col("Metric") == metric)["Units"][0]
-                 if n.filter(pl.col("Metric") == metric).height else None)
-        for y in years:
-            rows.append(dict(Metric=metric, Units=units, Value=vals[y],
-                             Subset=None, Year=str(y)))
+        units_sub = n.filter(pl.col("Metric") == metric)
+        units = units_sub["Units"][0] if units_sub.height else None
+        totals = {y: 0.0 for y in years}
+        for part in parts:
+            sn, sd = series(n, metric, part), series(d, metric, part)
+            for y in years:
+                f = shares[y]
+                v = f * sn.get(y, 0.0) + (1.0 - f) * sd.get(y, 0.0)
+                totals[y] += v
+                rows.append(dict(Metric=metric, Units=units, Value=v,
+                                 Subset=(part or None), Year=str(y)))
+        blended[metric] = totals
+
+    # The discounting factors ride along unblended: they are a property of the
+    # year and the rate, identical in both cells, and `pv()`-style present-value
+    # code downstream joins on them.
+    for y, v in series(n, "Discounting_Factor").items():
+        rows.append(dict(Metric="Discounting_Factor", Units="fraction (0-1)",
+                         Value=v, Subset="All", Year=str(y)))
 
     for y in years:
         rows.append(dict(Metric="Converted_Share", Units="fraction",
