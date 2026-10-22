@@ -345,8 +345,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # they are normalized to one label before matching.
     if "Anti_Idling" in table.columns:
         table = table.with_columns(
-            pl.when(pl.col("Anti_Idling").cast(pl.Utf8)
-                    .is_in(["not_applicable", "aess_none"]))
+            # ONLY `not_applicable`. `aess_none` is a real measure (AESS
+            # shutdown, no APU); mapping it here merged it into the no-measure
+            # baseline and deleted it from the staged output.
+            pl.when(pl.col("Anti_Idling").cast(pl.Utf8) == "not_applicable")
             .then(pl.lit("none"))
             .otherwise(pl.col("Anti_Idling").cast(pl.Utf8))
             .alias("Anti_Idling"))
@@ -365,7 +367,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                      "ramp away from")
         return 1
 
-    frames, skipped = [], []
+    frames, skipped, fell_back = [], [], []
     # A staged cell must be ONE cost cell, so everything that distinguishes a
     # cost cell has to group, not merely match. `Battery_Cost_Scenario` was the
     # one that bit: as a match key only, each group held both the central and
@@ -379,6 +381,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         base = diesel
         for k in match_keys:
             base = base.filter(pl.col(k) == cell[k][0])
+        if base.height == 0 and "Anti_Idling" in match_keys:
+            # A measure no diesel locomotive can carry -- `aess_battery` needs a
+            # traction pack -- has no like-for-like baseline. Fall back to the
+            # diesel the railroad runs today rather than dropping the cell, and
+            # record the fallback: the resulting premium carries the anti-idling
+            # benefit as well as the powertrain change.
+            base = diesel
+            for k in match_keys:
+                if k == "Anti_Idling":
+                    want = "none"
+                elif k == "Dwell_Scope":
+                    # The no-measure baseline is identical under both scopes and
+                    # is therefore stored ONCE, under `All`. Carrying the cell's
+                    # `En_Route` through here matched nothing and dropped every
+                    # en-route row of the measure.
+                    want = "All"
+                else:
+                    want = cell[k][0]
+                base = base.filter(pl.col(k) == want)
+            if base.height:
+                fell_back.append((key, str(cell["Anti_Idling"][0])))
         if base.height == 0:
             skipped.append((key, "no matching diesel baseline"))
             continue
@@ -393,6 +416,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             continue
         frames.append(out)
 
+    if fell_back:
+        _by_measure = {}
+        for _k, _m in fell_back:
+            _by_measure[_m] = _by_measure.get(_m, 0) + 1
+        for _m, _n in sorted(_by_measure.items()):
+            logger.warning("%s: %d cells matched against the diesel `none` "
+                           "baseline (no diesel cell can carry this measure)",
+                           _m, _n)
     if not frames:
         logger.error("nothing staged")
         return 1

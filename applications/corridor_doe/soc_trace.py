@@ -93,13 +93,28 @@ def energized_intervals(network) -> pl.DataFrame:
                          "x2_km": [r[1] / 1000 for r in hot_runs]})
 
 
-def pick_trains(plan: pl.DataFrame, helper_free=None) -> list:
-    """One representative train per DIRECTION: each direction's median tonnage.
+# Which train each direction is represented by; set from --selection.
+SELECTION = "median"
+
+
+def pick_trains(plan: pl.DataFrame, helper_free=None, selection="median") -> list:
+    """One representative train per DIRECTION.
 
     Both directions, because on these corridors they are the interesting
     contrast -- Spokane-Lethbridge runs 3.6x the tonnage one way as the other,
     and a pack that fills on the loaded descent drains on the empty climb.
     Heaviest direction first, so the rows read loaded-then-empty.
+
+    `selection` picks WHICH train in each direction:
+
+    * ``median`` -- the middle train by tonnage. A typical trip.
+    * ``heaviest`` -- the heaviest train. For a battery-electric consist this is
+      combined with the helper-free filter below, so it is the hardest trip the
+      pack is asked to make ON ITS OWN, and therefore the one that comes closest
+      to the floor. The plain median understates how hard the pack works: the
+      heavy tail of this corridor is exactly the trains the helper ladder gives
+      conventional units to, so excluding them and then taking the median
+      removes the whole upper tail of pack demand.
     """
     t = plan.unique(subset=["Train_ID"])
     order = (t.group_by("Origin_ID").agg(pl.col("Train_Weight_tons").mean().alias("m"))
@@ -113,7 +128,8 @@ def pick_trains(plan: pl.DataFrame, helper_free=None) -> list:
             unaided = side.filter(pl.col("Train_ID").is_in(helper_free))
             if unaided.height:
                 side = unaided
-        row = side.row(side.height // 2, named=True)
+        row = side.row(side.height - 1 if selection == "heaviest"
+                       else side.height // 2, named=True)
         out.append(dict(row, _n_locos=plan.filter(pl.col("Train_ID") == row["Train_ID"]).height))
     return out
 
@@ -139,7 +155,7 @@ def trace(slug: str, powertrain: str, battery, layout_row) -> pl.DataFrame:
         helper_free = [t for t in plan["Train_ID"].unique().to_list() if t not in helped]
     wire = energized_intervals(network) if powertrain.startswith("catenary") else None
     return [_one(slug, powertrain, battery, network, location_map, rv0, tr, plan, wire)
-            for tr in pick_trains(plan, helper_free)]
+            for tr in pick_trains(plan, helper_free, SELECTION)]
 
 
 def _one(slug, powertrain, battery, network, location_map, rv0, tr, plan,
@@ -228,6 +244,10 @@ def main(argv=None) -> int:
     ap.add_argument("--architecture", default="ac_25kv",
                     help="catenary architecture to illustrate (default ac_25kv)")
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--selection", choices=("median", "heaviest"), default="median",
+                    help="which train represents each direction. `heaviest` is "
+                         "combined with the helper-free filter, so it is the "
+                         "hardest trip the pack makes on its own")
     args = ap.parse_args(argv)
     exp = pl.read_csv(HERE / "experiments.csv", infer_schema_length=None)
     sel = exp.filter(pl.col("Powertrain") == args.powertrain)
@@ -258,13 +278,18 @@ def main(argv=None) -> int:
             iv = energized_intervals(rs.network_for(row))
             if iv.height:
                 wires.append(iv.with_columns(pl.lit(slug).alias("corridor")))
+    global SELECTION
+    SELECTION = args.selection
     args.out.mkdir(parents=True, exist_ok=True)
     tag = args.powertrain + (f"_{args.battery_mwh:g}" if args.battery_mwh else "")
-    path = args.out / f"soc_{tag}.parquet"
+    # The median keeps the historic filename so existing figures do not move;
+    # other selections are suffixed.
+    suffix = "" if args.selection == "median" else f"_{args.selection}"
+    path = args.out / f"soc_{tag}{suffix}.parquet"
     pl.concat(frames, how="diagonal_relaxed").write_parquet(path)
     print("wrote", path)
     if wires:
-        wpath = args.out / f"energized_{tag}.parquet"
+        wpath = args.out / f"energized_{tag}{suffix}.parquet"
         pl.concat(wires, how="diagonal_relaxed").write_parquet(wpath)
         print("wrote", wpath)
     return 0

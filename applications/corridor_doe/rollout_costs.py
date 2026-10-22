@@ -532,6 +532,91 @@ def charger_facilities(row: dict, safe: str, experiments: pl.DataFrame,
     return out if out.height else None
 
 
+BASELINE_IDLING = ["none", "not_applicable"]
+_RESULTS_CACHE = None
+
+# Annual metrics that scale with diesel, and the two aggregates that merely
+# CONTAIN diesel. The split matters: scaling an aggregate would scale its
+# electricity share too.
+_DIESEL_LINEAR = {
+    ("Diesel_Usage", "MJ", "All"),
+    ("Diesel_Usage", "gallons", "All"),
+    ("Energy", "MJ", "Diesel"),
+    ("Cost_Diesel", "USD", "All"),
+    ("GHG_Diesel", "tonne CO2-eq", "All"),
+}
+_DIESEL_COMPONENT_OF = {
+    ("Cost_Energy", "USD", "All"): ("Cost_Diesel", "USD", "All"),
+    ("GHG_Energy", "tonne CO2-eq", "All"): ("GHG_Diesel", "tonne CO2-eq", "All"),
+}
+
+
+def idling_variants(sim_key: str, infra_level, energy_level) -> List[dict]:
+    """Every (measure, dwell scope) the sweep recorded for one cost cell.
+
+    The baseline is identical under both dwell scopes, so it is kept once under
+    ``All``; a cell the sweep never post-processed yields the baseline alone.
+    """
+    global _RESULTS_CACHE
+    if _RESULTS_CACHE is None:
+        path = OUT / "results.csv"
+        if not path.exists():
+            logger.warning("no results.csv: anti-idling variants unavailable")
+            _RESULTS_CACHE = pl.DataFrame()
+        else:
+            _RESULTS_CACHE = pl.read_csv(path, infer_schema_length=None)
+    if _RESULTS_CACHE.is_empty():
+        return []
+    rows = (_RESULTS_CACHE
+            .filter(pl.col("Sim_Key") == sim_key,
+                    pl.col("Infra_Level").cast(pl.Utf8) == str(infra_level),
+                    pl.col("Energy_Level").cast(pl.Utf8) == str(energy_level),
+                    pl.col("Result_Status") == "ok")
+            .filter(~(pl.col("Anti_Idling").is_in(BASELINE_IDLING)
+                      & (pl.col("Dwell_Scope") != "All")))
+            .select("Anti_Idling", "Dwell_Scope", "Diesel_Usage__MJ",
+                    "Diesel_MJ_Adjusted")
+            .unique(subset=["Anti_Idling", "Dwell_Scope"])
+            .sort("Anti_Idling", "Dwell_Scope"))
+    return rows.to_dicts()
+
+
+def _scale_diesel(annual: pl.DataFrame, factor: float) -> pl.DataFrame:
+    """The annual rows with diesel multiplied by `factor`.
+
+    Linear rows are scaled; the aggregates carrying diesel are shifted by the
+    same absolute delta, so their electricity share is left alone.
+    """
+    if abs(factor - 1.0) < 1e-12:
+        return annual
+    key = (pl.col("Metric"), pl.col("Units"), pl.col("Subset"))
+
+    def _is(triples):
+        expr = pl.lit(False)
+        for m, u, sub in triples:
+            expr = expr | ((pl.col("Metric") == m) & (pl.col("Units") == u)
+                           & (pl.col("Subset") == sub))
+        return expr
+
+    scaled = annual.with_columns(
+        pl.when(_is(_DIESEL_LINEAR))
+        .then(pl.col("Value") * factor)
+        .otherwise(pl.col("Value")).alias("Value"))
+    # Shift each aggregate by its diesel component's delta, matched on Year.
+    for agg, comp in _DIESEL_COMPONENT_OF.items():
+        delta = (annual.filter(_is([comp]))
+                 .select("Year", (pl.col("Value") * (factor - 1.0)).alias("_d")))
+        if delta.is_empty():
+            continue
+        scaled = (scaled.join(delta, on="Year", how="left")
+                  .with_columns(
+                      pl.when(_is([agg]) & pl.col("_d").is_not_null())
+                      .then(pl.col("Value") + pl.col("_d"))
+                      .otherwise(pl.col("Value")).alias("Value"))
+                  .drop("_d"))
+    return scaled
+
+
 def rollout_cell(row: dict, safe: str, layouts: pl.DataFrame,
                  emissions_cache: Dict[tuple, pl.DataFrame],
                  battery_scenario: str = "Moderate") -> Optional[pl.DataFrame]:
@@ -603,43 +688,68 @@ def rollout_cell(row: dict, safe: str, layouts: pl.DataFrame,
         ]
         diesel_start, elec_start = energy_prices(cat.METRICS_START_YEAR, cell["Energy_Level"],
                                                  list(shares), dz)
-        values = mc.main(scenarios, annual_metrics=ANNUAL_METRICS,
-                         calculate_multiyear_metrics=True)
-        provenance = pl.DataFrame([{
-            "Sim_Key": row["Sim_Key"], "Corridor": row["Corridor"],
-            "Powertrain": row["Powertrain"], "Label": row["Label"],
-            "Battery_MWh": row.get("Battery_MWh"),
-            "Architecture": row.get("Architecture"),
-            "Layout_Fingerprint": row.get("Layout_Fingerprint"),
-            "Infra_Level": cell["Infra_Level"],
-            "Infra_Multiplier": float(cell["Infra_Multiplier"]),
-            "Energy_Level": cell["Energy_Level"],
-            # The battery-cost trajectory belongs in the cell key: without it
-            # the two share a key and every present-value aggregation sums
-            # across both, silently doubling capital.
-            "Battery_Cost_Scenario": battery_scenario,
-            # Stated, not derived: the rollout levelizes capital through the
-            # calculator's annuity rather than expensing it at purchase.
-            "Capital_Basis": "levelized",
-            "Rollout_Years": cat.METRICS_ROLLOUT_YEARS,
-            "Start_Year": cat.METRICS_START_YEAR,
-            "Discount_Rate": cat.DISCOUNT_RATE,
-            "Loco_Unit_Cost_USD_Start": float(cost_fns[list(cost_fns)[0]](cat.METRICS_START_YEAR)),
-            "Loco_Cost_Basis": ("diesel unit + ATB pack (assumption)"
-                                if row["Powertrain"] == "hybrid" else "altrios defaults"),
-            "Grid_Regions": ";".join(regions),
-            # Where the energy was priced: grid draw share by "<region>|<zone>" node,
-            # the terminal diesel zones, and the resulting start-year prices.
-            "Elec_Price_Nodes": ";".join(f"{n}:{s:.3f}" for n, s in shares.items()),
-            "Diesel_Price_Zones": ";".join(dz),
-            "Diesel_Price_USD_per_gal_Start": diesel_start,
-            "Elec_Price_cents_per_kWh_Start": sum(elec_start[n] * s for n, s in shares.items()),
+        # Annual rows ONCE, then one discounted rollout per anti-idling variant.
+        # The scenarios are what cost real time to build; the DCF over them is
+        # cheap, so the measures ride along for a few percent more work.
+        annual = mc.main(scenarios, annual_metrics=ANNUAL_METRICS,
+                         calculate_multiyear_metrics=False)
+        variants = idling_variants(row["Sim_Key"], cell["Infra_Level"],
+                                   cell["Energy_Level"])
+        if not variants:
+            variants = [{"Anti_Idling": "none", "Dwell_Scope": "All",
+                         "Diesel_Usage__MJ": None, "Diesel_MJ_Adjusted": None}]
+        for v in variants:
+            base_mj = v.get("Diesel_Usage__MJ")
+            adj_mj = v.get("Diesel_MJ_Adjusted")
+            # A cell that burns no diesel (battery-electric) has nothing to
+            # adjust and no ratio to take.
+            if base_mj and adj_mj is not None and float(base_mj) > 0:
+                factor = float(adj_mj) / float(base_mj)
+            else:
+                factor = 1.0
+            values = _scale_diesel(annual, factor)
+            values = mc.calculate_rollout_investments(values)
+            values = mc.calculate_rollout_total_costs(values)
+            values = mc.calculate_rollout_lcotkm(values)
+            provenance = pl.DataFrame([{
+                "Sim_Key": row["Sim_Key"], "Corridor": row["Corridor"],
+                "Powertrain": row["Powertrain"], "Label": row["Label"],
+                "Battery_MWh": row.get("Battery_MWh"),
+                "Architecture": row.get("Architecture"),
+                "Layout_Fingerprint": row.get("Layout_Fingerprint"),
+                "Infra_Level": cell["Infra_Level"],
+                "Infra_Multiplier": float(cell["Infra_Multiplier"]),
+                "Energy_Level": cell["Energy_Level"],
+                # The battery-cost trajectory belongs in the cell key: without it
+                # the two share a key and every present-value aggregation sums
+                # across both, silently doubling capital.
+                "Battery_Cost_Scenario": battery_scenario,
+                # Stated, not derived: the rollout levelizes capital through the
+                # calculator's annuity rather than expensing it at purchase.
+                "Capital_Basis": "levelized",
+                "Rollout_Years": cat.METRICS_ROLLOUT_YEARS,
+                "Start_Year": cat.METRICS_START_YEAR,
+                "Discount_Rate": cat.DISCOUNT_RATE,
+                "Loco_Unit_Cost_USD_Start": float(cost_fns[list(cost_fns)[0]](cat.METRICS_START_YEAR)),
+                "Loco_Cost_Basis": ("diesel unit + ATB pack (assumption)"
+                                    if row["Powertrain"] == "hybrid" else "altrios defaults"),
+                "Grid_Regions": ";".join(regions),
+                # Where the energy was priced: grid draw share by "<region>|<zone>" node,
+                # the terminal diesel zones, and the resulting start-year prices.
+                "Elec_Price_Nodes": ";".join(f"{n}:{s:.3f}" for n, s in shares.items()),
+                "Diesel_Price_Zones": ";".join(dz),
+                "Diesel_Price_USD_per_gal_Start": diesel_start,
+                "Elec_Price_cents_per_kWh_Start": sum(elec_start[n] * s for n, s in shares.items()),
             "n_trains": int(sidecar.get("n_trains") or 0),
-        }])
-        frames.append(provenance.join(values, how="cross"))
-        logger.info("  %s | infra=%s energy=%s: %d rows in %.0f s",
+            "Anti_Idling": v["Anti_Idling"],
+            "Dwell_Scope": v["Dwell_Scope"],
+            "Diesel_MJ_Weekly_Adjusted": (float(adj_mj) if adj_mj is not None
+                                          else None),
+            }])
+            frames.append(provenance.join(values, how="cross"))
+        logger.info("  %s | infra=%s energy=%s: %d variants in %.0f s",
                     row["Sim_Key"], cell["Infra_Level"], cell["Energy_Level"],
-                    values.height, time.perf_counter() - started)
+                    len(variants), time.perf_counter() - started)
     return pl.concat(frames, how="diagonal_relaxed")
 
 

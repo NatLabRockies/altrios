@@ -1041,9 +1041,26 @@ def _calibrated_sample_count() -> int:
 _CALIBRATED_SAMPLES = _calibrated_sample_count()
 # 1x IS the corridor's calibrated volume, whatever number of samples that
 # takes; 2x and 4x are that many again, drawn as further independent weeks.
+# Demand levels for the deep dive's own sweep, in multiples of the CALIBRATED
+# volume. Restrictable with `ALTRIOS_DEMAND_LEVELS` (e.g. "1x" or "1x,2x").
+#
+# Note what 1x means: it is the volume the rest of the study runs at, and the
+# only one it runs at -- `build_layouts.py` replaces this dict outright with
+# `{"1x": ...}`, so every DoE layout and every swept cell is 1x. The 2x and 4x
+# levels exist here alone, to ask how a buildout scales with traffic, and they
+# dominate the runtime: a step costs roughly in proportion to its train count,
+# so 1x/2x/4x split the work about 1:2:4.
 DEMAND_LEVELS = {
     f"{m}x": tuple(range(m * _CALIBRATED_SAMPLES)) for m in (1, 2, 4)
 }
+_want_levels = [x.strip() for x in
+                (os.environ.get("ALTRIOS_DEMAND_LEVELS") or "").split(",") if x.strip()]
+if _want_levels:
+    _unknown = [x for x in _want_levels if x not in DEMAND_LEVELS]
+    if _unknown:
+        raise ValueError(f"unknown demand level(s) {_unknown}; "
+                         f"have {sorted(DEMAND_LEVELS)}")
+    DEMAND_LEVELS = {k: DEMAND_LEVELS[k] for k in _want_levels}
 
 # Architecture -> medium (central) capital-cost point estimates, in $M (see
 # USD_PER_MUSD). Values are 2025-USD engineering syntheses calibrated to published
@@ -1239,11 +1256,42 @@ def _split_electricity(energy, region_frac, stationary_j=0.0):
     return region_elec or {DEFAULT_CATENARY_NODE: catenary_j}
 
 
+def _all_sites_by_id():
+    """Every substation site ANY architecture can offer, keyed by id.
+
+    `_built_sub_objs` used to filter the module-level `substations` list, which
+    holds only the default 30 candidates (`c01`..`c30`). Once the candidate set
+    became architecture specific, a dc_9kv layout's ids (`c001`..`c120`, padded
+    wider because there are more of them) matched nothing in that list, so a
+    buildout with 37 bought substations was recorded as `substations_built=2,
+    candidate_substations=0` -- the two free termini and nothing else. The
+    capex was right, because the optimizer priced its own set; only the COUNT
+    columns were wrong. That mattered because `rollout_costs` prices substations
+    from `candidate_substations`, so the cell would have carried zero substation
+    capital: about $370M missing, in the direction that flatters DC.
+    """
+    sites = {str(s.id): s for s in substations}
+    for arch in N_CANDIDATES_BY_ARCH:
+        for s in substations_for(arch):
+            sites.setdefault(str(s.id), s)
+    return sites
+
+
 def _built_sub_objs(result):
     """Substation objects feeding a plan: every existing one plus those the
     optimizer selected (``result.built_substation_ids``)."""
-    ids = set(result.built_substation_ids or [])
-    return [s for s in substations if s.existing or s.id in ids]
+    ids = set(str(x) for x in (result.built_substation_ids or []))
+    sites = _all_sites_by_id()
+    out = [s for s in sites.values() if s.existing or str(s.id) in ids]
+    missing = ids - set(sites)
+    if missing:
+        raise KeyError(
+            f"built substation ids not in any architecture's candidate set: "
+            f"{sorted(missing)[:5]}... Counting them is what `substations_built` "
+            f"and `candidate_substations` report, and `rollout_costs` prices "
+            f"substations from the latter, so a silent miss understates capital."
+        )
+    return out
 
 
 def _layout_fingerprint(result) -> str:
@@ -1488,6 +1536,15 @@ def run_pipeline():
             common_opt = dict(
                 objective="min_cost", economics=econ,
                 substation_feed_distance_miles=feed_mi,
+                # ARCHITECTURE-SPECIFIC candidate sites. Without this, `run_opt`
+                # falls back to the module-level 30-candidate list, which spaces
+                # sites ~14 mi apart -- unreachable for dc_9kv, whose feed
+                # distance is 2.84 mi, so its BEL layout came back Infeasible in
+                # presolve and was recorded as `bel_status=skipped`. The fix for
+                # this landed in `build_layouts.py` (the DoE path) but not here,
+                # so the deep dive and the DoE disagreed about whether dc_9kv
+                # has a buildout at all.
+                substations=substations_for(arch),
                 **COMMON,
             )
             # Variant-2 layout (BEL) is optimized ONCE at the reference cost point:
