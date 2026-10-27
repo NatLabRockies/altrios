@@ -64,7 +64,7 @@ between tabulated years and clamping outside them.
 
 A corridor whose catenary draw should be priced where it is fed lists a boxes file in
 `applications/corridor_doe/in/corridors.csv` (`Price_Zones_Path`), for example
-`networks/Spokane_Lethbridge/spokane_lethbridge_price_zones.csv`. Each row is a lat/lon
+a corridor's price-zone file (these live with the corridor applications in `altrios-applied`, not in this package). Each row is a lat/lon
 box (null bounds are open) naming an electricity and a diesel zone; rows are tried in
 order and a substation takes the first box that contains it.
 
@@ -91,10 +91,7 @@ Note: the report's text quotes the 2035 mid case as 234 USD/kWh while its Table 
 
 ### Who prices on the zones
 
-`metric_calculator.import_energy_prices_eia` (sim_manager path), the corridor DoE
-(`rollout_costs.py`, `rollout_costs_sim_free.py`, `postprocess_antiidling.py`,
-`build_layouts.py`) and the catenary deep-dive (`energization_optimization_corridor.py`)
-all price from the zones. The deep-dive and the layout builder hand the optimizer a
-levelized electricity price per link from the link's zone, and the terminal-zone mean
-for diesel; because the optimizer's objective changes, layouts and their fingerprints
-built before this change are not reproducible from the current code.
+`metric_calculator.import_energy_prices_eia` (the sim_manager path) prices from the
+zones, as do the corridor applications in `altrios-applied`, which hand the
+energization optimizer a levelized electricity price per link from the link's zone
+and the terminal-zone mean for diesel.
