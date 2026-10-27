@@ -20,9 +20,7 @@ SAVE_INTERVAL = 1
 
 pt = alt.PowerTrace.default()
 
-hel: alt.Locomotive = alt.Locomotive.from_file(
-    alt.resources_root() / "locomotives/hybrid-electric-locomotive.yaml"
-)
+hel: alt.Locomotive = alt.Locomotive.default_hybrid_electric_loco()
 
 # instantiate battery model
 t0 = time.perf_counter()

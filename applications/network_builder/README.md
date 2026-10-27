@@ -127,3 +127,11 @@ uv run python applications/network_builder/run_corridor_sim.py --prefix <results
 which dispatches and walks a `SpeedLimitTrainSim` between the corridor
 endpoints in both directions — the fastest end-to-end proof that the network,
 buffers, and location rows all work.
+
+## Data attribution
+
+The bundled `networks/spokane_lethbridge_local.osm.xml` extract, and every
+network this tool builds, contain information from OpenStreetMap, which is
+made available under the Open Database License (ODbL): © OpenStreetMap
+contributors, https://www.openstreetmap.org/copyright. Elevations come from the
+USGS 3D Elevation Program (public domain) with OpenTopoData as a fallback.
