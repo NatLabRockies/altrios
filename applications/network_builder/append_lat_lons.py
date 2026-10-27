@@ -28,7 +28,7 @@ and length already stored on the link. That is exact too: the builder derived
 those headings from real node coordinates in the first place.
 
 Usage:
-    python append_lat_lons.py --network path/to/network.yaml [--out path.yaml]
+    python append_lat_lons.py --network path/to/network.msgpack [--out path.msgpack]
     python append_lat_lons.py --network ... --geom-cache ways.json --offline
 """
 
@@ -941,8 +941,9 @@ def _finish(args, network_dict, links, original, report: MatchReport) -> int:
         logger.info("--dry-run: not writing")
         return 0
 
+    # Same format as the input unless --out says otherwise.
     out_path = args.out or args.network.with_name(
-        f"{args.network.stem}_with_lat_lons.yaml"
+        f"{args.network.stem}_with_lat_lons{args.network.suffix}"
     )
     alt.Network.from_pydict(network_dict).to_file(str(out_path))
     logger.info("wrote %s", out_path)

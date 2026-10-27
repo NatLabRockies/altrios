@@ -31,7 +31,7 @@ Outputs land in `applications/network_builder/results/` (gitignored):
 
 | File | Contents |
 |---|---|
-| `<name>.yaml` | The ALTRIOS network (`altrios.Network.from_file` loads it) |
+| `<name>.msgpack` | The ALTRIOS network (`altrios.Network.from_file` loads it). MessagePack is the default; pass `--format yaml` (or set `output_format: yaml` in the corridor config) for human-readable YAML instead |
 | `<name>_geometry.json` | `[lon, lat]` endpoints per link, for plotting/GIS |
 | `<name>_locations.csv` | Origin/destination rows for the train planner (both directions) |
 | `<name>_plot.html` | Interactive route map |
@@ -108,7 +108,7 @@ Any subset of fields may be given; the rest keep their defaults
 ```python
 import altrios as alt
 
-network = alt.Network.from_file("results/spokane_lethbridge.yaml")
+network = alt.Network.from_file("results/spokane_lethbridge.msgpack")
 location_map = alt.import_locations("results/spokane_lethbridge_locations.csv")
 # then the standard flow: TrainSimBuilder -> make_speed_limit_train_sim
 # -> make_est_times -> run_dispatch -> walk_timed_path

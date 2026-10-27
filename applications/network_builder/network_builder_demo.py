@@ -6,7 +6,7 @@ Builds a routable ALTRIOS network (mainline + sidings) from an OSM rail extract
 and plots the resulting geometry as an interactive HTML map. This is the single
 entry point for the network-building pipeline:
 
-    OSM PBFs ─build_corridor─▶ OSM XML ─build_network─▶ ALTRIOS YAML + geometry + locations
+    OSM PBFs ─build_corridor─▶ OSM XML ─build_network─▶ ALTRIOS network (.msgpack) + geometry + locations
                                        ─plot_json─────▶ interactive HTML map
 
 Everything corridor-specific lives in the CONFIG block below — edit those values
@@ -118,9 +118,9 @@ def main(args: argparse.Namespace) -> None:
         f"Elevation     : {'fetched' if args.with_elevation else 'skipped (fast)'}"
     )
 
-    # 2. Build the ALTRIOS network YAML (+ geometry JSON + locations CSV).
+    # 2. Build the ALTRIOS network file (+ geometry JSON + locations CSV).
     #    Routing (start -> ... -> end) is derived from CONFIG.waypoints.
-    yaml_path = Path(
+    network_path = Path(
         build_network(
             str(input_xml),
             output_prefix,
@@ -136,9 +136,10 @@ def main(args: argparse.Namespace) -> None:
             destination_name=CONFIG.waypoints[-1][0],
             origin_regions=CONFIG.origin_regions,
             destination_regions=CONFIG.destination_regions,
+            output_format=args.format or CONFIG.output_format,
         )
     )
-    logger.info(f"Built network : {yaml_path}")
+    logger.info(f"Built network : {network_path}")
 
     # 3. Plot the built geometry as an interactive HTML map.
     if not args.no_plot:
@@ -191,5 +192,11 @@ if __name__ == "__main__":
         "--no-plot",
         action="store_true",
         help="Skip the interactive HTML plot step.",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("msgpack", "yaml"),
+        default=None,
+        help="Network file format (default: the config's output_format, msgpack).",
     )
     main(parser.parse_args())

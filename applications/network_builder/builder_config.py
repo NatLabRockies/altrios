@@ -28,6 +28,8 @@ class BuilderConfig:
     Attributes:
     ----------
     - `output_name`: Basename for the built network files (written under the results dir).
+    - `output_format`: Serialization of the built network: `"msgpack"` (default; compact and
+      fast to load) or `"yaml"` (human-readable). Either loads with `altrios.Network.from_file`.
     - `max_grade`: Maximum track grade (decimal, e.g. 0.04 = 4%) used to smooth elevation spikes.
     - `buffer_deg`: Buffer in degrees around the waypoint line when clipping the corridor (~0.4 deg ~ 45 km).
     - `endpoint_buffer_meters`: Length of the buffer links prepended/appended to the
@@ -51,6 +53,7 @@ class BuilderConfig:
     - `origin_regions` / `destination_regions`: (grid emissions, electricity price, liquid fuel price) region codes for the locations CSV rows of the first/last waypoint.
     """
     output_name: str = "spokane_lethbridge"
+    output_format: str = "msgpack"
     max_grade: float = 0.04
     buffer_deg: float = 0.4
     endpoint_buffer_meters: float = 3000.0

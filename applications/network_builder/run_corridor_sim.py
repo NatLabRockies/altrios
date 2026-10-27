@@ -104,14 +104,17 @@ def run_trip(network, location_map, origin, dest, args) -> dict:
 
 def main(args: argparse.Namespace) -> None:
     prefix = args.prefix.resolve()
-    yaml_path = Path(str(prefix) + ".yaml")
+    # The builder writes msgpack by default; older builds may be YAML.
+    candidates = [Path(f"{prefix}.msgpack"), Path(f"{prefix}.yaml")]
+    network_path = next((p for p in candidates if p.exists()), None)
     loc_path = Path(str(prefix) + "_locations.csv")
-    for p in (yaml_path, loc_path):
-        if not p.exists():
-            sys.exit(f"Not found: {p} (build the corridor first)")
+    if network_path is None:
+        sys.exit(f"Not found: {prefix}.msgpack or .yaml (build the corridor first)")
+    if not loc_path.exists():
+        sys.exit(f"Not found: {loc_path} (build the corridor first)")
 
-    print(f"Loading {yaml_path.name}...")
-    network = alt.Network.from_file(yaml_path)
+    print(f"Loading {network_path.name}...")
+    network = alt.Network.from_file(network_path)
     location_map = alt.import_locations(loc_path)
     origin, dest = endpoint_names(loc_path)
 
@@ -134,7 +137,7 @@ if __name__ == "__main__":
         "--prefix",
         type=Path,
         default=DEFAULT_PREFIX,
-        help="Output prefix of a built corridor, i.e. <prefix>.yaml and "
+        help="Output prefix of a built corridor, i.e. <prefix>.msgpack (or .yaml) and "
         f"<prefix>_locations.csv exist (default: {DEFAULT_PREFIX.relative_to(THIS_DIR.parent.parent)}).",
     )
     parser.add_argument(

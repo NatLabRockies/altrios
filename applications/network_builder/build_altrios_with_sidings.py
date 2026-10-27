@@ -1,14 +1,15 @@
 """
-Build an ALTRIOS network YAML from local OSM XML, including siding branches.
+Build an ALTRIOS network file from local OSM XML, including siding branches.
 
-Builds an ALTRIOS network YAML from a local OSM XML extract:
+Builds an ALTRIOS network (MessagePack by default; pass ``--format yaml`` for
+YAML) from a local OSM XML extract:
   1. Finding the mainline shortest-path as before.
   2. Detecting siding ways (service=siding, etc.) that share nodes with the mainline.
   3. Emitting siding links with proper idx_next_alt / idx_prev_alt topology
      so the ALTRIOS dispatcher can route trains through sidings for meet/pass.
 
 Usage:
-    python build_altrios_with_sidings.py [--fast]
+    python build_altrios_with_sidings.py [--fast] [--format msgpack|yaml]
 """
 
 import xml.etree.ElementTree as ET
@@ -57,6 +58,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 R_EARTH = 6371000  # metres
+
+# Serialization format of the built network. MessagePack is the default: it is
+# several times smaller than YAML and loads far faster. YAML remains available
+# for hand inspection. Both are read by ``altrios.Network.from_file``.
+NETWORK_FORMATS = ("msgpack", "yaml")
+DEFAULT_NETWORK_FORMAT = "msgpack"
 
 # Maximum allowed grade (as decimal, e.g., 0.04 = 4%)
 MAX_GRADE = 0.04
@@ -504,6 +511,33 @@ def validate_siding_wiring(links):
     return violations
 
 
+def _write_network(network_config, output_prefix, output_format):
+    """Write ``network_config`` (header dict + link list) as ``{output_prefix}.{format}``.
+
+    MessagePack must be produced by altrios itself: the Rust side serializes with
+    ``rmp-serde``, whose layout differs from what the ``msgpack`` Python package
+    writes. Round-tripping through ``altrios.Network`` guarantees the file is
+    exactly what ``Network.from_file`` expects. Initialization is skipped so the
+    file holds the builder's output verbatim, as the YAML path always did;
+    validation happens on load, as before.
+
+    Returns the written path.
+    """
+    if output_format not in NETWORK_FORMATS:
+        raise ValueError(
+            f"output_format must be one of {NETWORK_FORMATS}, got {output_format!r}"
+        )
+    path = f"{output_prefix}.{output_format}"
+    if output_format == "yaml":
+        with open(path, "w") as f:
+            yaml.dump(network_config, f)
+    else:
+        import altrios as alt
+
+        alt.Network.from_pydict(network_config, skip_init=True).to_file(path)
+    return path
+
+
 def export_path_with_sidings(
     G,
     mainline_nodes,
@@ -518,9 +552,13 @@ def export_path_with_sidings(
     destination_name="Lethbridge",
     origin_regions=("WECC", "WA", "WA"),
     destination_regions=("WECC", "ab", "ab"),
+    output_format=DEFAULT_NETWORK_FORMAT,
 ):
-    """Build an ALTRIOS network YAML that includes the mainline plus
+    """Build an ALTRIOS network file that includes the mainline plus
     siding branches with proper idx_next_alt / idx_prev_alt wiring.
+
+    ``output_format`` selects the network serialization (``"msgpack"``, the
+    default, or ``"yaml"``); see ``_write_network``. Returns the written path.
 
     ``origin_name`` / ``destination_name`` label the corridor endpoints in the
     locations CSV; ``*_regions`` are their (grid emissions, electricity price,
@@ -648,7 +686,7 @@ def export_path_with_sidings(
             "idx_next_alt": 0,
             "idx_prev": 0,
             "idx_prev_alt": 0,
-            "osm_id": 0,
+            "osm_id": "0",
             "length_meters": 0.0,
             "elevs": [],
             "headings": [],
@@ -681,7 +719,7 @@ def export_path_with_sidings(
             "idx_flip": rev_idx,
             "osm_tags": osm_tags,
             "length_meters": length,
-            "osm_id": G[u][v].get("osm_way_id", "siding"),
+            "osm_id": str(G[u][v].get("osm_way_id", "siding")),
             "idx_next": 0,
             "idx_next_alt": 0,
             "idx_prev": 0,
@@ -704,7 +742,7 @@ def export_path_with_sidings(
             "idx_flip": fwd_idx,
             "osm_tags": osm_tags,
             "length_meters": length,
-            "osm_id": G[u][v].get("osm_way_id", "siding"),
+            "osm_id": str(G[u][v].get("osm_way_id", "siding")),
             "idx_next": 0,
             "idx_next_alt": 0,
             "idx_prev": 0,
@@ -1079,7 +1117,7 @@ def export_path_with_sidings(
     for l in links:
         l.pop("osm_tags", None)
 
-    # ── Write YAML ──
+    # ── Write network ──
     network_config = [
         {
             "max_grade": 1000.0,
@@ -1091,13 +1129,11 @@ def export_path_with_sidings(
     ]
 
     os.makedirs(os.path.dirname(output_prefix) or ".", exist_ok=True)
-    yaml_path = output_prefix + ".yaml"
     geo_path = output_prefix + "_geometry.json"
     loc_path = output_prefix + "_locations.csv"
 
-    logger.info(f"Saving {yaml_path}  ({len(links)} links)")
-    with open(yaml_path, "w") as f:
-        yaml.dump(network_config, f)
+    network_path = _write_network(network_config, output_prefix, output_format)
+    logger.info(f"Saved {network_path}  ({len(links)} links)")
 
     logger.info(f"Saving {geo_path}")
     with open(geo_path, "w") as f:
@@ -1132,6 +1168,7 @@ def export_path_with_sidings(
         f"Siding links: {n_siding_links}, "
         f"Buffer links: 4, Total: {len(links)}"
     )
+    return network_path
 
 
 # ── build entry point ────────────────────────────────────────────────────────
@@ -1152,17 +1189,19 @@ def build_network(
     destination_name="Lethbridge",
     origin_regions=("WECC", "WA", "WA"),
     destination_regions=("WECC", "ab", "ab"),
+    output_format=DEFAULT_NETWORK_FORMAT,
 ):
     """Build an ALTRIOS network (mainline + sidings) from a local OSM XML extract.
 
     Parses ``input_xml`` into a rail graph, finds the shortest mainline path from
     ``start_pt`` through ``waypoints`` to ``end_pt``, detects sidings, and writes
-    ``{output_prefix}.yaml``, ``{output_prefix}_geometry.json`` and
-    ``{output_prefix}_locations.csv``. Set ``fast=True`` to skip the elevation
-    fetch (no network access required). ``max_grade`` caps the track grade
-    (decimal, e.g. 0.04 = 4%) used to smooth elevation spikes.
+    ``{output_prefix}.msgpack`` (or ``.yaml`` with ``output_format="yaml"``),
+    ``{output_prefix}_geometry.json`` and ``{output_prefix}_locations.csv``. Set
+    ``fast=True`` to skip the elevation fetch (no network access required).
+    ``max_grade`` caps the track grade (decimal, e.g. 0.04 = 4%) used to smooth
+    elevation spikes.
 
-    Returns the path to the written ``.yaml`` file.
+    Returns the path to the written network file.
     """
     G = parse_osm_xml_to_graph(input_xml)
 
@@ -1205,7 +1244,7 @@ def build_network(
     sidings = _identify_sidings(G, full_path)
 
     # Export
-    export_path_with_sidings(
+    network_path = export_path_with_sidings(
         G,
         full_path,
         sidings,
@@ -1219,8 +1258,9 @@ def build_network(
         destination_name=destination_name,
         origin_regions=origin_regions,
         destination_regions=destination_regions,
+        output_format=output_format,
     )
-    return output_prefix + ".yaml"
+    return network_path
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
@@ -1231,6 +1271,12 @@ def main():
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fast", action="store_true", help="Skip elevation fetch")
+    parser.add_argument(
+        "--format",
+        choices=NETWORK_FORMATS,
+        default=DEFAULT_NETWORK_FORMAT,
+        help=f"Network file format (default: {DEFAULT_NETWORK_FORMAT})",
+    )
     args = parser.parse_args()
 
     here = os.path.dirname(os.path.abspath(__file__))  # applications/network_builder
@@ -1249,6 +1295,7 @@ def main():
         waypoints=cfg.route_waypoints,
         fast=args.fast,
         max_grade=cfg.max_grade,
+        output_format=args.format,
     )
 
 
