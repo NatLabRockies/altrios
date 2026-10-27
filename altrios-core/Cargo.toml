@@ -18,7 +18,7 @@ serde_yaml = { version = "0.8.23", optional = true }
 serde_json = { version = "1.0", optional = true }
 toml = { version = "0.8.12", optional = true }
 include_dir = { version = "0.7.3", optional = true }
-uom = { workspace = true, features = ["use_serde"] }
+uom = { workspace = true, features = ["serde"] }
 paste = "1.0.7"
 easy-ext = "1.0.0"
 altrios-proc-macros = { workspace = true }

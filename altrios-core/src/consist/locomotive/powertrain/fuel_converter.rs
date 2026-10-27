@@ -40,7 +40,7 @@ pub struct FuelConverter {
     /// and temperature. When interpolating, this returns fraction of normal
     /// peak power, e.g. a value of 1 means no derating and a value of 0 means
     /// the engine is completely disabled.
-    pub elev_and_temp_derate: Option<Interp2DOwned<f64, strategy::Linear>>,
+    pub elev_and_temp_derate: Option<Interp2D<f64, strategy::Linear>>,
     /// time step interval between saves. 1 is a good option. If None, no saving occurs.
     pub save_interval: Option<usize>,
     /// Custom vector of [Self::state]
