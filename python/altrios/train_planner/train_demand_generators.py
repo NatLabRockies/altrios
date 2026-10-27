@@ -77,7 +77,7 @@ def generate_return_demand_intermodal(demand_subset: Union[pl.LazyFrame, pl.Data
             pl.concat_str(pl.min_horizontal("Origin", "Destination"), pl.lit("_"), pl.max_horizontal("Origin", "Destination")).alias("OD")
         )
         .with_columns(
-            pl.selectors.starts_with("Number_of").range().over("OD").name.suffix("_Return")
+            (pl.selectors.starts_with("Number_of").max() - pl.selectors.starts_with("Number_of").min()).over("OD").name.suffix("_Return")
         )
         .sort([pl.col("OD"), pl.selectors.starts_with("Number_of")], descending=True)
         .group_by("OD").first() # Max demand direction per corridor

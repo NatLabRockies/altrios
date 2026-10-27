@@ -77,14 +77,6 @@ def cumutrapz(x, y):
     return z
 
 
-def range_minmax(self) -> pl.Expr:
-    return self.max() - self.min()  # type: ignore[no-any-return]
-
-
-pl.Expr.range = range_minmax  # type: ignore[attr-defined]
-del range_minmax
-
-
 def cumPctWithinGroup(
     df: Union[pl.DataFrame, pl.LazyFrame], grouping_vars: List[str]
 ) -> Union[pl.DataFrame, pl.LazyFrame]:
@@ -100,7 +92,10 @@ def allocateIntegerEvenly(
     df: Union[pl.DataFrame, pl.LazyFrame], target: str, grouping_vars: List[str]
 ) -> Union[pl.DataFrame, pl.LazyFrame]:
     return (
-        df.sort(grouping_vars)
+        # Stable sort: the rounding remainder below goes to whichever rows come
+        # first within a group, so tie order must be the input order, not the
+        # engine's.
+        df.sort(grouping_vars, maintain_order=True)
         .pipe(cumPctWithinGroup, grouping_vars=grouping_vars)
         .with_columns(
             pl.col(target)
@@ -124,7 +119,7 @@ def allocateItems(
     df: Union[pl.DataFrame, pl.LazyFrame], grouping_vars: list[str], count_target: str
 ) -> Union[pl.DataFrame, pl.LazyFrame]:
     return (
-        df.sort(grouping_vars + [count_target], descending=True)
+        df.sort(grouping_vars + [count_target], descending=True, maintain_order=True)
         .with_columns(
             pl.col(count_target)
             .sum()
