@@ -465,23 +465,44 @@ def _cell_energy_from_density(
 ) -> Dict[Hashable, float]:
     """Per-cell single-traversal energy (kWh) from a per-link kWh/mi density.
 
-    ``energy[cell] = mean(density[link] over the cell's pieces) * cell corridor
-    length (miles)``. Parallel tracks clustered into one corridor cell share the
-    same location, so their per-mile densities average to the corridor rate and
-    the corridor is traversed once. Returns ``{}`` when no density is supplied.
+    ``energy[cell] = mean(density[link] over the cell's TRAVELLED pieces) *
+    cell corridor length (miles)``. Parallel tracks clustered into one corridor
+    cell share the same location and the corridor is traversed once, so the rate
+    that belongs to the cell is the rate of a track carrying traffic -- NOT the
+    mean over every piece, which mixes in untravelled tracks at density 0 and
+    reports a fraction of the real rate. Pieces whose density is exactly 0 are
+    therefore excluded from the average; a cell where no piece carries traffic
+    keeps the all-piece mean. Returns ``{}`` when no density is supplied.
     """
     if not density_by_link:
         return {}
+    # Average over the pieces whose link the fleet actually USED. A cell groups
+    # parallel tracks at one location, and an untravelled track carries density
+    # 0, so averaging over every piece reported a fraction of the travelled
+    # track's rate -- on dc_9kv battery-electric, a median of 0.336 across 99.1%
+    # of cells. A train traverses the corridor on ONE track; the rate that
+    # belongs to the cell is that track's.
     sums: Dict[Hashable, float] = {c: 0.0 for c in cell_ids}
     counts: Dict[Hashable, int] = {c: 0 for c in cell_ids}
+    all_sums: Dict[Hashable, float] = {c: 0.0 for c in cell_ids}
+    all_counts: Dict[Hashable, int] = {c: 0 for c in cell_ids}
     for p in piece_ids:
         c = piece_cell[p]
-        sums[c] += float(density_by_link.get(piece_link[p], 0.0))
-        counts[c] += 1
-    return {
-        c: (sums[c] / counts[c] if counts[c] else 0.0) * cell_len_miles.get(c, 0.0)
-        for c in cell_ids
-    }
+        d = float(density_by_link.get(piece_link[p], 0.0))
+        all_sums[c] += d
+        all_counts[c] += 1
+        if d != 0.0:
+            sums[c] += d
+            counts[c] += 1
+
+    def _rate(c: Hashable) -> float:
+        if counts[c]:
+            return sums[c] / counts[c]
+        # No piece in this cell carries traffic: fall back to the all-piece mean
+        # (zero, or whatever proxy the caller supplied) rather than divide by 0.
+        return all_sums[c] / all_counts[c] if all_counts[c] else 0.0
+
+    return {c: _rate(c) * cell_len_miles.get(c, 0.0) for c in cell_ids}
 
 
 
