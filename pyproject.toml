@@ -24,7 +24,7 @@ authors = [
 description = "Tool for modeling and optimization of advanced locomotive powertrains for freight rail decarbonization."
 readme = "README.md"
 license = { file = "LICENSE.md" }
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: BSD License",
@@ -44,11 +44,11 @@ dependencies = [
     "plotly~=6.0",
     "typing_extensions",
     "pyarrow >= 16.0",
-    "polars==1.39.3",
+    "polars==2.1.0",
     "PyYAML==6.0.2",
     "simpy",
     "progressbar2",
-    "msgpack==1.1.0",
+    "msgpack>=1.1.0",
     "ipykernel~=6.29",
     "executing~=2.0",
     "pip",

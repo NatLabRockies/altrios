@@ -91,7 +91,7 @@ def cumPctWithinGroup(
     return df.with_columns(
         (
             (pl.int_range(pl.len(), dtype=pl.UInt32).over(grouping_vars).add(1))
-            / pl.count().over(grouping_vars)
+            / pl.len().over(grouping_vars)
         ).alias("Percent_Within_Group_Cumulative")
     )
 

@@ -264,7 +264,7 @@ def dispatch(
                 pl.col("Status").is_in(["Servicing", "Refuel_Queue"]),
             )
             .group_by(["Locomotive_Type"])
-            .agg(pl.count().alias("count"))
+            .agg(pl.len().alias("count"))
         )
 
         # Add details about waiting locomotives to the error message

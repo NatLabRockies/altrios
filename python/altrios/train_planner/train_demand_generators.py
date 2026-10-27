@@ -251,14 +251,14 @@ def generate_demand_trains(
     demand: Tabulated demand for each demand pair in terms of number of cars and number of trains
     """
     cars_per_train_min = (pl.from_dict(config.min_cars_per_train)
-        .melt(variable_name="Train_Type", value_name="Cars_Per_Train_Min")
+        .unpivot(variable_name="Train_Type", value_name="Cars_Per_Train_Min")
     )
     cars_per_train_min_default = (cars_per_train_min
         .filter(pl.col("Train_Type") == pl.lit("Default"))
         .select("Cars_Per_Train_Min").item()
     )
     cars_per_train_target = (pl.from_dict(config.target_cars_per_train)
-        .melt(variable_name="Train_Type", value_name="Cars_Per_Train_Target")
+        .unpivot(variable_name="Train_Type", value_name="Cars_Per_Train_Target")
     )
     cars_per_train_target_default = (cars_per_train_target
         .filter(pl.col("Train_Type") == pl.lit("Default"))

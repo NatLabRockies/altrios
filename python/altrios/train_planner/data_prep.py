@@ -897,7 +897,7 @@ def appendTonsAndHP(
         [
             (
                 pl.DataFrame(this_dict)
-                .melt(variable_name="Train_Type", value_name="HP_Required_Per_Ton")
+                .unpivot(variable_name="Train_Type", value_name="HP_Required_Per_Ton")
                 .with_columns(pl.lit(this_item).alias("O_D"))
                 .with_columns(
                     pl.col("O_D").str.split("_").list.first().alias("Origin"),

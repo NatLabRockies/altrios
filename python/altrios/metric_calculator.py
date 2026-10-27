@@ -388,8 +388,8 @@ def calculate_rollout_lcotkm(values: MetricType) -> MetricType:
         .rename({"Value": "Mt-mi"})
     )
     timeseries = (
-        cost_timeseries.join(tkm_timeseries, on="Year", how="outer", coalesce=True)
-        .join(tmi_timeseries, on="Year", how="outer", coalesce=True)
+        cost_timeseries.join(tkm_timeseries, on="Year", how="full", coalesce=True)
+        .join(tmi_timeseries, on="Year", how="full", coalesce=True)
     )
     timeseries = (
         timeseries.with_columns(
@@ -679,9 +679,9 @@ def calculate_electricity_use(info: ScenarioInfo, units: str) -> MetricType:
                 .alias(units)
             )
             .with_columns(pl.lit("Electricity_Usage").alias("Metric"))
-            .melt(
-                id_vars=["Metric", "Node"],
-                value_vars=units,
+            .unpivot(
+                index=["Metric", "Node"],
+                on=units,
                 variable_name="Units",
                 value_name="Value",
             )
@@ -806,14 +806,14 @@ def calculate_freight_moved(info: ScenarioInfo, units: str) -> MetricType:
                 how="diagonal_relaxed",
             )
             .with_row_index("idx")
-            .melt(id_vars="idx", value_name="cars", variable_name="Subset")
+            .unpivot(index="idx", value_name="cars", variable_name="Subset")
             .filter(pl.col("cars").is_not_null())
             .join(kilometers, how="left", on="idx")
             .drop("idx")
             .group_by("Subset")
             .agg(pl.col("*").sum())
             .sort("Subset")
-            .melt(id_vars="Subset", variable_name="Units", value_name="Value")
+            .unpivot(index="Subset", variable_name="Units", value_name="Value")
             .with_columns(
                 pl.lit(info.scenario_year).alias("Year"),
                 pl.lit("Freight_Moved").alias("Metric"),
@@ -1034,7 +1034,7 @@ def calculate_locomotive_counts(info: ScenarioInfo, _) -> MetricType:
                     "Pct_Locomotives"
                 )
             )
-            .melt(id_vars="Locomotive_Type", variable_name="Metric", value_name="Value")
+            .unpivot(index="Locomotive_Type", variable_name="Metric", value_name="Value")
             .with_columns(
                 pl.when(pl.col("Metric") == "Unit_Cost")
                 .then(pl.lit("USD"))
@@ -1089,7 +1089,7 @@ def calculate_refueler_counts(info: ScenarioInfo, _) -> MetricType:
             pl.col("Port_Count").sum().alias("Count_Refuelers"),
             pl.col("Lifespan_Years").mean().alias("Lifespan"),
         )
-        .melt(id_vars="Refueler_Type", variable_name="Metric", value_name="Value")
+        .unpivot(index="Refueler_Type", variable_name="Metric", value_name="Value")
         .with_columns(
             pl.when(pl.col("Metric") == "Unit_Cost")
             .then(pl.lit("USD"))
@@ -1129,7 +1129,7 @@ def calculate_infrastructure_counts(info: ScenarioInfo, _) -> MetricType:
             pl.len().alias("Count_Infrastructure"),
             pl.col("Lifespan_Years").mean().alias("Lifespan"),
         )
-        .melt(id_vars="Infrastructure_Type", variable_name="Metric", value_name="Value")
+        .unpivot(index="Infrastructure_Type", variable_name="Metric", value_name="Value")
         .with_columns(
             pl.when(pl.col("Metric") == "Unit_Cost")
             .then(pl.lit("USD"))
