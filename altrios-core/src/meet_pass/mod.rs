@@ -13,8 +13,6 @@
 //! --release` and the Python extension use. Run `cargo test` (debug) to exercise it.
 
 mod disp_imports;
-#[macro_use]
-pub mod counters;
 pub mod disp_structs;
 pub mod dispatch;
 pub mod est_times;

@@ -267,7 +267,6 @@ impl TrainDisp {
         train_idx_moved: TrainIdx,
         link_idxs_blocking: &[LinkIdx],
     ) -> bool {
-        dcount!(PRECHECK_TESTED);
         let affected = link_idxs_blocking
             .iter()
             .any(|link_idx| self.links_on_path.contains(link_idx))
@@ -275,7 +274,6 @@ impl TrainDisp {
                 .iter()
                 .any(|div_node| div_node.train_idx == train_idx_moved);
         if !affected {
-            dcount!(PRECHECK_SKIPPED);
         }
         affected
     }
@@ -288,11 +286,6 @@ impl TrainDisp {
         is_local: bool,
         links_blocked: &[TrainIdx],
     ) -> anyhow::Result<FreePathStatus> {
-        dcount!(UPDATE_CALLS);
-        // Captured at entry because the search mutates disp_node_idx_free as it runs.
-        #[cfg(feature = "dispatch-counters")]
-        let undeparted = self.disp_node_idx_free.is_none() as u64;
-        dcount!(UPDATE_CALLS_UNDEPARTED, undeparted);
         if self.disp_path.len() <= self.disp_node_idx_free.idx() {
             bail!(
                 "Update free path cannot be called on train {} after it has finished its trip!",
@@ -313,7 +306,6 @@ impl TrainDisp {
 
         // Walk entire dispatch path, adjusting free path when necessary
         while idx_split < self.disp_path.len() {
-            dcount!(WALK_ITERS);
             let (idx_sentinel, div_idx_sentinel) =
                 calc_idx_sentinels(div_idx_split, train_idx_moved, &self.div_nodes);
 
@@ -381,8 +373,6 @@ impl TrainDisp {
             let idx_split_save = idx_split;
             // Search for a new path
             loop {
-                dcount!(SEARCH_ITERS);
-                dcount!(SEARCH_ITERS_UNDEPARTED, undeparted);
                 let idx_join_new = idx_split + self.disp_path_new.len();
                 // Current disp_node and est_time_node when searching
                 let disp_node_curr = if let Some(disp_node_curr) = self.disp_path_new.last() {
@@ -505,9 +495,6 @@ impl TrainDisp {
                             assert!(self.disp_path_new.is_empty());
                             assert!(self.div_nodes_new.len() == 1);
                             assert!(idx_join_new == idx_split);
-
-                            dcount!(BLOCKED_RETURNS);
-                            dcount!(BLOCKED_UNDEPARTED, undeparted);
                             self.disp_node_idx_free = self.disp_node_idx_fixed;
                             self.reset_blocking();
                             return Ok(FreePathStatus::Blocked);
@@ -702,7 +689,6 @@ impl TrainDisp {
 
         // Adjust saved disp node idx values
         if idx_join_base != idx_join_new {
-            dcount!(DIV_SUFFIX_ELEMS, self.div_nodes.len() - div_idx_join_base);
             for div_node in &mut self.div_nodes[div_idx_join_base..] {
                 div_node.disp_node_idx = (div_node.disp_node_idx.idx() + idx_join_new
                     - idx_join_base)
@@ -712,7 +698,6 @@ impl TrainDisp {
         }
 
         // Splice in new div nodes
-        dcount!(DIV_SPLICE_ELEMS, self.div_nodes.len() - div_idx_join_base);
         self.div_nodes.splice(
             div_idx_split..div_idx_join_base,
             self.div_nodes_new.drain(1..),
@@ -739,7 +724,6 @@ impl TrainDisp {
         idx_join_base: usize,
         offset_change: si::Length,
     ) {
-        dcount!(REPLAN_HELPERS);
         self.reset_blocking();
 
         // Remove old path from est_time_statuses and links_on_path
@@ -759,7 +743,6 @@ impl TrainDisp {
 
         // Update offset values
         if !utils::almost_eq_uom(&offset_change, &si::Length::ZERO, None) {
-            dcount!(OFFSET_SUFFIX_ELEMS, self.disp_path.len() - idx_join_base);
             self.disp_path[idx_join_base..]
                 .iter_mut()
                 .for_each(|x| x.offset += offset_change);
