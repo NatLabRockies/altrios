@@ -21,6 +21,7 @@ jobs:
           - macos
           - windows
         python-version:
+          - "10"
           - "11"
           - "12"
         include:
@@ -51,7 +52,7 @@ jobs:
         run: pip install -U maturin wheel twine cibuildwheel
 
       - name: build sdist
-        if: matrix.os == 'ubuntu' && matrix.python-version == '11'
+        if: matrix.os == 'ubuntu' && matrix.python-version == '10'
         run: |
           pip install -U maturin
           maturin build --sdist --out dist/

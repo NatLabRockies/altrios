@@ -24,7 +24,7 @@ authors = [
 description = "Tool for modeling and optimization of advanced locomotive powertrains for freight rail decarbonization."
 readme = "README.md"
 license = { file = "LICENSE.md" }
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: BSD License",
@@ -44,7 +44,9 @@ dependencies = [
     "plotly~=6.0",
     "typing_extensions",
     "pyarrow >= 16.0",
-    "polars==2.1.0",
+    # The library uses only APIs common to polars 1.x and 2.x; the resolver picks
+    # the newest the interpreter supports (2.x needs Python 3.11 or newer).
+    "polars>=1.44.2,<3",
     "PyYAML==6.0.2",
     "simpy",
     "progressbar2",

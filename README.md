@@ -2,7 +2,7 @@
 
 ![Altrios Logo](https://raw.githubusercontent.com/NatLabRockies/altrios/main/.github/images/ALTRIOS-logo-web.png)
 
-[![homepage](https://img.shields.io/badge/homepage-altrios-blue)](https://www.nlr.gov/transportation/altrios.html) [![rust-tests](https://github.com/NatLabRockies/altrios/actions/workflows/rust-tests.yaml/badge.svg)](https://github.com/NatLabRockies/altrios/actions/workflows/rust-tests.yaml) [![py-tests](https://github.com/NatLabRockies/altrios/actions/workflows/py-tests.yaml/badge.svg)](https://github.com/NatLabRockies/altrios/actions/workflows/py-tests.yaml) [![wheels](https://github.com/NatLabRockies/altrios/actions/workflows/wheels.yaml/badge.svg)](https://github.com/NatLabRockies/altrios/actions/workflows/wheels.yaml?event=release) [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)](https://pypi.org/project/altrios/) [![Documentation](https://img.shields.io/badge/doc-mdBook-blue.svg)](https://natlabrockies.github.io/altrios/) [![GitHub](https://img.shields.io/badge/GitHub-altrios-blue.svg)](https://github.com/NatLabRockies/altrios)
+[![homepage](https://img.shields.io/badge/homepage-altrios-blue)](https://www.nlr.gov/transportation/altrios.html) [![rust-tests](https://github.com/NatLabRockies/altrios/actions/workflows/rust-tests.yaml/badge.svg)](https://github.com/NatLabRockies/altrios/actions/workflows/rust-tests.yaml) [![py-tests](https://github.com/NatLabRockies/altrios/actions/workflows/py-tests.yaml/badge.svg)](https://github.com/NatLabRockies/altrios/actions/workflows/py-tests.yaml) [![wheels](https://github.com/NatLabRockies/altrios/actions/workflows/wheels.yaml/badge.svg)](https://github.com/NatLabRockies/altrios/actions/workflows/wheels.yaml?event=release) [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://pypi.org/project/altrios/) [![Documentation](https://img.shields.io/badge/doc-mdBook-blue.svg)](https://natlabrockies.github.io/altrios/) [![GitHub](https://img.shields.io/badge/GitHub-altrios-blue.svg)](https://github.com/NatLabRockies/altrios)
 
 
 ![Model Framework Schematic](https://raw.githubusercontent.com/NatLabRockies/altrios/main/.github/images/ALTRIOS_schematic.png)
@@ -20,7 +20,7 @@ If you are an ALTRIOS developer, see [Developer Documentation](https://NatLabRoc
 1. Python installation options:
    - Option 1 -- Python: https://www.python.org/downloads/. We recommend Python 3.12. Be sure to check the `Add to PATH` option during installation.
    - Option 2 -- Anaconda: we recommend https://docs.conda.io/en/latest/miniconda.html.
-1. Setup a python environment. ALTRIOS requires Python 3.11 or newer, and we recommend 3.12. Create a python environment for ALTRIOS with either of two methods:
+1. Setup a python environment. ALTRIOS requires Python 3.10 or newer, and we recommend 3.12. Create a python environment for ALTRIOS with either of two methods:
    - Option 1 -- [Python Venv](https://docs.python.org/3/library/venv.html)
      1. Navigate to the ALTRIOS folder you just cloned or any folder you'd like for using ALTRIOS. Remember the folder you use!
      1. Assuming you have Python 3.12 installed, run 
