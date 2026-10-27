@@ -64,6 +64,12 @@ homepage = "https://www.nlr.gov/transportation/altrios"
 source = "https://github.com/NatLabRockies/altrios"
 
 [project.optional-dependencies]
+# Deps for applications/network_builder (OSM -> ALTRIOS network pipeline)
+networkbuilder = [
+    "shapely>=2.0",
+    "networkx>=3.0",
+    "requests",
+]
 dev = [
     "pytest~=8.3",
     "maturin~=1.8",
@@ -72,6 +78,8 @@ dev = [
     "pylsp-mypy~=0.7.0",
     "memory_profiler~=0.61.0",
     "mypy>=1.15.0",
+    # Network builder workflow deps
+    "altrios[networkbuilder]",
 ]
 [dependency-groups]
 dev = [
