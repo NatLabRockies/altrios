@@ -100,9 +100,9 @@ speed_limit_train_sims.set_save_interval(100)
 sims, refuel_sessions = alt.run_speed_limit_train_sims(
     speed_limit_train_sims=speed_limit_train_sims,
     network=network,
-    train_consist_plan_py=consist_plan_out,
-    loco_pool_py=loco_pool,
-    refuel_facilities_py=refuel_facilities,
+    train_consist_plan=consist_plan_out,
+    loco_pool=loco_pool,
+    refuelers=refuel_facilities,
     timed_paths=[alt.TimedLinkPath.from_pydict(tp) for tp in timed_paths],
 )
 t1_train_sims = time.perf_counter()
@@ -120,9 +120,9 @@ speed_limit_train_sims.set_save_interval(None)
 summary_sims, summary_refuel_sessions = alt.run_speed_limit_train_sims(
     speed_limit_train_sims=speed_limit_train_sims,
     network=network,
-    train_consist_plan_py=consist_plan_out,
-    loco_pool_py=loco_pool,
-    refuel_facilities_py=refuel_facilities,
+    train_consist_plan=consist_plan_out,
+    loco_pool=loco_pool,
+    refuelers=refuel_facilities,
     timed_paths=[alt.TimedLinkPath.from_pydict(tp) for tp in timed_paths],
 )
 t1_summary_sims = time.perf_counter()
