@@ -128,7 +128,7 @@ def dispatch(
                 pl.col("Node") == origin,
             )
             .group_by(["Locomotive_Type"])
-            .agg(pl.len())
+            .agg(pl.len().alias("count"))
         )
 
         # If no locomotives are waiting at the origin, show where all locomotives are located
@@ -138,7 +138,7 @@ def dispatch(
                 + f"""\nNo locomotives are currently located there. Instead, they are at:"""
             )
             # Get counts of locomotives at each node
-            locations = loco_pool.group_by("Node").agg(pl.len())
+            locations = loco_pool.group_by("Node").agg(pl.len().alias("count"))
             for row in locations.iter_rows(named=True):
                 message = (
                     message
@@ -393,6 +393,7 @@ def run_train_planner(
                 demand_returns=pl.DataFrame(),
                 demand_rebalancing=pl.DataFrame(),
                 rail_vehicles=rail_vehicles,
+                freight_type_to_car_type=freight_type_to_car_type,
                 config=config,
             )
             # Create a simple dispatch schedule with one train per day
@@ -521,6 +522,8 @@ def run_train_planner(
                     .agg(pl.col("Locomotive_ID").unique().alias("Locomotive_IDs"),
                          pl.col("Locomotive_Type").cast(pl.Utf8).alias("Locomotive_Types"))
                 .with_columns(pl.sum_horizontal("Cars_Loaded", "Cars_Empty").alias("Number_of_Cars"))
+                # group_by order is undefined; the dispatch loop numbers trains in row order
+                .sort("Hour", "Train_ID")
             )            
 
     # Create refuelers if not provided

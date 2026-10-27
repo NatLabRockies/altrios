@@ -42,8 +42,12 @@ class TrainPlannerConfig:
     - `loco_type_shares`: Optional `Dict` mapping each `Locomotive_Type` in `loco_info` to its target
       share (e.g. `{"BEL": 0.5, "Diesel_Large": 0.5}`) of the auto-built locomotive pool. Requires
       exactly 2 locomotive types in `loco_info`; consumed by `data_prep.build_locopool`.
+    - `dispatch_shuffle_seed`: Seed for the random ordering of trains within each origin-destination
+      pair in `schedulers.dispatch_uniform_demand_uniform_departure`. The default makes a run
+      reproducible; set `None` for a different order on every run.
     """
     simulation_days: int = 21
+    dispatch_shuffle_seed: Optional[int] = 0
     single_train_mode: bool = False
     min_cars_per_train: Dict = field(default_factory = lambda: {
         "Default": 60

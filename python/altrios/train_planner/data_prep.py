@@ -906,7 +906,7 @@ def appendTonsAndHP(
             )
             for this_item, this_dict in config.hp_required_per_ton.items()
         ],
-        how="horizontal_relaxed",
+        how="vertical",
     )
 
     def get_kg_empty(veh: alt.RailVehicle):

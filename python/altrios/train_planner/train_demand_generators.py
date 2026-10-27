@@ -210,8 +210,8 @@ def generate_manifest_rebalancing_demand(
     origin_volume = manifest_demand.group_by("Origin").agg(pl.col("Manifest").sum())
     destination_volume = manifest_demand.group_by("Destination").agg(pl.col("Manifest").sum().alias("Manifest_Reverse"))
     origin_manifest_demand = (pl.DataFrame({"Origin": node_list})
-        .join(origin_volume, left_on="Origin", right_on="Origin", how="left")
-        .join(destination_volume, left_on="Origin", right_on="Destination", how="left")
+        .join(origin_volume, left_on="Origin", right_on="Origin", how="left", maintain_order="left")
+        .join(destination_volume, left_on="Origin", right_on="Destination", how="left", maintain_order="left")
         .with_columns(
             (pl.col("Manifest_Reverse") * config.manifest_empty_return_ratio).floor().cast(pl.UInt32).alias("Manifest_Empty"))
         .with_columns(
@@ -352,5 +352,7 @@ def generate_demand_trains(
             pl.lit(config.simulation_days).alias("Number_of_Days")
         )
         .drop("Cars_Per_Train_Target_Loaded", "Cars_Per_Train_Target_Empty", "Cars_Per_Train_Min_Empty", "Cars_Per_Train_Min_Loaded")
+        # group_by order is undefined; single_train_mode assigns dispatch hours by row
+        .sort("Origin", "Destination", "Train_Type")
     )
     return demand
