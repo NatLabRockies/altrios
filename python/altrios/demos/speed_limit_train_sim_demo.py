@@ -147,7 +147,7 @@ tsb_sans_buffers = alt.TrainSimBuilder(
 # Load the network and construct the timed link path through the network.
 print("Loading `Network`")
 network = alt.Network.from_file(
-    alt.resources_root() / "networks/Taconite-NoBalloon.msgpack"
+    alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
 )
 
 location_map = alt.import_locations(

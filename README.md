@@ -1,6 +1,4 @@
-# ALTRIOS Applied
-
-[This repo](https://github.com/NREL/altrios-applied) is setup for applying ALTRIOS to projects in [./applications/](./applications/).
+# ALTRIOS
 
 ![Altrios Logo](https://raw.githubusercontent.com/NatLabRockies/altrios/main/.github/images/ALTRIOS-logo-web.png)
 

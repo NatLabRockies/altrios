@@ -1,5 +1,0 @@
-Location ID,Link Index,Offset (m),Is Front End,Grid Emissions Region,Electricity Price Region,Liquid Fuel Price Region
-Spokane,1,0,FALSE,NorthernGrid_West,WA,PADD5_West_Coast_ex_CA
-Spokane,4,0,FALSE,NorthernGrid_West,WA,PADD5_West_Coast_ex_CA
-Lethbridge,15765,0,FALSE,NorthernGrid_East,AB,AB
-Lethbridge,20748,0,FALSE,NorthernGrid_East,AB,AB

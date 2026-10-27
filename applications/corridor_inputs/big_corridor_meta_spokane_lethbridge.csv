@@ -1,2 +1,0 @@
-corridor,corridor_km,measured_span_km,ruling_grade,speed_cap_mph,weekly_count,weekly_count_total,n_samples,stable_weekly_count,count_basis,observed_span_from,observed_span_to,observed_span_km,observed_span_median_hr,observed_span_trips,flow_aggregation,count_if_min_flow,count_if_mean_flow
-spokane_lethbridge,618.8175642249543,NaN,0.011284766161316129,33.98377890798758,120,120,1,,car,"Moyie Springs, ID","Coalhurst, AB",441.6689873933269,30.77791666666667,556,min,,

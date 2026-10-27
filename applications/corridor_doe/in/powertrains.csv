@@ -1,5 +1,0 @@
-Powertrain,Label,Requires_Catenary,Sweep_Battery,Consumes_Diesel
-diesel,Conventional diesel,0,0,1
-hybrid,Hybrid locomotive,0,1,1
-catenary_bel,Catenary + battery electric,1,0,0
-catenary_dual,Catenary + dual mode,1,0,1

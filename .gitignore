@@ -1218,31 +1218,13 @@ altrios/resources/networks/Scenic - ALTRIOS Confidential.yaml
 altrios/dispatch/*.json
 activate.sh
 *.xlsx
-# The bundled RES data is tracked deliberately (force-added past the rule above).
-# Un-ignore it so packaging tools that honor .gitignore (maturin) ship it in wheels.
-!python/altrios/resources/powertrains/**/*.xlsx
 altrios/*.txt
 truck_work_log.txt
 vehicle_average_times.txt
 avg_time_per_train.txt
 crane_work_log.txt
 hostler_work_log.txt
-python/altrios/resources/demo_data/*.csv
-/python/altrios/resources/demo_data
-/python/altrios/resources/networks/v4
-# Network builder results + local OSM/network outputs (regenerated)
-applications/network_builder/results/
-applications/network_builder/networks/
 
-# Corridor app is not part of this repo; never commit local RailState
-# data/outputs (proprietary parquet/csv/json) left in the working tree.
-applications/corridor/
-
-# OSM download cache + regenerated extracts (keep only the bundled demo extract)
-/osmium_cache
-/networks/*
-!/networks/spokane_lethbridge_local.osm.xml
-/.venv311
-/applications/catenary_optimization/outputs/
-CLAUDE.md
-applications/corridor_inputs/sample*.csv
+# The bundled RES data under resources/powertrains is tracked deliberately.
+# Un-ignore it so packaging tools that honor .gitignore (maturin) ship it in wheels.
+!python/altrios/resources/powertrains/**/*.xlsx

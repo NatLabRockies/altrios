@@ -1,5 +1,0 @@
-Location ID,Link Index,Offset (m),Is Front End,Grid Emissions Region,Electricity Price Region,Liquid Fuel Price Region
-Toronto,1,0,FALSE,MISO_Central,ON,ON
-BattleCreek,2378,0,FALSE,MISO_Central,MI,PADD2_Midwest
-BattleCreek,2379,0,FALSE,MISO_Central,MI,PADD2_Midwest
-Toronto,4756,0,FALSE,MISO_Central,ON,ON

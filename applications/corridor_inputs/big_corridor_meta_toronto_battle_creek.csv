@@ -1,2 +1,0 @@
-corridor,corridor_km,measured_span_km,ruling_grade,speed_cap_mph,weekly_count,weekly_count_total,n_samples,stable_weekly_count,count_basis,observed_span_from,observed_span_to,observed_span_km,observed_span_median_hr,observed_span_trips,flow_aggregation,count_if_min_flow,count_if_mean_flow
-toronto_battle_creek,530.67987,NaN,0.014031396093345312,52.2213741839278,190,190,1,,car,"Malport, ON","Port Huron, MI",281.0013199999999,7.203888888888889,3315,min,,
