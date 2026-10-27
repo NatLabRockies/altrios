@@ -780,7 +780,7 @@ def calculate_freight_moved(info: ScenarioInfo, units: str) -> MetricType:
                     "Freight_Moved",
                     units,
                     container_counts.get_column("Containers_Empty").item() * annualizer,
-                    "Loaded",
+                    "Empty",
                     year=info.scenario_year,
                 ),
             ]
@@ -1242,6 +1242,10 @@ def calculate_rollout_investments(values: MetricType) -> MetricType:
             left_on=item_id_cols + ["Vintage"],
             right_on=item_id_cols + ["Year"],
         )
+        # backward_fill below takes the next newer vintage's values, so the
+        # frame must be in Vintage order within each item; do not rely on the
+        # joins above preserving it.
+        .sort(item_id_cols + ["Vintage"])
         .with_columns(
             pl.col("*").backward_fill().over(item_id_cols),
             (pl.lit(years.min()) - pl.col("Vintage")).alias("Age"),
@@ -1346,6 +1350,9 @@ def calculate_rollout_investments(values: MetricType) -> MetricType:
             )
             .drop("Change")
             .join(early_retirements, on=item_id_cols, how="left")
+            # The cumulative sum allocates early retirements oldest-first, so
+            # re-assert the order rather than rely on the joins preserving it.
+            .sort(item_id_cols + ["Scheduled_Final_Year"])
             .with_columns(
                 pl.col("Count")
                 .cum_sum()
