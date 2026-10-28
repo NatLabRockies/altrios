@@ -10,6 +10,7 @@ import numpy.typing as npt
 from pathlib import Path
 import os
 import shutil
+import copy
 
 # local imports
 import altrios as alt
@@ -279,29 +280,30 @@ def increase_link_speed_limits(
         link_indices: `idx_curr` values of the links set to the new limit.
         new_speed_limit_meters_per_second: Limit (m/s) for `link_indices`.
         alt_value: Limit (m/s) for every other link without an override.
-        overrides: Link list position to limit (m/s) for other specific links.
+        overrides: `idx_curr` to limit (m/s) for other specific links.
 
     Returns:
-        The updated pydict, and link list position to assigned limit for every
-        link whose limit differs from `alt_value`.
+        A deep copy of the pydict with the limits applied, and `idx_curr` to
+        assigned limit for every link whose limit differs from `alt_value`.
     """
-    updated_network_dict = network_dict.copy()
+    updated_network_dict = copy.deepcopy(network_dict)
     non_max_vals = {}
-    for link_idx in range(len(network_dict[1])):
-        if network_dict[1][link_idx]['idx_curr'] in link_indices: 
+    for link in updated_network_dict[1]:
+        idx_curr = link["idx_curr"]
+        if idx_curr in link_indices:
             val_to_assign = new_speed_limit_meters_per_second
-        elif (overrides is not None) and (link_idx in overrides):
-            val_to_assign = overrides[link_idx]
-        else: 
+        elif overrides is not None and idx_curr in overrides:
+            val_to_assign = overrides[idx_curr]
+        else:
             val_to_assign = alt_value
-        if network_dict[1][link_idx]['speed_set'] is None: continue
-        if network_dict[1][link_idx]['speed_set']['speed_limits'] is None: continue
-        for speed_limit_idx in range(len(network_dict[1][link_idx]['speed_set']['speed_limits'])):
-            if updated_network_dict[1][link_idx]['speed_set']['speed_limits'][speed_limit_idx]['speed_meters_per_second'] is None: continue
-            updated_network_dict[1][link_idx]['speed_set']['speed_limits'][speed_limit_idx]['speed_meters_per_second'] = val_to_assign
-        
+        if link["speed_set"] is None or link["speed_set"]["speed_limits"] is None:
+            continue
+        for speed_limit in link["speed_set"]["speed_limits"]:
+            if speed_limit["speed_meters_per_second"] is None:
+                continue
+            speed_limit["speed_meters_per_second"] = val_to_assign
         if val_to_assign != alt_value:
-            non_max_vals[link_idx] = val_to_assign
+            non_max_vals[idx_curr] = val_to_assign
     return updated_network_dict, non_max_vals
 
 def convert_network(

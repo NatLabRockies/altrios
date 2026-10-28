@@ -266,6 +266,17 @@ class ModelObjectives:
         Returns:
             `df_exp` trimmed to the length of the completed simulation.
         """
+        if isinstance(sim, Exception):
+            # Model construction failed in update_params: score the trip as a
+            # failed walk and violated constraints instead of raising here.
+            print(sim)
+            objectives[key] = [1.01e12] * len(self.obj_fns)
+            constraint_violations[key] = [1.01e12] * len(self.constr_fns)
+            if return_mods:
+                unsolved_mods[key] = None
+                solved_mods[key] = None
+            return df_exp
+
         if return_mods:
             unsolved_mods[key] = sim.to_pydict()
 
@@ -582,7 +593,10 @@ def get_parser(
         "--xtol",
         type=float,
         default=DMOT().x.termination.tol,
-        help=f"PyMOO termination criterion: xtol. Defaluts to {DMOT().x.termination.tol}",
+        help=(
+            "PyMOO termination criterion: xtol. "
+            f"Defaults to {DMOT().x.termination.tol}"
+        ),
     )
     parser.add_argument(
         "--ftol",
@@ -645,11 +659,8 @@ def min_error_selection(
     Returns:
         Parameter values of the selected row.
     """
-    result_df['overall_error'] = (
-        result_df.iloc[:, param_num:] ** norm_num).sum(1).pow(float(1.0 / norm_num))
-    best_row = result_df['overall_error'].argmin()
-    best_df = result_df.iloc[best_row, :]
-    param_vals = result_df.iloc[0, :param_num].to_numpy()
-    error_vals = result_df.iloc[0, param_num:].to_numpy()
-
-    return param_vals
+    overall_error = (
+        (result_df.iloc[:, param_num:] ** norm_num).sum(axis=1).pow(1.0 / norm_num)
+    )
+    best_row = int(overall_error.to_numpy().argmin())
+    return result_df.iloc[best_row, :param_num].to_numpy()

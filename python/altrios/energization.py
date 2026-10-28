@@ -471,7 +471,16 @@ def energize_high_grade(
         if len(link['elevs']) >= 2:
             max_grade = -float('inf')
             for j in range(len(link['elevs']) - 1):
-                grade = (link["elevs"][j + 1]['elev_meters'] - link["elevs"][j]['elev_meters']) / (link["elevs"][j + 1]['offset_meters'] - link["elevs"][j]['offset_meters'])
+                run = (
+                    link["elevs"][j + 1]["offset_meters"]
+                    - link["elevs"][j]["offset_meters"]
+                )
+                if run <= 0.0:
+                    continue
+                grade = (
+                    link["elevs"][j + 1]["elev_meters"]
+                    - link["elevs"][j]["elev_meters"]
+                ) / run
                 max_grade = max(max_grade, grade)
             if max_grade >= grade_threshold:
                 link['cat_power_limits'] = [{
@@ -1373,10 +1382,14 @@ def compute_line_losses(
     pwr_cat_in = [0.0] * n_steps
     for loco in loco_vec:
         lt = loco.get("loco_type", {})
-        dml = lt.get("DualModeLoco")
-        if dml is None:
+        # Dual-mode locomotives always draw catenary; battery-electric ones do so
+        # only when fitted with a pantograph (``cat_int`` present).
+        cat_int = (lt.get("DualModeLoco") or lt.get("BatteryElectricLoco") or {}).get(
+            "cat_int"
+        )
+        if cat_int is None:
             continue
-        ch = dml.get("cat_int", {}).get("history", {})
+        ch = cat_int.get("history", {})
         ell = ch.get("energy_line_loss_joules")
         ein = ch.get("energy_elec_in_joules")
         if ell:

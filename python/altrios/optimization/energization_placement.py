@@ -1595,7 +1595,6 @@ def _install_soc_state_model(
     n_buckets: int,
     bucket_net: list[float],
     bucket_charge: list[float],
-    prefix_mi: list[float],
     pack_kwh: float,
 ) -> None:
     """Install the explicit state-of-charge battery-range model.
@@ -1610,7 +1609,6 @@ def _install_soc_state_model(
         n_buckets: Number of corridor buckets.
         bucket_net: Net drain (drain minus regen) per bucket (kWh).
         bucket_charge: Charge banked per bucket when energized (kWh).
-        prefix_mi: Cumulative corridor length (miles) at each bucket boundary.
         pack_kwh: Usable pack energy (kWh); the initial and maximum ``soc``.
     """
     model.SocBucket = pyo.Set(initialize=range(n_buckets), ordered=True)
@@ -1772,6 +1770,8 @@ def build_model(
         )
     else:
         n_buckets, bucket_len_miles, cell_bucket = 0, [], {}
+    # Kept for the warm-start seed, which must keep s[c] == u[bucket] consistent.
+    model._cell_bucket = dict(cell_bucket)
 
     # Minimum contiguous energized run length. Once an interior run of energized
     # corridor starts it must span >= min_len, which forbids tiny isolated slivers
@@ -1924,7 +1924,7 @@ def build_model(
 
         if inputs.battery_soc_state_model:
             _install_soc_state_model(
-                model, n_buckets, bucket_net, bucket_charge, prefix_mi,
+                model, n_buckets, bucket_net, bucket_charge,
                 float(inputs.max_energized_gap_kwh),
             )
             _tier1 = False
@@ -2218,9 +2218,25 @@ def _seed_warmstart(model: pyo.ConcreteModel, data: _ProblemData) -> None:
     for c in model.C:
         model.s[c].set_value(1 if c in energized_cells else 0, skip_validation=True)
     if hasattr(model, "u"):
-        # Fully wired mainline seed: every bucket on (couples s[c] == u[bucket]).
+        # A bucket is on only when every cell in it is energized in the seed;
+        # otherwise its cells are switched off so the seed satisfies s[c] == u[b].
+        bucket_cells: dict[int, list[Hashable]] = {}
+        for c, b in getattr(model, "_cell_bucket", {}).items():
+            bucket_cells.setdefault(b, []).append(c)
+        pieces_in_cell: dict[Hashable, list[Hashable]] = {}
+        for p in model.P:
+            pieces_in_cell.setdefault(data.piece_cell[p], []).append(p)
         for b in model.RunBucket:
-            model.u[b].set_value(1, skip_validation=True)
+            cells = bucket_cells.get(b, [])
+            on = 1 if cells and all(c in energized_cells for c in cells) else 0
+            model.u[b].set_value(on, skip_validation=True)
+            if on:
+                continue
+            for c in cells:
+                model.s[c].set_value(0, skip_validation=True)
+                if _has_x:
+                    for p in pieces_in_cell.get(c, []):
+                        model.x[p].set_value(0, skip_validation=True)
     if hasattr(model, "soc"):
         pack = model.soc[next(iter(model.SocBucket))].ub
         for b in model.SocBucket:

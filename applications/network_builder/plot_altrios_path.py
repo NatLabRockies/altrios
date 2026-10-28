@@ -2,18 +2,20 @@ import json
 import plotly.graph_objects as go
 import logging
 import sys
+from pathlib import Path
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def plot_json(json_path: str, html_path: str) -> None:
+def plot_json(json_path: str, html_path: str, title: str | None = None) -> None:
     """Plot forward-link geometry from JSON as an HTML map.
 
     Args:
         json_path: Geometry JSON with per-link `link_idx` and `coordinates`.
         html_path: Destination HTML file.
+        title: Map title; defaults to the JSON file's stem.
     """
     logger.info(f"Loading {json_path}...")
     with open(json_path, "r") as f:
@@ -60,7 +62,7 @@ def plot_json(json_path: str, html_path: str) -> None:
             "center": {"lon": center_lon, "lat": center_lat},
             "zoom": 7,
         },
-        title="Spokane to Lethbridge (ALTRIOS Path)",
+        title=title or Path(json_path).stem.replace("_", " "),
     )
 
     fig.write_html(html_path)

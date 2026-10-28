@@ -2185,10 +2185,9 @@ def calculate_energy(info: ScenarioInfo, units: str) -> MetricType:
         calculate_electricity_use(info, "MJ"), subset="All"
     )
     # Catenary delivery-chain energy from the SIM: pantograph delivered + line
-    # loss (= substation-side catenary grid draw). Annualize to match the diesel
-    # and electricity totals (same 365.25/simulation_days scaler).
-    scaler = (365.25 / info.simulation_days
-              if info.annualize and info.simulation_days else 1.0)
+    # loss (= substation-side catenary grid draw). Annualized like the diesel
+    # and electricity totals.
+    scaler = annualizer(info)
     pantograph_j, line_loss_j = _sim_catenary_joules_for(info)
     line_loss_mj = line_loss_j * scaler / 1.0e6
     catenary_grid_mj = (pantograph_j + line_loss_j) * scaler / 1.0e6
@@ -2355,12 +2354,20 @@ def calculate_dwell_time(info: ScenarioInfo, units: str) -> MetricType:
     Args:
         info: Scenario whose sims saved `time_seconds` and
             `speed_meters_per_second` history.
-        units: Units label for the metric; values are in seconds.
+        units: `seconds`, `minutes` or `hours`.
 
     Returns:
         `Dwell_Time` for all dwell and for en-route dwell; a None metric when no
         history was saved.
+
+    Raises:
+        ValueError: If `units` is not one of the three supported labels.
     """
+    seconds_per_unit = {"seconds": 1.0, "minutes": 60.0, "hours": 3600.0}
+    if units not in seconds_per_unit:
+        raise ValueError(
+            f"Dwell_Time units must be one of {sorted(seconds_per_unit)}, got {units!r}"
+        )
     slts_results = []
     i = 0
     for slts in info.sims.to_pydict():
@@ -2380,7 +2387,9 @@ def calculate_dwell_time(info: ScenarioInfo, units: str) -> MetricType:
         .otherwise(0.0)
         .alias("dwell_seconds")
     )
-    return _both_subsets(frame, "dwell_seconds", "Dwell_Time", units)
+    return _both_subsets(
+        frame, "dwell_seconds", "Dwell_Time", units, scale=1.0 / seconds_per_unit[units]
+    )
 
 
 def _align_on_step(
