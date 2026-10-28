@@ -823,10 +823,8 @@ impl Init for RESGreedyWithDynamicBuffers {
         init_opt_default!(self, speed_soc_regen_buffer, 10. * uc::MPH);
         init_opt_default!(self, speed_soc_regen_buffer_coeff, 1.0 * uc::R);
         init_opt_default!(self, regen_bypasses_buffer, true);
-        // 60 s, not the 5 s this defaulted to. Five seconds is shorter than a
-        // single dispatch transient, so it did nothing: the engine could restart
-        // within one step of shutting down. Sixty seconds is the light-load
-        // shutdown spec and roughly what a road unit's start logic allows.
+        // 60 s matches the light-load shutdown spec and outlasts a dispatch
+        // transient, so the engine cannot restart within one step.
         init_opt_default!(self, fc_min_time_on, uc::S * 60.0);
         // Hold a running engine for half a minute after the last reason to run
         // it clears. Together with the 60 s minimum run time this bounds the
@@ -835,11 +833,9 @@ impl Init for RESGreedyWithDynamicBuffers {
         // Force FC to be on all the time by default
         // Was 0.0 mph, which made `train_speed > speed_fc_forced_on` true for ANY
         // movement and kept the engine running whenever the train was not stopped.
-        // At 5 mph the engine may shut down while creeping and switching, where
-        // the pack can carry both traction and aux; the aux cause above guards
-        // against dumping hotel load on a battery that cannot hold it. This is a
-        // starting value, not a calibrated one -- it is the threshold the
-        // light-load shutdown study varies.
+        // 5 mph: the engine may shut down while creeping or switching, when the
+        // pack can carry traction and aux. Starting value; the light-load shutdown
+        // study varies it.
         init_opt_default!(self, speed_fc_forced_on, uc::MPH * 5.0);
         init_opt_default!(self, frac_pwr_demand_fc_forced_on, uc::R * 0.75);
         // 20% of peak power gets most of peak efficiency

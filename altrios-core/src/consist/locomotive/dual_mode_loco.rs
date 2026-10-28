@@ -12,8 +12,6 @@ use crate::imports::*;
 #[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Dual-mode locomotive
 pub struct DualModeLoco {
-    // The fields in this struct are all locally defined structs and are therefore not documented in
-    // this context
     #[has_state]
     pub fc: FuelConverter,
     #[has_state]

@@ -79,9 +79,8 @@ impl ConsistSimulation {
     }
 
     pub fn solve_step(&mut self) -> anyhow::Result<()> {
-        // A consist simulation has no network, so nothing energizes the
-        // catenary. De-energize it explicitly each step: an unset limit must
-        // mean zero available power, not an unresolved state.
+        // This simulation drives the consist from a power trace with no track and
+        // no catenary, so mark the wire absent (zero available power) every step.
         self.loco_con.set_cat_power_limit(None, None)?;
         self.loco_con
             .set_pwr_aux(Some(true))

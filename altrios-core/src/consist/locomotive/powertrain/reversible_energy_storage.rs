@@ -36,22 +36,9 @@ pub struct ReversibleEnergyStorage {
     /// Max output (and input) power battery can produce (accept)
     pub pwr_out_max: si::Power,
 
-    /// Max INPUT (charge) power the battery can accept, when it differs from
-    /// [Self::pwr_out_max].
-    ///
-    /// `None` (the default, and what every pre-existing model file
-    /// deserializes to) means charge and discharge share
-    /// [Self::pwr_out_max], which is the original symmetric behaviour.
-    ///
-    /// This exists because on a battery-electric locomotive
-    /// [Self::pwr_out_max] is doing two unrelated jobs: it carries the
-    /// TRACTION rating (e.g. 3.281 MW = 4,400 hp on the FLXdrive-class unit
-    /// this study models) and, symmetrically, the charge acceptance. Those are
-    /// not the same physical limit. Discharge is set by what the drive can use;
-    /// charge acceptance is a cell property, conventionally up to ~1C
-    /// continuous before lithium plating makes it "fast charging". Tying them
-    /// together understates en-route charging under catenary by a third on a
-    /// range-sized pack. Setting this leaves the discharge path untouched.
+    /// Max charge power when it differs from [Self::pwr_out_max].
+    /// `None`, the default, shares the discharge rating. Set it when charge
+    /// acceptance (a cell property) is below the traction rating.
     #[serde(default)]
     pub pwr_in_max: Option<si::Power>,
 

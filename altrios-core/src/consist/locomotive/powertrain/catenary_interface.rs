@@ -34,6 +34,10 @@ pub struct CatenaryInterface {
 
 #[pyo3_api]
 impl CatenaryInterface {
+    /// Python constructor; see [Self::new].
+    /// # Arguments
+    /// - `pwr_out_max_watts`: max output power, W
+    /// - `save_interval`: time steps between history saves; `None` disables saving
     #[new]
     #[pyo3(signature = (pwr_out_max_watts, save_interval=None))]
     fn __new__(
@@ -46,6 +50,7 @@ impl CatenaryInterface {
         )
     }
 
+    /// Python accessor for [Self::default].
     #[staticmethod]
     #[pyo3(name = "default")]
     fn default_py() -> Self {
@@ -57,6 +62,10 @@ impl CatenaryInterface {
     /// Catenary interface efficiency constant
     const ETA: f64 = 0.99;
 
+    /// Create interface with zero line loss, non-receptive wire.
+    /// # Arguments
+    /// - `pwr_out_max_watts`: max output power, W
+    /// - `save_interval`: time steps between history saves; `None` disables saving
     pub fn new(
         pwr_out_max_watts: f64,
         save_interval: Option<usize>,
@@ -75,6 +84,11 @@ impl CatenaryInterface {
         };
         Ok(ci)
     }
+
+    /// Set this step's wire power limit and line-loss factor.
+    /// # Arguments
+    /// - `new_limit`: max power available from the wire; `None` means no wire
+    /// - `loss_factor`: resistive factor `k` (1/W); `None` means lossless
     pub fn set_cat_power_limit(
         &mut self,
         new_limit: Option<si::Power>,
@@ -87,8 +101,13 @@ impl CatenaryInterface {
         self.loss_factor = loss_factor.unwrap_or(0.0);
         Ok(())
     }
-    /// TODO mbruchon not really a required amount, more like a max amount that could be needed
-    /// Set `pwr_in_req` required to achieve desired `pwr_out_req` with time step size `dt`.
+
+    // TODO mbruchon not really a required amount, more like a max amount that could be needed
+    /// Solve wire draw or return for the requested output power.
+    /// Updates `pwr_elec_out`, `pwr_elec_in`, `pwr_elec_regen`, conversion loss and line loss.
+    /// # Arguments
+    /// - `pwr_out_req_max`: requested electrical output; negative means return to the wire
+    /// - `_dt`: time step, unused
     pub fn set_pwr_in_req(&mut self, pwr_out_req_max: si::Power, _dt: si::Time) -> anyhow::Result<()> {
         self.state
             .pwr_out_req_max
@@ -145,6 +164,7 @@ impl CatenaryInterface {
 }
 
 impl Init for CatenaryInterface {
+    /// Initialize the tracked state.
     fn init(&mut self) -> Result<(), Error> {
         self.state.init()?;
         Ok(())
@@ -153,6 +173,7 @@ impl Init for CatenaryInterface {
 impl SerdeAPI for CatenaryInterface {}
 
 impl Default for CatenaryInterface {
+    /// Load the bundled default YAML and initialize it.
     fn default() -> Self {
         let file_contents = include_str!("catenary_interface.default.yaml");
         let mut cat_int = Self::from_yaml(file_contents, false).unwrap();
@@ -162,8 +183,10 @@ impl Default for CatenaryInterface {
 }
 
 impl ElectricMachine for CatenaryInterface {
-    /// Set current max possible output power, `pwr_mech_out_max`,
-    /// given `pwr_in_max` from upstream component.
+    /// Set `pwr_elec_out_max` from the upstream limit and the rating.
+    /// # Arguments
+    /// - `pwr_in_max`: max power available from upstream
+    /// - `pwr_aux`: must be `None`; the interface carries no aux load
     fn set_cur_pwr_max_out(
         &mut self,
         pwr_in_max: si::Power,
@@ -178,8 +201,7 @@ impl ElectricMachine for CatenaryInterface {
         Ok(())
     }
 
-    /// Set current power out max ramp rate, `pwr_rate_out_max` given `pwr_rate_in_max`
-    /// from upstream component.  
+    /// No-op: the interface imposes no ramp-rate limit.
     fn set_pwr_rate_out_max(&mut self, _: si::PowerRate) -> anyhow::Result<()> {
         Ok(())
     }
