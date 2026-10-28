@@ -18,21 +18,23 @@ planner, which runs servicing and charging concurrently from arrival.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, Hashable, List, Sequence, Tuple
 
 
 def assign_reused_ids(trains: Sequence[dict], servicing_hr: float = 3.0
-                      ) -> Tuple[Dict[int, List[int]], dict]:
-    """Fleet IDs per train slot.
+                      ) -> Tuple[Dict[Hashable, List[int]], dict]:
+    """Assign fleet unit IDs to every train's locomotive slots.
 
-    ``trains``: one dict per train with ``key`` (any hashable), ``origin``,
-    ``destination``, ``dep_hr``, ``arr_hr``, ``types`` (one locomotive type per
-    slot, consist order) and optionally ``extra_hr`` (per-slot hours beyond
-    arrival before the unit is ready, e.g. charging).
+    Args:
+        trains: One dict per train with `key` (hashable), `origin`, `destination`,
+            `dep_hr`, `arr_hr`, `types` (one locomotive type per slot, consist
+            order) and optionally `extra_hr` (per-slot hours after arrival
+            before the unit is ready, e.g. charging).
+        servicing_hr: Minimum hours after arrival before a unit is ready again.
 
-    Returns ``({key: [fleet_id per slot]}, stats)`` with ``stats`` holding
-    ``fleet`` (units by type), ``moves`` (implicit repositioning) and
-    ``new_units``.
+    Returns:
+        `({key: [unit ID per slot]}, stats)`, where `stats` holds `fleet` (unit
+        counts by type), `moves` (implicit repositionings) and `new_units`.
     """
     # ready units per type: list of [ready_hr, node, unit_id]
     ready: Dict[str, List[list]] = {}

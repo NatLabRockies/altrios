@@ -25,11 +25,16 @@ from altrios.train_planner import refueling
 
 
 def _reset_loco_pool(loco_pool: pl.DataFrame) -> pl.DataFrame:
-    """Return a fresh locomotive pool for post-simulation refueling.
+    """Build a fresh locomotive pool for post-simulation refueling.
 
-    All locomotives start ``Ready`` at full charge; per-session bookkeeping columns
-    are (re)initialized. Charger columns are cleared and re-joined from ``refuelers``
-    when each locomotive arrives at a node.
+    Every locomotive starts `Ready` at full charge with bookkeeping columns reset.
+
+    Args:
+        loco_pool: Pool with `Locomotive_ID`, `Locomotive_Type`, `Node`,
+            `Fuel_Type`, `SOC_Max_J`, `SOC_Min_J` and `Capacity_J`.
+
+    Returns:
+        Pool with the refueling-queue columns added and state reset.
     """
     return loco_pool.select(
         [
@@ -63,17 +68,23 @@ def _reset_loco_pool(loco_pool: pl.DataFrame) -> pl.DataFrame:
 
 def _walk_and_read(
     sim: "alt.SpeedLimitTrainSim",
-    network,
-    timed_path,
+    network: Union["alt.Network", List["alt.Link"]],
+    timed_path: "alt.TimedLinkPath",
     departing_soc_pct: List[float],
 ) -> Tuple["alt.SpeedLimitTrainSim", List[float], List[float]]:
-    """Set departing SOC, walk the timed path, and read realized SOC and trip energy.
+    """Walk a timed path from the given departing SOC.
 
-    ``departing_soc_pct`` is ordered to match the consist's locomotive vector (which
-    is ordered by ``Locomotive_ID``). Returns the walked simulation, the per-locomotive
-    end-of-trip battery energy (J), and the per-locomotive trip energy consumption (J).
-    For non-battery locomotives both returned values are 0 (their fuel use is captured
-    in the simulation's own fuel accounting).
+    Args:
+        sim: Simulation to walk.
+        network: Rail network the timed path refers to.
+        timed_path: Realized link path with arrival times.
+        departing_soc_pct: Departing state of charge (fraction) per locomotive,
+            in `Locomotive_ID` order.
+
+    Returns:
+        The walked simulation, end-of-trip battery energy (J) per locomotive, and
+        trip energy consumption (J) per locomotive; both are 0 for locomotives
+        without a battery.
     """
     sim_dict = sim.to_pydict()
     loco_vec = sim_dict["loco_con"]["loco_vec"]
@@ -108,30 +119,23 @@ def run_speed_limit_train_sims(
     refuelers: pl.DataFrame,
     timed_paths: List["alt.TimedLinkPath"],
 ) -> Tuple["alt.SpeedLimitTrainSimVec", pl.DataFrame]:
-    """Run speed-limited train simulations and regenerate charging sessions.
+    """Run speed-limited train sims and regenerate charging sessions.
 
-    Parameters
-    ----------
-    speed_limit_train_sims : alt.SpeedLimitTrainSimVec
-        Simulations to run, indexed by ``TrainSimVec_Index``.
-    network : alt.Network or list of alt.Link
-        Rail network used to walk each timed path.
-    train_consist_plan : pl.DataFrame
-        Realized consist plan with ``Arrival_Time_Actual_Hr``,
-        ``Departure_Time_Actual_Hr``, ``Locomotive_ID``, ``Destination_ID``, and
-        ``TrainSimVec_Index``.
-    loco_pool : pl.DataFrame
-        Locomotive pool (only base identity/energy columns are used; state is reset).
-    refuelers : pl.DataFrame
-        Charging/refueling facilities.
-    timed_paths : list of alt.TimedLinkPath
-        Realized timed paths, indexed by ``TrainSimVec_Index``.
+    Trips run in arrival order, each departing at the SOC its units last reached.
 
-    Returns
-    -------
-    Tuple[alt.SpeedLimitTrainSimVec, pl.DataFrame]
-        The walked simulations and a refueling-session DataFrame
-        (:data:`altrios.train_planner.refueling.REFUEL_SESSION_SCHEMA`).
+    Args:
+        speed_limit_train_sims: Simulations to run, indexed by `TrainSimVec_Index`.
+        network: Rail network used to walk each timed path.
+        train_consist_plan: Realized consist plan with `Arrival_Time_Actual_Hr`,
+            `Departure_Time_Actual_Hr`, `Locomotive_ID`, `Destination_ID` and
+            `TrainSimVec_Index`.
+        loco_pool: Locomotive pool; only identity and energy columns are used.
+        refuelers: Charging and refueling facilities.
+        timed_paths: Realized timed paths, indexed by `TrainSimVec_Index`.
+
+    Returns:
+        The walked simulations and a refueling-session frame with the
+        `REFUEL_SESSION_SCHEMA` columns.
     """
     sims_list = [
         alt.SpeedLimitTrainSim.from_pydict(d)

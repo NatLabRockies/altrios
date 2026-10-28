@@ -16,8 +16,15 @@ NETWORK_FILE = (
 SAVE_INTERVAL = 60
 
 
-def _two_substations(network):
-    """Place two substations at spread-out mainline positions on the network."""
+def _two_substations(network: alt.Network) -> list[Substation]:
+    """Place substations at 25% and 75% of the corridor.
+
+    Args:
+        network: Network whose links carry lat/lon headings.
+
+    Returns:
+        Two 15 MW substations in grid region SRSO.
+    """
     d = network.to_pydict()
     arc_start, mainline_set, _project = en._build_corridor_arc(d, 200.0)
     link_by_idx = {l["idx_curr"]: l for l in d[1][1:]}
@@ -25,14 +32,16 @@ def _two_substations(network):
     ordered = sorted(mainline_set, key=lambda i: arc_start[i])
     max_arc = max(arc_start.values())
 
-    def _mid(link):
+    def _mid(link: dict) -> tuple[float, float] | None:
+        """Return the (lat, lon) of the link's middle heading."""
         hs = link.get("headings") or []
         if not hs:
             return None
         m = hs[len(hs) // 2]
         return m.get("lat"), m.get("lon")
 
-    def _pick(frac):
+    def _pick(frac: float) -> tuple[float, float] | None:
+        """Return the link midpoint nearest `frac` along the arc."""
         target = frac * max_arc
         best = min(ordered, key=lambda i: abs(arc_start[i] - target))
         return _mid(link_by_idx[best])
@@ -47,7 +56,8 @@ def _two_substations(network):
     ]
 
 
-def test_apply_line_losses_stamps_and_derates():
+def test_apply_line_losses_stamps_and_derates() -> None:
+    """Check line-loss stamping, derating and two-sided feeding."""
     network = alt.Network.from_file(str(NETWORK_FILE))
     net_e = en.energize_uniform(network, uniform_power_limit_watts=10e6)
     subs = _two_substations(net_e)
@@ -82,13 +92,14 @@ def test_apply_line_losses_stamps_and_derates():
     assert n_two_sided > 0  # interior zones are fed from both sides
 
 
-def test_higher_voltage_reduces_derating():
-    """50 kV should deliver more power than 25 kV (loss scales as 1/V**2)."""
+def test_higher_voltage_reduces_derating() -> None:
+    """Check that 50 kV delivers more power than 25 kV."""
     network = alt.Network.from_file(str(NETWORK_FILE))
     net_e = en.energize_uniform(network, uniform_power_limit_watts=10e6)
     subs = _two_substations(net_e)
 
-    def _min_power(volts):
+    def _min_power(volts: float) -> float:
+        """Return the lowest derated power limit at `volts`."""
         net_ll, _ = en.apply_line_losses(
             net_e, subs, system_voltage_volts=volts,
             electrification_type="ac_25kv_1x25", base_power_limit_watts=10e6,
@@ -105,7 +116,12 @@ def test_higher_voltage_reduces_derating():
     assert p50 > p25
 
 
-def _run_catenary_sim():
+def _run_catenary_sim() -> alt.SpeedLimitTrainSim:
+    """Walk a dual-mode train under a fixed-resistance catenary.
+
+    Returns:
+        The walked train simulation.
+    """
     rail_vehicle_loaded = alt.RailVehicle.from_file(
         alt.resources_root() / "rolling_stock/Manifest_Loaded.yaml"
     )
@@ -155,7 +171,8 @@ def _run_catenary_sim():
     return train_sim
 
 
-def test_runtime_line_loss_and_energy_balance():
+def test_runtime_line_loss_and_energy_balance() -> None:
+    """Check per-step loss, cumulative energy and region attribution."""
     train_sim = _run_catenary_sim()
     ts = train_sim.to_pydict()
     ch = ts["loco_con"]["loco_vec"][0]["loco_type"]["DualModeLoco"]["cat_int"]["history"]
@@ -184,7 +201,8 @@ def test_runtime_line_loss_and_energy_balance():
     assert sub_row["grid_emissions_region"][0] == "MROW"
 
 
-def test_substation_load_curves():
+def test_substation_load_curves() -> None:
+    """Check substation load curve columns and values."""
     train_sim = _run_catenary_sim()
     curves = en.substation_load_curves(train_sim)
     assert "time_seconds" in curves.columns

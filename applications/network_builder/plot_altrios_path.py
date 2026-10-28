@@ -8,7 +8,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def plot_json(json_path, html_path):
+def plot_json(json_path: str, html_path: str) -> None:
+    """Plot forward-link geometry from JSON as an HTML map.
+
+    Args:
+        json_path: Geometry JSON with per-link `link_idx` and `coordinates`.
+        html_path: Destination HTML file.
+    """
     logger.info(f"Loading {json_path}...")
     with open(json_path, "r") as f:
         geometry_collection = json.load(f)

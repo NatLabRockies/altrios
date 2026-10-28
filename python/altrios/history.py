@@ -47,7 +47,10 @@ and the round-trip is cheap.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Optional
+
+if TYPE_CHECKING:
+    import altrios as alt
 
 __all__ = ["configure", "COMPONENTS", "ROOT"]
 
@@ -76,11 +79,15 @@ _POWERTRAIN_PARTS = ("fc", "gen", "edrv", "res", "cat_int")
 
 
 def _components(sim_dict: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
-    """Every history-bearing component in a sim pydict, grouped by name.
+    """Group a sim pydict's history-bearing components by name.
 
-    A name maps to a *list* because `loco_vec` and everything below it exists
-    once per locomotive, and they are always configured together -- per-unit
-    intervals would buy nothing, since the locomotives step in lockstep.
+    Per-locomotive components contribute one dict per unit, all configured together.
+
+    Args:
+        sim_dict: `SpeedLimitTrainSim` pydict, as returned by `to_pydict()`.
+
+    Returns:
+        Component name to the list of matching component dicts.
     """
     found: Dict[str, List[Dict[str, Any]]] = {ROOT: [sim_dict]}
 
@@ -110,6 +117,15 @@ def _components(sim_dict: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
 
 
 def _check_intervals(intervals: Mapping[str, Optional[int]]) -> None:
+    """Validate save intervals against the component tree.
+
+    Args:
+        intervals: Component name to save interval in time steps, or None.
+
+    Raises:
+        ValueError: When an interval is not a positive int, an ancestor records
+            nothing, or an interval is not a multiple of its ancestor's.
+    """
     for name, interval in intervals.items():
         if interval is None:
             continue
@@ -142,6 +158,17 @@ def _check_intervals(intervals: Mapping[str, Optional[int]]) -> None:
 def _apply_mask(
     component: Dict[str, Any], name: str, keep: Optional[Iterable[str]]
 ) -> None:
+    """Restrict a component's recorded history series to `keep`.
+
+    Args:
+        component: Component pydict carrying a `history.save_fields` mask.
+        name: Component name, used in error messages.
+        keep: Series names to record; None leaves the mask unchanged.
+
+    Raises:
+        RuntimeError: When the component has no `history.save_fields` mask.
+        ValueError: When `keep` names a series the component does not have.
+    """
     if keep is None:
         return
     history = component.get("history")
@@ -167,19 +194,26 @@ def _apply_mask(
         mask[field] = field in keep
 
 
-def configure(sim, spec: Mapping[str, Mapping[str, Any]]):
+def configure(
+    sim: alt.SpeedLimitTrainSim, spec: Mapping[str, Mapping[str, Any]]
+) -> alt.SpeedLimitTrainSim:
     """Return `sim` recording only what `spec` asks for.
 
-    # Arguments
-    - `sim`: a `SpeedLimitTrainSim`, before it is walked
-    - `spec`: component name -> `{"interval": int | None, "keep": [series, ...]}`.
-      `interval` is in time steps, which are one second for a
-      `SpeedLimitTrainSim`. Omitting `keep` records every series in that
-      component. Components absent from `spec` record nothing.
+    Components absent from `spec` record nothing; `"<root>"` must be present.
 
-    Component names are `"<root>"` (the train itself), `"fric_brake"`,
-    `"loco_con"`, `"loco_vec"` (all locomotives), and the powertrain parts
-    `"fc"`, `"gen"`, `"edrv"`, `"res"`, `"cat_int"`.
+    Args:
+        sim: `SpeedLimitTrainSim`, before it is walked.
+        spec: Component name to `{"interval": int | None, "keep": [series, ...]}`.
+            `interval` is in time steps (one second); omitting `keep` records
+            every series. Names: `"<root>"` (the train), `"fric_brake"`,
+            `"loco_con"`, `"loco_vec"` (all locomotives) and the powertrain
+            parts `"fc"`, `"gen"`, `"edrv"`, `"res"` and `"cat_int"`.
+
+    Returns:
+        A new `SpeedLimitTrainSim` with the intervals and masks applied.
+
+    Raises:
+        ValueError: When `spec` names an unknown component or omits `"<root>"`.
     """
     unknown = sorted(set(spec) - set(_PARENT))
     if unknown:

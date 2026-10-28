@@ -49,7 +49,11 @@ train_config = alt.TrainConfig(
 
 
 def build_train_sim() -> alt.SpeedLimitTrainSim:
-    """One dual-mode locomotive hauling the manifest train across the corridor."""
+    """Build one dual-mode locomotive hauling the manifest train.
+
+    Returns:
+        Train simulation from West_Terminal to East_Terminal.
+    """
     loco = alt.Locomotive.default_dual_mode_loco()
     loco.set_save_interval(SAVE_INTERVAL)
     tsb = alt.TrainSimBuilder(
@@ -66,8 +70,16 @@ def build_train_sim() -> alt.SpeedLimitTrainSim:
     return train_sim
 
 
-def simulate(net: alt.Network):
-    """Dispatch and walk the train over ``net``; return energy totals and the est-time net."""
+def simulate(net: alt.Network) -> tuple[dict[str, float], alt.EstTimeNet]:
+    """Dispatch and walk the train over a network.
+
+    Args:
+        net: Network to simulate on.
+
+    Returns:
+        Fuel [GJ], catenary energy [GJ] and trip time [h], plus the
+        estimated-time network.
+    """
     train_sim = build_train_sim()
     est_time_net, _ = alt.make_est_times(train_sim, net)
     timed_path = next(

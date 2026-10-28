@@ -2,7 +2,7 @@ import pandas as pd
 import polars as pl
 import polars.selectors as cs
 import math
-from typing import Any, List, Dict, Tuple, Union, Optional
+from typing import Any, Callable, List, Dict, Tuple, Union, Optional
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,7 +31,17 @@ BATTERY_SCENARIOS = sorted(battery_prices_nlr_atb_all["Scenario"].unique().to_li
 
 
 def battery_prices(scenario: str = "Moderate") -> pl.DataFrame:
-    """The ATB battery-cost table for one scenario."""
+    """Return the ATB battery-cost table for one scenario.
+
+    Args:
+        scenario: One of `BATTERY_SCENARIOS`, e.g. "Moderate" or "Advanced".
+
+    Returns:
+        Rows of the ATB battery price table for `scenario`.
+
+    Raises:
+        ValueError: When `scenario` is not in `BATTERY_SCENARIOS`.
+    """
     if scenario not in BATTERY_SCENARIOS:
         raise ValueError(f"unknown battery scenario {scenario!r}; have {BATTERY_SCENARIOS}")
     return battery_prices_nlr_atb_all.filter(pl.col("Scenario") == scenario)
@@ -110,22 +120,36 @@ class ScenarioInfo:
 
 
 class SimAggregateCache:
-    """Memoizes year-invariant, sims-derived aggregates so a multi-year rollout
-    that reuses the SAME `SpeedLimitTrainSim(Vec)` across scenario years pays each
-    Rust-FFI / full-serialization cost once instead of once per year.
+    """Memoize year-invariant, sims-derived aggregates across scenario years.
 
-    Keyed by the identity of the sims object plus the `annualize` flag the Rust
-    getters honor; a reference to each sims object is retained so its `id` stays
-    valid while the cache lives. Any caller whose `ScenarioInfo`s share a sims
-    object -- e.g. a demo that tiles one simulated year across a 30-year rollout --
-    benefits automatically once the cache is attached (see `main`).
+    Entries are keyed by the sims object's identity, the `annualize` flag and the
+    aggregate name; each sims object is retained so its `id` stays valid while
+    the cache lives. `main` attaches one cache to every `ScenarioInfo` it builds.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
+        """Create an empty cache."""
         self._values: Dict[tuple, object] = {}
         self._keepalive: Dict[int, object] = {}
 
-    def get(self, sims, annualize: bool, name: str, compute):
+    def get(
+        self,
+        sims: Union[alt.SpeedLimitTrainSim, alt.SpeedLimitTrainSimVec],
+        annualize: bool,
+        name: str,
+        compute: Callable[[], Any],
+    ) -> Any:
+        """Return a cached aggregate, computing it on first use.
+
+        Args:
+            sims: Simulations whose identity forms part of the cache key.
+            annualize: Annualize flag that forms part of the cache key.
+            name: Aggregate name that forms part of the cache key.
+            compute: Zero-argument callable producing the value on a miss.
+
+        Returns:
+            The cached or freshly computed value.
+        """
         sims_id = id(sims)
         self._keepalive.setdefault(sims_id, sims)
         key = (sims_id, bool(annualize), name)
@@ -135,14 +159,24 @@ class SimAggregateCache:
 
 
 def _cached_sim_aggregate(
-    info: "ScenarioInfo", name: str, compute, *, annualize: Optional[bool] = None
-):
-    """Return sims-derived aggregate `name` for `info`, served from
-    `info.agg_cache` when present so scenarios sharing a sims object compute it
-    once. Falls back to computing directly when no cache is attached, so the metric
-    functions work standalone. `annualize` overrides the cache key's annualize flag
-    for raw-energy quantities that don't depend on it (so they are shared across
-    annualize variants)."""
+    info: "ScenarioInfo",
+    name: str,
+    compute: Callable[[], Any],
+    *,
+    annualize: Optional[bool] = None,
+) -> Any:
+    """Return a sims-derived aggregate, via `info.agg_cache` when present.
+
+    Args:
+        info: Scenario whose `sims` and `agg_cache` are used.
+        name: Aggregate name used in the cache key.
+        compute: Zero-argument callable producing the value on a cache miss.
+        annualize: Overrides `info.annualize` in the cache key; pass False for
+            raw quantities shared across annualize variants.
+
+    Returns:
+        The cached or freshly computed value.
+    """
     resolved = info.annualize if annualize is None else annualize
     cache = getattr(info, "agg_cache", None)
     if cache is None:
@@ -151,17 +185,18 @@ def _cached_sim_aggregate(
 
 
 def annualizer(info: "ScenarioInfo") -> float:
-    """The one factor that scales this scenario's simulated window to a year:
-    ``365.25 / simulation_days`` when annualizing, else 1.
+    """Return the scaler from simulated window to one year.
 
-    Every sims-derived aggregate below is read RAW from Rust and scaled here, so
-    fuel, battery energy, tonne-km and car-km share exactly the scaler the
-    Python-side quantities (refuel sessions, catenary draw, container counts)
-    already use. The Rust getters' own ``annualize`` flag scales by each sim's
-    ``simulation_days`` field instead, which callers that build sims without it
-    (the catenary deep-dive) leave unset -- Rust then assumes ONE day and inflates
-    freight and diesel 7x relative to electricity, which is how a per-car-mile
-    intensity came out 2.3x low.
+    Sims-derived aggregates are read raw from Rust and scaled by this factor.
+
+    Args:
+        info: Scenario with `annualize` and `simulation_days`.
+
+    Returns:
+        `365.25 / simulation_days` when annualizing, else 1.0.
+
+    Raises:
+        ValueError: When annualizing with `simulation_days` unset or zero.
     """
     if not info.annualize:
         return 1.0
@@ -171,36 +206,84 @@ def annualizer(info: "ScenarioInfo") -> float:
 
 
 def _sim_energy_fuel_joules(info: "ScenarioInfo") -> float:
+    """Return annualized fuel energy (J) from the sims.
+
+    Args:
+        info: Scenario supplying `sims` and the annualization factor.
+
+    Returns:
+        Fuel energy (J), scaled by `annualizer(info)`.
+    """
     return annualizer(info) * _cached_sim_aggregate(
         info, "energy_fuel_joules",
         lambda: info.sims.get_energy_fuel_joules(annualize=False), annualize=False)
 
 
 def _sim_net_energy_res_joules(info: "ScenarioInfo") -> float:
+    """Return annualized net battery energy (J) from the sims.
+
+    Args:
+        info: Scenario supplying `sims` and the annualization factor.
+
+    Returns:
+        Net reversible-energy-storage energy (J), scaled by `annualizer(info)`.
+    """
     return annualizer(info) * _cached_sim_aggregate(
         info, "net_energy_res_joules",
         lambda: info.sims.get_net_energy_res_joules(annualize=False), annualize=False)
 
 
 def _sim_megagram_kilometers(info: "ScenarioInfo") -> float:
+    """Return annualized freight megagram-kilometers from the sims.
+
+    Args:
+        info: Scenario supplying `sims` and the annualization factor.
+
+    Returns:
+        Megagram-kilometers, scaled by `annualizer(info)`.
+    """
     return annualizer(info) * _cached_sim_aggregate(
         info, "megagram_kilometers",
         lambda: info.sims.get_megagram_kilometers(annualize=False), annualize=False)
 
 
 def _sim_car_kilometers(info: "ScenarioInfo") -> float:
+    """Return annualized car-kilometers from the sims.
+
+    Args:
+        info: Scenario supplying `sims` and the annualization factor.
+
+    Returns:
+        Car-kilometers, scaled by `annualizer(info)`.
+    """
     return annualizer(info) * _cached_sim_aggregate(
         info, "car_kilometers",
         lambda: info.sims.get_car_kilometers(annualize=False), annualize=False)
 
 
 def _sim_cars_moved(info: "ScenarioInfo") -> float:
+    """Return the annualized count of cars moved.
+
+    Args:
+        info: Scenario supplying `sims` and the annualization factor.
+
+    Returns:
+        Cars moved, scaled by `annualizer(info)`.
+    """
     return annualizer(info) * _cached_sim_aggregate(
         info, "cars_moved",
         lambda: info.sims.get_cars_moved(annualize=False), annualize=False)
 
 
 def _sim_catenary_joules_for(info: "ScenarioInfo") -> Tuple[float, float]:
+    """Return raw catenary draw and line loss (J).
+
+    Args:
+        info: Scenario supplying `sims` and an optional `agg_cache`.
+
+    Returns:
+        `(pantograph_delivered_J, line_loss_J)`, cached per sims object.
+    """
     # Raw joules (annualize-independent); the heavy `to_pydict()` read runs at most
     # once per unique sims object rather than once per scenario year.
     return _cached_sim_aggregate(
@@ -924,32 +1007,21 @@ def calculate_line_loss_ghg(
     scenario_year: int = defaults.BASE_ANALYSIS_YEAR,
     units: str = "tonne CO2-eq",
 ) -> MetricType:
-    """Compute GHG emissions from catenary line losses, resolved by grid region.
+    """Compute GHG from catenary line losses by grid region.
 
-    Line losses occur in the catenary between a substation and the train, so the
-    associated grid draw (and its emissions) belongs to the *substation's*
-    grid-emissions region, which may differ from where the train is operating.
+    Losses belong to the substation's grid region, which may differ from the train's.
 
-    Arguments
-    ---------
-    line_loss_df : polars.DataFrame
-        Output of :func:`altrios.energization.compute_line_losses`, with columns
-        ``district_id``, ``grid_emissions_region``, and ``line_loss_energy_joules``.
-        The ``"__total__"`` summary row is ignored.
-    emissions_factors : polars.DataFrame
-        Grid emissions factors with unit ``CO2eq_kg_per_MWh`` defined for each
-        ``Node`` (and ``Year``).
-    scenario_year : int
-        Year used to select the emissions factor for each region.
-    units : str
-        Requested units (only ``"tonne CO2-eq"`` is supported).
+    Args:
+        line_loss_df: Output of `altrios.energization.compute_line_losses`, with
+            `district_id`, `grid_emissions_region` and `line_loss_energy_joules`;
+            the `"__total__"` row is skipped.
+        emissions_factors: `CO2eq_kg_per_MWh` per `Node`, optionally per `Year`.
+        scenario_year: Year selecting the emissions factor when `Year` exists.
+        units: Only "tonne CO2-eq" is supported; any other value yields None.
 
-    Returns
-    -------
-    MetricType
-        A metric DataFrame (``GHG_Line_Loss``) with one ``Subset`` row per grid
-        region plus an ``"All"`` total. Regions without an emissions factor
-        contribute ``None`` (and are surfaced via a printed warning).
+    Returns:
+        `GHG_Line_Loss` rows, one `Subset` per grid region plus "All"; regions
+        lacking a factor contribute None and are reported with a printed warning.
     """
     if units != "tonne CO2-eq":
         return metric("GHG_Line_Loss", units, None)
@@ -1105,19 +1177,18 @@ def calculate_refueler_counts(info: ScenarioInfo, _) -> MetricType:
     return num_ports
 
 
-def calculate_infrastructure_counts(info: ScenarioInfo, _) -> MetricType:
-    """
-    Given a single scenario year's results, counts the fixed electrification infrastructure
-    assets (catenary structure, energization/wiring, traction substations) included in the
-    scenario and reports their unit costs and lifespans, so this capital flows into the
-    multi-year investment / total-cost metrics exactly like locomotive and refueler capital.
-    Arguments:
-    ----------
-    info: A scenario information object representing parameters and results for a single year
-    Outputs:
-    ----------
-    DataFrame of infrastructure asset counts, unit costs, and lifespans (metric name, units,
-    value, and scenario year)
+def calculate_infrastructure_counts(info: ScenarioInfo, _: str) -> MetricType:
+    """Count electrification infrastructure assets with cost and lifespan.
+
+    Args:
+        info: Scenario whose `infrastructure_costs` lists one row per asset with
+            `Infrastructure_Type`, `Cost_USD` and `Lifespan_Years`.
+        _: Units argument, unused.
+
+    Returns:
+        Per `Infrastructure_Type`: `Count_Infrastructure` (assets), `Unit_Cost`
+        (USD, mean) and `Lifespan` (years, mean); a None metric when
+        `infrastructure_costs` is None.
     """
     if info.infrastructure_costs is None:
         return metric("Count_Infrastructure", "assets", None)
@@ -1536,13 +1607,19 @@ def interpolate_emissions_factors_cambium(
     cambium_scenario: str = "MidCase",
     file_path: Path = defaults.GRID_EMISSIONS_FILE,
 ) -> pl.DataFrame:
-    """Cambium long-run marginal CO2e (kg/MWh) by grid region and year.
+    """Interpolate Cambium marginal CO2e factors by region and year.
 
-    Reads the Cambium GEA table (``defaults.GRID_EMISSIONS_FILE``), sums the
-    combustion + pre-combustion LRMER CO2e, and linearly interpolates (clamped at
-    the endpoints) between Cambium sample years to each requested ``years`` value.
-    Returns a ``polars.DataFrame`` with ``Node`` (= grid region), ``Year`` (int),
-    and ``CO2eq_kg_per_MWh``. Regions absent from the Cambium table are omitted.
+    Args:
+        regions: Cambium GEA region names.
+        years: Years to interpolate to.
+        cambium_scenario: Cambium scenario name, e.g. "MidCase".
+        file_path: Cambium GEA CSV with `scenario`, `gea`, `t`, `lrmer_co2e_c`
+            and `lrmer_co2e_p` columns.
+
+    Returns:
+        `Node` (region), `Year` and `CO2eq_kg_per_MWh` (combustion plus
+        pre-combustion LRMER), linearly interpolated between sample years and
+        clamped at the endpoints; regions absent from the table are omitted.
     """
     src = (
         pl.scan_csv(source=file_path, skip_rows=5)
@@ -1574,8 +1651,16 @@ def interpolate_emissions_factors_cambium(
 
 
 def _interp_clamped(xs: List[float], ys: List[float], x: float) -> Optional[float]:
-    """Linear interpolation of ``ys`` at ``x`` over sorted ``xs``, clamped to the
-    endpoints. Returns ``None`` if ``xs`` is empty."""
+    """Interpolate `ys` at `x` linearly, clamped to the endpoints.
+
+    Args:
+        xs: Sorted sample points.
+        ys: Values at `xs`.
+        x: Point to evaluate.
+
+    Returns:
+        The interpolated value, or None when `xs` is empty.
+    """
     if not xs:
         return None
     if x <= xs[0]:
@@ -1623,8 +1708,18 @@ def import_emissions_factors_cambium(
 
 
 def _series_price_at(series: pl.DataFrame, year: float) -> float:
-    """``Price`` of a Year/Price table at ``year``: linear between tabulated years,
-    clamped to the first/last tabulated year outside them."""
+    """Return a Year/Price table's price at `year`.
+
+    Args:
+        series: Frame with `Year` and `Price` columns.
+        year: Year to evaluate; clamped to the tabulated range.
+
+    Returns:
+        Price interpolated linearly between tabulated years.
+
+    Raises:
+        ValueError: When the series has no rows after dropping nulls.
+    """
     s = series.select("Year", "Price").drop_nulls().sort("Year")
     years = s.get_column("Year").cast(pl.Float64).to_list()
     prices = s.get_column("Price").cast(pl.Float64).to_list()
@@ -1642,14 +1737,21 @@ def _series_price_at(series: pl.DataFrame, year: float) -> float:
 
 
 def price_trajectory(trajectory: str, fuel: str) -> pl.DataFrame:
-    """The Year/Price series a price zone's ``Trajectory`` names. Only ratios of the
-    series are ever used, so its units and dollar year do not matter.
+    """Return the Year/Price series a price zone's `Trajectory` names.
 
-    - ``EIA_AEO...``: the national AEO reference case (transportation-sector diesel,
-      industrial electricity) in the EIA price files.
-    - ``CER_EF2026:<Province>``: Canada's Energy Future 2026, Current Measures scenario,
-      end-use price for that province (transportation diesel, industrial electricity;
-      the file is in 2022 CAD/GJ).
+    Only ratios of the series are used, so its units and dollar year do not matter.
+
+    Args:
+        trajectory: `EIA_AEO...` for the national AEO reference case, or
+            `CER_EF2026:<Province>` for Canada's Energy Future 2026 Current
+            Measures end-use price (2022 CAD/GJ).
+        fuel: "Electricity" (industrial sector) or "Diesel" (transportation).
+
+    Returns:
+        Frame with `Year` and `Price` columns.
+
+    Raises:
+        ValueError: When `trajectory` is unknown or has no CER series.
     """
     if trajectory.startswith("EIA_AEO"):
         return electricity_prices_eia if fuel == "Electricity" else liquid_fuel_prices_eia
@@ -1675,19 +1777,22 @@ def price_trajectory(trajectory: str, fuel: str) -> pl.DataFrame:
 
 
 def zone_energy_price(zone: str, fuel: str, year: int) -> float:
-    """Price of ``fuel`` ("Diesel" or "Electricity") in price zone ``zone`` at ``year``,
-    in the EIA tables' units (diesel USD/gal, electricity US cents/kWh; real 2025 USD).
+    """Return a price zone's `fuel` price at `year`.
 
-    The zone's observed reference-year price (Energy_Price_Zones.csv) is scaled by
-    its trajectory's ratio of ``year`` to the reference year, so regional level and
-    national (or provincial) real-price movement are combined the same way for every
-    zone on either side of the border.
+    The reference price is scaled by the trajectory ratio between the two years.
 
-    Diesel is then reduced by ``defaults.RAILROAD_DIESEL_DEDUCTION_USD_PER_GAL``:
-    every diesel reference price in the file is a retail PUMP price (EIA retail
-    on-highway for US zones, StatCan self-service stations for Canadian ones) and
-    a railroad buys below it. This is the one place that deduction is applied, so
-    it is also the one place to audit it.
+    Args:
+        zone: `Zone` in `Energy_Price_Zones.csv`.
+        fuel: "Diesel" or "Electricity".
+        year: Scenario year.
+
+    Returns:
+        Diesel in USD/gal after subtracting
+        `defaults.RAILROAD_DIESEL_DEDUCTION_USD_PER_GAL` (floored at 1.0);
+        electricity in US cents/kWh. Real 2025 USD.
+
+    Raises:
+        KeyError: When no row matches `zone` and `fuel`.
     """
     row = energy_price_zones.filter((pl.col("Zone") == zone) & (pl.col("Fuel") == fuel))
     if row.height == 0:
@@ -1723,8 +1828,15 @@ def zone_energy_price(zone: str, fuel: str, year: int) -> float:
 
 
 def location_price_zones(location_map: Dict[str, List[alt.Location]]) -> pl.DataFrame:
-    """One row per location node -- ``Node``, ``Electricity_Zone``, ``Diesel_Zone`` -- from
-    the location file's "Electricity Price Region" / "Liquid Fuel Price Region" columns."""
+    """Return each location's electricity and diesel price zones.
+
+    Args:
+        location_map: Locations by node, each with `Location ID`,
+            `Electricity Price Region` and `Liquid Fuel Price Region`.
+
+    Returns:
+        Unique rows of `Node`, `Electricity_Zone` and `Diesel_Zone`.
+    """
     rows = []
     for loc_list in location_map.values():
         for loc in loc_list:
@@ -1803,22 +1915,34 @@ _ATB_REFERENCE_PE = 0.25
 
 
 def pack_duty_multiplier(power_to_energy: float) -> float:
-    """BatPaC pack-cost multiplier at this power-to-energy ratio, relative to the
-    ATB's 4-hour reference. 1.070 at 1C, 1.162 at 2C, 1.255 at 3C, 1.348 at 4C."""
+    """Return the BatPaC pack-cost multiplier for a duty ratio.
+
+    Normalized to the ATB 4-hour (0.25C) reference: 1.070 at 1C, 1.162 at 2C.
+
+    Args:
+        power_to_energy: Pack power-to-energy ratio (1/h, i.e. C-rate).
+
+    Returns:
+        Dimensionless multiplier on the ATB energy cost.
+    """
     return ((_BATPAC_PE_INTERCEPT + _BATPAC_PE_SLOPE * float(power_to_energy))
             / (_BATPAC_PE_INTERCEPT + _BATPAC_PE_SLOPE * _ATB_REFERENCE_PE))
 
 
 def pack_cost_usd(res: dict, usd_per_kwh: float) -> float:
-    """MANUFACTURING cost of one battery pack, in the 2025 base year, from a
-    locomotive pydict's ``res`` body and the ATB energy component for the year.
+    """Return one battery pack's manufacturing cost in 2025 USD.
 
-    The retail-price-equivalent multiplier is NOT applied here: callers that add
-    a chassis must apply it to the SUM, not to the pack alone.
+    The retail-price multiplier is left for callers to apply to pack plus chassis.
 
-    P/E uses whichever of charge and discharge is larger -- the pack has to be
-    built for its worst duty, and in this DoE the hybrids charge faster (3C) than
-    they discharge (2C), so taking discharge alone would under-price them.
+    Args:
+        res: Locomotive pydict `res` body with `energy_capacity_joules`,
+            `pwr_out_max_watts` and `pwr_in_max_watts`.
+        usd_per_kwh: ATB energy-component cost for the year (2024 USD/kWh).
+
+    Returns:
+        `kWh * usd_per_kwh * ATB_PACK_COST_SHARE * duty multiplier`, restated in
+        2025 USD; 0.0 when capacity is zero. Duty uses the larger of charge and
+        discharge power.
     """
     kwh = res["energy_capacity_joules"] * 1e-6 * utilities.KWH_PER_MJ
     if kwh <= 0:
@@ -1913,35 +2037,37 @@ def calculate_meet_pass_events(info: ScenarioInfo, units: str) -> MetricType:
     )
     return metric("Meet_Pass_Events", units, val)
 
-def _mj_to_units(units: str) -> float:
-    """MJ -> ``units`` multiplier (energy). Returns ``None`` if unsupported."""
+def _mj_to_units(units: str) -> Optional[float]:
+    """Return the multiplier from MJ to `units`.
+
+    Args:
+        units: One of "J", "MJ", "GJ", "TJ", "kWh" or "MWh".
+
+    Returns:
+        The conversion factor, or None for an unsupported unit.
+    """
     return {
         "J": 1e6, "MJ": 1.0, "GJ": 1e-3, "TJ": 1e-6,
         "kWh": utilities.KWH_PER_MJ, "MWh": utilities.KWH_PER_MJ / 1e3,
     }.get(units)
 
 
-def _sim_catenary_energy(sims) -> Tuple[float, float, float]:
-    """``(pantograph_draw_J, pantograph_return_J, line_loss_J)`` summed over a
-    sim vec's catenary interfaces.
+def _sim_catenary_energy(
+    sims: Optional[alt.SpeedLimitTrainSimVec],
+) -> Tuple[float, float, float]:
+    """Sum catenary draw, return and line loss (J).
 
-    All three are read from each locomotive's ``cat_int`` cumulative STATE on the
-    ``SpeedLimitTrainSim`` object(s) -- the authoritative source for
-    catenary delivery-chain energy -- not inferred or supplied out of band.
-    ``energy_elec_in_joules`` is the NET on-board (pantograph) energy: draw minus
-    anything returned to a receptive wire; ``energy_elec_regen_joules`` is the
-    returned part on its own (zero for a non-receptive wire, and absent on sims
-    saved before it existed), so gross draw is their sum.
-    ``energy_line_loss_joules`` is the additional resistive loss the substation
-    must supply, accumulated in both directions. Works for dual-mode and
-    pantograph-equipped battery-electric locomotives; locomotives without a
-    catenary interface contribute nothing.
+    Values are read from each `cat_int` terminal state, exact at any save interval.
 
-    Read the terminal STATE, not the history tail. The series are cumulative, so
-    only the final value matters -- and the last saved sample is not the final
-    value: it lands on the last multiple of ``save_interval`` before the train
-    arrives, dropping up to ``save_interval - 1`` seconds of delivery from every
-    locomotive on every trip, always downward. Off the state the number is exact.
+    Args:
+        sims: Simulations whose dual-mode or battery-electric locomotives carry a
+            `cat_int`; None yields zeros.
+
+    Returns:
+        `(pantograph_draw_J, pantograph_return_J, line_loss_J)`: gross energy
+        drawn at the pantograph (`energy_elec_in_joules` plus
+        `energy_elec_regen_joules`), energy returned to the wire, and resistive
+        line loss supplied by the substation.
     """
     net = 0.0
     regen = 0.0
@@ -1975,27 +2101,46 @@ def _sim_catenary_energy(sims) -> Tuple[float, float, float]:
 
 
 def _sim_catenary_energy_for(info: "ScenarioInfo") -> Tuple[float, float, float]:
+    """Return raw catenary draw, return and line loss (J).
+
+    Args:
+        info: Scenario supplying `sims` and an optional `agg_cache`.
+
+    Returns:
+        `(pantograph_draw_J, pantograph_return_J, line_loss_J)`, cached per sims
+        object.
+    """
     return _cached_sim_aggregate(
         info, "catenary_energy",
         lambda: _sim_catenary_energy(info.sims), annualize=False)
 
 
-def _sim_catenary_joules(sims) -> Tuple[float, float]:
-    """``(pantograph_delivered_J, line_loss_J)``: the GROSS draw at the pantograph
-    and the resistive line loss. Kept for callers that predate receptive
-    catenary; see :func:`_sim_catenary_energy` for the returned energy too."""
+def _sim_catenary_joules(
+    sims: Optional[alt.SpeedLimitTrainSimVec],
+) -> Tuple[float, float]:
+    """Sum gross pantograph draw and line loss (J).
+
+    Args:
+        sims: Simulations to read; None yields zeros.
+
+    Returns:
+        `(pantograph_delivered_J, line_loss_J)`.
+    """
     draw, _regen, line_loss = _sim_catenary_energy(sims)
     return draw, line_loss
 
 def calculate_energized_distance(info: ScenarioInfo, units: str) -> MetricType:
-    """Built energization distance by component (e.g. catenary wire track-miles).
+    """Report built energization distance per infrastructure component.
 
-    Reads optional ``Distance_Miles`` / ``Distance_Units`` columns from
-    ``info.infrastructure_costs`` (one row per infrastructure component) and emits
-    a ``Distance_Energized`` row per component that carries a distance, each with
-    its own units (e.g. contact/messenger wire in track-miles). Components without
-    a distance (or when the columns are absent) are skipped, so the metric is a
-    no-op unless the caller populates the distance columns.
+    Args:
+        info: Scenario whose `infrastructure_costs` may carry `Distance_Miles`
+            and `Distance_Units` per `Infrastructure_Type` row.
+        units: Units reported when `Distance_Units` is absent.
+
+    Returns:
+        `Distance_Energized` rows, one `Subset` per component with a distance,
+        summed within each `Distance_Units`; a None metric when no row carries a
+        distance.
     """
     infra = info.infrastructure_costs
     if infra is None or "Distance_Miles" not in infra.columns:
@@ -2018,14 +2163,17 @@ def calculate_energized_distance(info: ScenarioInfo, units: str) -> MetricType:
 
 
 def calculate_energy(info: ScenarioInfo, units: str) -> MetricType:
-    """Energy consumed by category: diesel fuel and grid electricity.
+    """Report energy consumed by category.
 
-    Electricity is additionally itemized into the portion lost across the catenary
-    power-delivery chain (``Electricity_Line_Loss``, read from the
-    ``SpeedLimitTrainSim`` catenary interface) and the portion supplied by
-    stationary chargers (``Electricity_Stationary_Charging`` = total grid
-    electricity minus the catenary grid draw). ``units`` may be any energy unit
-    (``MJ``/``J``/``GJ``/``TJ``/``kWh``/``MWh``).
+    Args:
+        info: Scenario supplying the sims, refuel sessions and annualization.
+        units: Energy unit: "J", "MJ", "GJ", "TJ", "kWh" or "MWh".
+
+    Returns:
+        `Energy` rows with subsets `Diesel`, `Electricity`,
+        `Electricity_Line_Loss` (catenary resistive loss from the sims) and
+        `Electricity_Stationary_Charging` (grid electricity beyond the catenary
+        grid draw); a None metric for an unsupported unit.
     """
     conv = _mj_to_units(units)
     if conv is None:
@@ -2065,20 +2213,16 @@ EN_ROUTE = "En_Route"
 
 
 def _en_route_flags(train_history: Dict[str, Any]) -> Optional[List[bool]]:
-    """Per sample: is the train between its origin and destination terminals?
+    """Flag samples where the train is between its terminals.
 
-    A train sim's history runs from its PLANNED departure to its arrival, so a
-    train the dispatcher holds stands at the origin -- at zero speed, and
-    therefore "dwelling" -- for the whole hold, and one that reaches its
-    destination stands there to the end of its history. Those are terminal
-    dwells, not en-route stops. Nothing about a meet or a congested subdivision
-    caused them, and an anti-idling policy treats a locomotive parked at a
-    terminal quite differently from one holding the main line for a meet.
+    En route means `offset_meters` lies strictly between its first and last values.
 
-    `offset_meters` is monotone along the path, so a sample is terminal while
-    the train has not yet left its starting offset or has reached its final
-    one. Returns None when offset was not recorded, in which case callers
-    report the undivided total only.
+    Args:
+        train_history: Train history dict with an `offset_meters` series.
+
+    Returns:
+        One flag per sample, or None when offset was not recorded or did not
+        advance.
     """
     offset = train_history.get("offset_meters") or []
     if len(offset) < 2:
@@ -2089,11 +2233,21 @@ def _en_route_flags(train_history: Dict[str, Any]) -> Optional[List[bool]]:
     return [(o > first) and (o < last) for o in offset]
 
 
-def _dwell_frame(train_history: Dict[str, Any], train_idx: int, **extra):
-    """One train's dwell samples, with interval, and an `en_route` flag.
+def _dwell_frame(
+    train_history: Dict[str, Any], train_idx: int, **extra: Any
+) -> pl.DataFrame:
+    """Build one train's time, speed and `en_route` frame.
 
-    `en_route` is all-True when offset was not recorded, so the two reported
-    subsets coincide rather than one of them silently becoming zero.
+    Args:
+        train_history: Train history dict with `time_seconds` and
+            `speed_meters_per_second`, optionally `offset_meters`.
+        train_idx: Index written to the `train_idx` column.
+        **extra: Additional equal-length columns to include.
+
+    Returns:
+        Frame with `history.time_seconds`, `history.speed_meters_per_second`,
+        `en_route` (all True when offset was not recorded), `train_idx` and any
+        `extra` columns.
     """
     time_seconds = train_history.get("time_seconds") or []
     flags = _en_route_flags(train_history)
@@ -2110,19 +2264,17 @@ def _dwell_frame(train_history: Dict[str, Any], train_idx: int, **extra):
 
 
 def _with_intervals(frame: pl.LazyFrame) -> pl.LazyFrame:
-    """Add each sample's interval, and whether the train was stopped throughout.
+    """Add each sample's interval and a stopped-throughout flag.
 
-    `stopped_interval` requires zero speed at BOTH ends, and it is what the
-    energy metrics attribute to idling. The interval in which a train pulls
-    away begins at zero speed but contains the whole acceleration, so charging
-    it to dwell overstates idle fuel by 16% on a congested Spokane week --
-    measured. Requiring both ends lands within 0.19% of multiplying idle power
-    by dwell time, while keeping the exactness of a cumulative difference.
+    `stopped_interval` requires zero speed at both ends of the interval.
 
-    `Dwell_Time` deliberately keeps the looser reading (zero speed at the start
-    of the interval), because it answers a different question -- how long was
-    the train stationary -- and dropping partial intervals would make any stop
-    shorter than two sampling intervals invisible.
+    Args:
+        frame: Samples with `train_idx`, `history.time_seconds` and
+            `history.speed_meters_per_second`.
+
+    Returns:
+        `frame` sorted by train and time with `interval_seconds` (time to the
+        next sample, 0 at the last) and boolean `stopped_interval` added.
     """
     return frame.sort("train_idx", "history.time_seconds").with_columns(
         (
@@ -2144,22 +2296,15 @@ def _with_intervals(frame: pl.LazyFrame) -> pl.LazyFrame:
 
 
 def _interval_delta(column: str, alias: str) -> pl.Expr:
-    """Energy accumulated over each sample's interval, from a cumulative series.
+    """Difference a cumulative series over each sample's interval.
 
-    `E[i+1] - E[i]` is exact for any interval, because ALTRIOS accumulates the
-    cumulative series every one-second timestep -- the save interval only
-    decides where the boundaries fall, never the accuracy between them.
-    Multiplying a snapshot rate by the interval instead assumes the rate held
-    for the whole interval, which is false wherever it matters most: the sample
-    where a train comes to a stand or pulls away.
+    Args:
+        column: Cumulative series column, monotone within each train.
+        alias: Name of the resulting column.
 
-    It also survives a component recording at a coarser interval than the
-    train. A stale rate carried forward by the as-of join would attribute
-    moving power to a stopped sample, a one-sided overestimate; a cumulative
-    difference stays exact per bin and merely cannot localize within it.
-
-    Clipped at zero: these series are monotonic by construction, so a negative
-    difference would be a bug, and silently subtracting energy would hide it.
+    Returns:
+        Expression for `column[i+1] - column[i]` within `train_idx`, 0 at the
+        last sample and clipped at zero.
     """
     return (
         (pl.col(column).shift(-1).over("train_idx") - pl.col(column))
@@ -2169,8 +2314,21 @@ def _interval_delta(column: str, alias: str) -> pl.Expr:
     )
 
 
-def _both_subsets(frame: pl.LazyFrame, column: str, name: str, units: str, scale=1.0):
-    """The same quantity totalled over all dwell, and over en-route dwell only."""
+def _both_subsets(
+    frame: pl.LazyFrame, column: str, name: str, units: str, scale: float = 1.0
+) -> MetricType:
+    """Total a column over all dwell and en-route dwell.
+
+    Args:
+        frame: Samples with `column` and a boolean `en_route` column.
+        column: Column to sum.
+        name: Metric name.
+        units: Metric units.
+        scale: Factor applied to both totals.
+
+    Returns:
+        Two `name` rows: `Subset` "All" and `Subset` `EN_ROUTE`.
+    """
     totals = (
         frame.select(
             pl.col(column).sum().alias("all"),
@@ -2192,6 +2350,17 @@ def _both_subsets(frame: pl.LazyFrame, column: str, name: str, units: str, scale
 
 
 def calculate_dwell_time(info: ScenarioInfo, units: str) -> MetricType:
+    """Total the time trains spend stationary.
+
+    Args:
+        info: Scenario whose sims saved `time_seconds` and
+            `speed_meters_per_second` history.
+        units: Units label for the metric; values are in seconds.
+
+    Returns:
+        `Dwell_Time` for all dwell and for en-route dwell; a None metric when no
+        history was saved.
+    """
     slts_results = []
     i = 0
     for slts in info.sims.to_pydict():
@@ -2219,23 +2388,20 @@ def _align_on_step(
     component_history: Dict[str, Any],
     component_columns: Dict[str, List[float]],
 ) -> Optional[pl.DataFrame]:
-    """Train time and speed with a component's series aligned alongside.
+    """Align a component's series with train time and speed.
 
-    Components may record at their own ``save_interval`` (see
-    ``altrios.history``), in which case their samples are a subset of the
-    train's and cannot be zipped positionally -- the lists are simply different
-    lengths, and if they happened to match, the rows would still mean different
-    instants.
+    Rows pair by a backward as-of join on step counter `i` when both sides carry it.
 
-    Every history carries the step counter ``i``, which is exactly why ``i`` is
-    not maskable, so a backward as-of join on it gives each train sample the
-    component value in effect at that moment. When both record at the same
-    interval -- the usual case, and the one these dwell metrics want, since a
-    coarser component series cannot resolve individual stops -- the join is
-    exact and this costs only the sort.
+    Args:
+        train_history: Train history with `time_seconds`,
+            `speed_meters_per_second`, optionally `offset_meters` and `i`.
+        component_history: Component history supplying its `i` series.
+        component_columns: Output column name to the component series to align.
 
-    Returns ``None`` when either side recorded nothing, or when there is no
-    ``i`` to join on and the lengths disagree.
+    Returns:
+        Frame with `history.time_seconds`, `history.speed_meters_per_second`,
+        `en_route` and the component columns; None when either side is empty or
+        no `i` is available and the lengths differ.
     """
     time_seconds = train_history.get("time_seconds") or []
     speed = train_history.get("speed_meters_per_second") or []
@@ -2280,6 +2446,19 @@ def _align_on_step(
 
 
 def calculate_dwell_fuel_energy(info: ScenarioInfo, units: str) -> MetricType:
+    """Total consist fuel energy burned while trains are stopped.
+
+    An interval counts when speed is zero at both of its ends.
+
+    Args:
+        info: Scenario whose sims saved train history and consist
+            `energy_fuel_joules` history.
+        units: "J", "MJ", "MWh" or "kWh".
+
+    Returns:
+        `Dwell_Fuel_Energy` for all dwell and for en-route dwell; a None metric
+        for an unsupported unit or missing history.
+    """
     if units == "J":
         conversion_from_joule = 1.0
     elif units == "MJ":
@@ -2338,6 +2517,20 @@ def calculate_dwell_fuel_energy(info: ScenarioInfo, units: str) -> MetricType:
 
 
 def calculate_apu_fuel_consumption(info: ScenarioInfo, units: str) -> MetricType:
+    """Estimate fuel an auxiliary power unit burns during dwell.
+
+    Mean auxiliary power per stopped interval feeds a linear gal/hr APU fuel curve.
+
+    Args:
+        info: Scenario whose sims saved train history and per-locomotive
+            `energy_aux_joules` history at a common interval.
+        units: "J", "MJ", "MWh" or "kWh".
+
+    Returns:
+        `APU_Fuel_Consumption` for all dwell and for en-route dwell, converted
+        from gallons with the GREET diesel density and heating value; a None
+        metric for an unsupported unit or missing or misaligned history.
+    """
     if units == "J":
         conversion_from_joule = 1.0
     elif units == "MJ":

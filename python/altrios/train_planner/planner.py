@@ -20,19 +20,26 @@ from altrios import defaults
 def _select_reused_locomotives(
     loco_pool: pl.DataFrame,
     origin: str,
-    loco_types: list,
+    loco_types: list[str],
     dispatch_time: float,
-):
-    """Pick units for one train under ``config.reuse_locomotives``.
+) -> Tuple[pl.Series, int]:
+    """Pick `Ready` units for one train, preferring used ones.
 
-    For each locomotive type the plan asks for (one entry per unit), in order of
-    preference: units already in service and ``Ready`` at ``origin`` (earliest
-    arrival first); units in service and ``Ready`` at another node (implicit
-    repositioning, counted but not simulated); units never dispatched (at the
-    origin first). ``Ready`` means the planner's refueling queue and servicing are
-    both complete, so a battery unit is charged to its target.
+    Per type: used units at `origin`, used elsewhere (implicit move), then unused.
 
-    Returns ``(selected mask aligned with loco_pool, number of implicit moves)``.
+    Args:
+        loco_pool: Locomotive pool with `Status`, `Node`, `Locomotive_Type`,
+            `Times_Dispatched`, `Arrival_Time_Hr` and `Locomotive_ID`.
+        origin: Node the train departs from.
+        loco_types: One locomotive type per unit the plan asks for.
+        dispatch_time: Departure time (hr), reported in the error message.
+
+    Returns:
+        A boolean mask aligned with `loco_pool` marking the selected units, and
+        the number of implicit repositioning moves.
+
+    Raises:
+        ValueError: When fewer `Ready` units of a type exist than are needed.
     """
     from collections import Counter
 

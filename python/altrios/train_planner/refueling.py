@@ -77,31 +77,47 @@ _REFUELER_JOIN_COLS = [
 
 
 def empty_refuel_sessions() -> pl.DataFrame:
-    """Return an empty refueling-session DataFrame with the canonical schema."""
+    """Return an empty refueling-session frame.
+
+    Returns:
+        Empty DataFrame with the `REFUEL_SESSION_SCHEMA` columns and dtypes.
+    """
     return pl.DataFrame(schema=REFUEL_SESSION_SCHEMA)
 
 
 @njit(cache=True)
 def _assign_ports(
-    group_id,
-    is_new,
-    arrival,
-    done,
-    rate,
-    eff,
-    ideal,
-    next_dep,
-    port_count,
-    current_time,
-):
-    """Sequential earliest-freeing-port assignment over contiguous charger groups.
+    group_id: np.ndarray,
+    is_new: np.ndarray,
+    arrival: np.ndarray,
+    done: np.ndarray,
+    rate: np.ndarray,
+    eff: np.ndarray,
+    ideal: np.ndarray,
+    next_dep: np.ndarray,
+    port_count: np.ndarray,
+    current_time: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Assign newly queued locomotives to the earliest-freeing port.
 
-    Rows are pre-sorted so each charger group is contiguous, with in-progress
-    sessions (``is_new == 0``, sorted by finish time) first and newly queued
-    locomotives (``is_new == 1``, sorted by arrival then ID) after. For each new
-    locomotive the earliest-freeing port is chosen; ``next_dep`` caps the finish
-    time (``inf`` disables the cap). Results are written per row; ``scheduled``
-    flags the rows that received a session.
+    Rows are grouped by charger, in-progress sessions first, then new rows by arrival.
+
+    Args:
+        group_id: Charger-group ID per row (int64).
+        is_new: 1 for a newly queued row, 0 for an in-progress session (int8).
+        arrival: Arrival time per row (hr).
+        done: Scheduled finish time of in-progress sessions (hr); NaN for new rows.
+        rate: Charger power delivered to the battery (J/hr).
+        eff: Charger efficiency (battery energy over grid energy).
+        ideal: Charging duration needed to reach the target (hr).
+        next_dep: Next departure per row (hr); inf disables the cap.
+        port_count: Ports at the row's charger (int64).
+        current_time: Current time (hr).
+
+    Returns:
+        Per-row arrays of start time (hr), end time (hr), duration (hr), battery
+        energy (J), grid energy (J), and an int8 flag set to 1 where a session
+        was scheduled.
     """
     n = group_id.shape[0]
     out_start = np.zeros(n)
@@ -174,18 +190,18 @@ def _schedule_refueling(
     current_time: float,
     departures: Optional[pl.DataFrame],
 ) -> Tuple[pl.DataFrame, pl.DataFrame]:
-    """
-    Assign charging ports to newly queued locomotives and build session records.
+    """Assign ports to queued locomotives and build session records.
 
-    Locomotives already refueling (with a non-null ``Refueling_Done_Time_Hr``) keep
-    their existing schedule and continue to occupy ports. Newly queued locomotives
-    (null ``Refueling_Done_Time_Hr``) are assigned to the earliest-freeing port,
-    processed in arrival-then-ID order within each charger group.
+    Scheduled locomotives keep their session; new ones take the earliest-freeing port.
 
-    The per-group sequential assignment runs in a single Numba kernel over flat
-    arrays, avoiding per-group DataFrame materialization and per-row iteration.
+    Args:
+        loco_pool: Locomotive pool with the module's canonical columns.
+        current_time: Current time (hr).
+        departures: Optional `Locomotive_ID` / `Departure_Time_Hr` frame; when
+            given, charging is capped at each locomotive's next departure.
 
-    Returns the updated ``loco_pool`` and a DataFrame of the sessions started here.
+    Returns:
+        The updated pool and a frame of the sessions started here.
     """
     queue = loco_pool.filter(pl.col("Status") == "Refuel_Queue")
     if queue.height == 0:
@@ -303,40 +319,22 @@ def update_refuel_queue(
     refuel_sessions: pl.DataFrame,
     departures: Optional[pl.DataFrame] = None,
 ) -> Tuple[pl.DataFrame, pl.DataFrame]:
-    """
-    Advance the refueling/servicing queue to ``current_time``.
+    """Advance the refueling and servicing queue to `current_time`.
 
-    Processes, in order:
+    Arrivals are queued and given ports; finished units move to `Servicing` or `Ready`.
 
-    1. Locomotives that have arrived (``Dispatched`` with ``Arrival_Time_Hr`` <=
-       ``current_time``): refresh their charger info for the arrival node, move them
-       to ``Refuel_Queue``, compute their charging target and ideal duration, then
-       assign ports and record the resulting sessions.
-    2. Locomotives whose charging is complete (``Refuel_Queue`` with
-       ``Refueling_Done_Time_Hr`` <= ``current_time``): move them to ``Servicing`` or
-       ``Ready`` depending on whether servicing is still outstanding.
-    3. Locomotives whose servicing is complete: move them to ``Ready``.
+    Args:
+        loco_pool: Locomotive pool with the module's canonical columns.
+        refuelers: Facilities keyed by `Node`, `Locomotive_Type` and `Fuel_Type`,
+            with `Refueler_J_Per_Hr`, `Refueler_Efficiency`, `Port_Count` and
+            `Battery_Headroom_J`.
+        current_time: Current simulation time (hr).
+        refuel_sessions: Accumulated session records (`REFUEL_SESSION_SCHEMA`).
+        departures: Optional `Locomotive_ID` / `Departure_Time_Hr` frame; when
+            given, charging is capped at each locomotive's next departure.
 
-    Parameters
-    ----------
-    loco_pool : pl.DataFrame
-        Locomotive pool (see module docstring for the canonical schema).
-    refuelers : pl.DataFrame
-        Charging/refueling facilities, keyed by ``Node``/``Locomotive_Type``/``Fuel_Type``.
-    current_time : float
-        Current simulation time, in hours.
-    refuel_sessions : pl.DataFrame
-        Accumulator of session records (canonical ``REFUEL_SESSION_SCHEMA``); new
-        sessions are appended.
-    departures : Optional[pl.DataFrame]
-        If provided (``Locomotive_ID``, ``Departure_Time_Hr``), charging is capped at
-        each locomotive's next departure after ``current_time``. If ``None``,
-        locomotives always charge to their target (planner regime).
-
-    Returns
-    -------
-    Tuple[pl.DataFrame, pl.DataFrame]
-        Updated ``loco_pool`` and the (appended) ``refuel_sessions``.
+    Returns:
+        The updated pool, sorted by `Locomotive_ID`, and the appended sessions.
     """
     arrived = (pl.col("Status") == "Dispatched") & (
         pl.col("Arrival_Time_Hr") <= current_time

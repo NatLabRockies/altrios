@@ -34,8 +34,18 @@ DEFAULT_PREFIX = THIS_DIR / "results" / "spokane_lethbridge"
 
 
 def endpoint_names(locations_csv: Path) -> tuple[str, str]:
-    """Origin/destination location IDs from the builder's locations CSV
-    (rows are ordered origin first, destination last)."""
+    """Read the origin and destination IDs from a locations CSV.
+
+    Args:
+        locations_csv: Builder locations CSV, origin row first and
+            destination row last.
+
+    Returns:
+        Origin and destination location IDs.
+
+    Raises:
+        ValueError: If the CSV has no rows.
+    """
     with open(locations_csv) as f:
         rows = list(csv.DictReader(f))
     if not rows:
@@ -43,8 +53,25 @@ def endpoint_names(locations_csv: Path) -> tuple[str, str]:
     return rows[0]["Location ID"], rows[-1]["Location ID"]
 
 
-def run_trip(network, location_map, origin, dest, args) -> dict:
-    """Dispatch and walk one train from origin to dest; return summary stats."""
+def run_trip(
+    network: alt.Network,
+    location_map: dict[str, list[alt.Location]],
+    origin: str,
+    dest: str,
+    args: argparse.Namespace,
+) -> dict[str, str | float]:
+    """Dispatch and walk one train between two locations.
+
+    Args:
+        network: Corridor network to simulate on.
+        location_map: Location rows keyed by location ID.
+        origin: Origin location ID.
+        dest: Destination location ID.
+        args: Parsed options: cars_loaded, cars_empty, locos, save_interval.
+
+    Returns:
+        Endpoints, distance [km], duration [h], fuel [GJ] and wall time [s].
+    """
     rail_vehicles = [
         alt.RailVehicle.from_file(
             alt.resources_root() / "rolling_stock/Manifest_Loaded.yaml"
@@ -103,6 +130,12 @@ def run_trip(network, location_map, origin, dest, args) -> dict:
 
 
 def main(args: argparse.Namespace) -> None:
+    """Simulate trips between the endpoints of a built corridor.
+
+    Args:
+        args: Parsed options; `prefix` locates the network and locations CSV,
+            `one_way` limits the run to origin -> destination.
+    """
     prefix = args.prefix.resolve()
     # The builder writes msgpack by default; older builds may be YAML.
     candidates = [Path(f"{prefix}.msgpack"), Path(f"{prefix}.yaml")]

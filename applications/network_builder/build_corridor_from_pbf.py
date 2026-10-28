@@ -24,7 +24,12 @@ NETWORKS_DIR = "networks"
 # See BuilderConfig in altrios_builder_utils.py for the demo defaults.
 
 
-def check_osmium_installed():
+def check_osmium_installed() -> bool:
+    """Return whether the osmium CLI runs.
+
+    Returns:
+        True if `osmium --version` succeeds.
+    """
     try:
         subprocess.run(
             ["osmium", "--version"],
@@ -37,7 +42,17 @@ def check_osmium_installed():
         return False
 
 
-def download_file(url, dest_path):
+def download_file(url: str, dest_path: str) -> None:
+    """Download a URL to a path, skipping existing files.
+
+    Args:
+        url: Source URL.
+        dest_path: Destination file path.
+
+    Raises:
+        Exception: The download error, re-raised after removing the partial
+            file.
+    """
     if os.path.exists(dest_path):
         logger.info(f"File {dest_path} already exists. Skipping download.")
         return
@@ -59,10 +74,18 @@ def download_file(url, dest_path):
         raise e
 
 
-def create_corridor_geojson(waypoints, output_path, buffer_deg=0.5):
-    """
-    Create a buffered polygon around the waypoints and save as GeoJSON.
-    0.5 degrees approx 55 km radius (110km total width)
+def create_corridor_geojson(
+    waypoints: list[tuple[str, float, float]],
+    output_path: str,
+    buffer_deg: float = 0.5,
+) -> None:
+    """Write a buffered polygon around the waypoints as GeoJSON.
+
+    Args:
+        waypoints: (name, lat, lon) points along the corridor.
+        output_path: Destination GeoJSON file path.
+        buffer_deg: Buffer radius around the waypoint line, degrees (0.5 is
+            about 55 km).
     """
     logger.info("Creating corridor polygon...")
 
@@ -88,22 +111,31 @@ def create_corridor_geojson(waypoints, output_path, buffer_deg=0.5):
 
 
 def build_corridor(
-    output_name,
-    regions,
-    waypoints,
-    networks_dir=NETWORKS_DIR,
-    cache_dir=CACHE_DIR,
-    buffer_deg=0.4,  # ~45 km radius around the waypoint line
-):
-    """Download regional OSM PBFs, clip them to a buffered corridor polygon
-    around ``waypoints``, filter to ``railway=rail``, and write
-    ``{networks_dir}/{output_name}.osm.pbf`` and ``.osm.xml``.
+    output_name: str,
+    regions: list[dict[str, str]],
+    waypoints: list[tuple[str, float, float]],
+    networks_dir: str = NETWORKS_DIR,
+    cache_dir: str = CACHE_DIR,
+    buffer_deg: float = 0.4,  # ~45 km radius around the waypoint line
+) -> str:
+    """Clip OSM PBF extracts to a corridor and emit XML.
 
-    Pass ``output_name`` / ``regions`` / ``waypoints`` to target a different
-    corridor without editing this file. ``regions`` is a list of
-    ``{"name", "url"}`` Geofabrik PBF entries; ``waypoints`` is a list of
-    ``(name, lat, lon)`` points. Requires the osmium-tool CLI. Returns the path
-    to the written ``.osm.xml`` extract (the input to build_altrios_with_sidings).
+    Downloads, merges and clips the PBFs, then keeps only railway=rail ways.
+
+    Args:
+        output_name: Basename of the `.osm.pbf` and `.osm.xml` outputs written
+            under `networks_dir`.
+        regions: Geofabrik PBF entries with "name" and "url" keys.
+        waypoints: (name, lat, lon) points along the corridor.
+        networks_dir: Directory receiving the clipped outputs.
+        cache_dir: Directory for downloaded and intermediate PBFs.
+        buffer_deg: Buffer radius around the waypoint line, degrees.
+
+    Returns:
+        Path to the written `.osm.xml` extract.
+
+    Raises:
+        SystemExit: If the osmium CLI is not installed.
     """
     if not check_osmium_installed():
         logger.error("Error: 'osmium' command line tool not found.")
@@ -186,7 +218,8 @@ def build_corridor(
     return final_xml_path
 
 
-def main():
+def main() -> None:
+    """Build the default demo corridor from BuilderConfig."""
     # Builds the default demo corridor from BuilderConfig; callers wanting a
     # different corridor should pass their own output_name/regions/waypoints.
     try:

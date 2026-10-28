@@ -219,7 +219,17 @@ def smoothen(signal: npt.ArrayLike, period: int = 9) -> npt.ArrayLike:
 def print_dt():
     print(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
-def set_network_max_speed(network_dict: dict, max_speed_mph: float):
+def set_network_max_speed(network_dict: list, max_speed_mph: float) -> list:
+    """Cap every link speed limit in a network pydict.
+
+    Args:
+        network_dict: Network pydict from `Network.to_pydict()`; element 1 holds
+            the links, each with `speed_set.speed_limits`.
+        max_speed_mph: Speed cap (mph).
+
+    Returns:
+        The same pydict, modified in place.
+    """
     max_speed_meters_per_second = max_speed_mph * 1000 / 3600 / alt.utilities.MI_PER_KM
     for link_idx in range(len(network_dict[1])):
         if network_dict[1][link_idx]['speed_set'] is None: 
@@ -232,7 +242,17 @@ def set_network_max_speed(network_dict: dict, max_speed_mph: float):
 
     return network_dict
 
-def scale_network_speed_limits(network_dict: dict, scaler: float):
+def scale_network_speed_limits(network_dict: list, scaler: float) -> list:
+    """Multiply every link speed limit in a network pydict.
+
+    Args:
+        network_dict: Network pydict from `Network.to_pydict()`; element 1 holds
+            the links, each with `speed_set.speed_limits`.
+        scaler: Factor applied to each `speed_meters_per_second`.
+
+    Returns:
+        The same pydict, modified in place.
+    """
     for link_idx in range(len(network_dict[1])):
         if network_dict[1][link_idx]['speed_set'] is None: 
             continue
@@ -244,7 +264,27 @@ def scale_network_speed_limits(network_dict: dict, scaler: float):
 
     return network_dict
 
-def increase_link_speed_limits(network_dict: dict, link_indices: list[int], new_speed_limit_meters_per_second: float, alt_value: float, overrides: dict = None):
+def increase_link_speed_limits(
+    network_dict: list,
+    link_indices: list[int],
+    new_speed_limit_meters_per_second: float,
+    alt_value: float,
+    overrides: dict[int, float] | None = None,
+) -> tuple[list, dict[int, float]]:
+    """Assign per-link speed limits in a network pydict.
+
+    Args:
+        network_dict: Network pydict from `Network.to_pydict()`; element 1 holds
+            the links, each with `speed_set.speed_limits`.
+        link_indices: `idx_curr` values of the links set to the new limit.
+        new_speed_limit_meters_per_second: Limit (m/s) for `link_indices`.
+        alt_value: Limit (m/s) for every other link without an override.
+        overrides: Link list position to limit (m/s) for other specific links.
+
+    Returns:
+        The updated pydict, and link list position to assigned limit for every
+        link whose limit differs from `alt_value`.
+    """
     updated_network_dict = network_dict.copy()
     non_max_vals = {}
     for link_idx in range(len(network_dict[1])):
@@ -271,30 +311,25 @@ def convert_network(
     overwrite: bool = False,
     verify: bool = True,
 ) -> Path:
-    """
-    Converts a rail network file to another serialization format, losslessly.
+    """Convert a rail network file to another format, losslessly.
 
-    `msgpack` is the recommended format for large, machine-generated networks: it is roughly
-    5x smaller than `yaml` and substantially faster to read and write, which matters most for
-    high-resolution networks that carry lat/lon and OSM IDs. `yaml` remains preferable for small,
-    hand-edited networks, where being human-readable and diffable is worth the size.
+    `msgpack` suits large generated networks; `yaml` suits small hand-edited ones.
 
-    Note that `json` is NOT lossless here: it is written at full precision but parsed back up to
-    1 ULP off, so a round trip perturbs roughly 10% of the float fields.
+    Args:
+        src: Existing network file; the format is inferred from its extension.
+        dest: Path to write; defaults to `src` with the suffix of `dest_format`.
+        dest_format: Format `Network.to_file` accepts, e.g. "msgpack" or "yaml";
+            "json" perturbs floats by up to 1 ULP on reading.
+        overwrite: Whether to replace an existing `dest`.
+        verify: Whether to read `dest` back and check it matches `src`.
 
-    # Arguments
-    src: path to the existing network file; format is inferred from its extension
-    dest: path to write; defaults to `src` with its suffix replaced by `dest_format`
-    dest_format: any format accepted by `Network.to_file` -- e.g. "msgpack", "yaml"
-    overwrite: if False (default), refuses to overwrite an existing `dest`
-    verify: if True (default), reads `dest` back and checks it matches `src`
+    Returns:
+        The path written. `src` is left untouched.
 
-    # Returns
-    The path that was written.
-
-    # Note
-    `src` is never modified or removed; delete the original yourself once you are satisfied
-    with the converted file.
+    Raises:
+        ValueError: When `dest` resolves to `src`.
+        FileExistsError: When `dest` exists and `overwrite` is False.
+        RuntimeError: When `verify` is True and the round trip differs.
     """
     src = Path(src)
     if dest is None:
@@ -372,7 +407,16 @@ def show_plots() -> bool:
         == "true"
     )
 
-def network_to_latlon(network: alt.Network) -> pl.DataFrame:
+def network_to_latlon(network: alt.Network) -> pl.LazyFrame:
+    """Explode a network's link headings into lat/lon rows.
+
+    Args:
+        network: Network whose link `headings` carry `lat` and `lon`.
+
+    Returns:
+        LazyFrame with one row per heading point: the link's `idx_*` columns,
+        `osm_id`, `lat` and `lon`.
+    """
     return(
         pl.DataFrame(network.to_pydict()[1]).lazy()
             .explode("headings")

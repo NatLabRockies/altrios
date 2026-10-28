@@ -11,15 +11,14 @@ logger = logging.getLogger(__name__)
 
 def smooth_elevation(elevations: List[float], window_size: int = 5) -> List[float]:
     """
-    Applies a sliding window smoothing to a list of elevations.
-    matches the sliding window logic used in elevation processing.
+    Smooth elevations with a centered rolling mean.
 
     Args:
-        elevations: List of elevation values in meters.
-        window_size: The size of the sliding window. Must be odd.
+        elevations: Elevations in meters.
+        window_size: Window length in samples; even values are rounded up to odd.
 
     Returns:
-        List of smoothed elevation values.
+        Smoothed elevations, same length as the input.
     """
     if not elevations:
         return []
@@ -43,7 +42,14 @@ def smooth_elevation(elevations: List[float], window_size: int = 5) -> List[floa
 
 def is_siding(tags: Dict[str, str]) -> bool:
     """
-    Determines if a railway way is a siding based on OSM tags.
+    Tell whether an OSM railway way is a siding.
+
+    Args:
+        tags: OSM tags of the way.
+
+    Returns:
+        True for siding, yard, spur or crossover service, or industrial,
+        military or test usage.
     """
     service = tags.get("service", "")
     if service in ["siding", "yard", "spur", "crossover"]:
@@ -60,13 +66,13 @@ def extract_sidings(
     graph_edges: List[Tuple[Any, Any, Dict]],
 ) -> List[Tuple[Any, Any, Dict]]:
     """
-    Extracts edges that are identified as sidings from a list of graph edges.
+    Keep the graph edges whose tags mark a siding.
 
     Args:
-        graph_edges: List of (u, v, data) tuples where data contains 'tags'.
+        graph_edges: (u, v, data) tuples; data carries 'tags'.
 
     Returns:
-        List of (u, v, data) tuples for sidings.
+        The siding edges, in input order.
     """
     sidings = []
     for u, v, data in graph_edges:
@@ -84,18 +90,19 @@ def set_speed_limits(
     max_grade: float = 0.02,
 ) -> List[Dict[str, Any]]:
     """
-    Sets the speed limit for a list of links.
-    Populates the 'speed_set' field in the link dictionary.
+    Give each link one speed limit over its full length.
+
+    Sidings get siding_speed_mps, other links default_speed_mps; dummy link 0 gets None.
 
     Args:
-        links: List of link dictionaries (ALTRIOS Link format).
-        default_speed_mps: Default speed limit in meters per second.
-        siding_speed_mps: Speed limit for sidings.
-        limit_by_grade: If True, reduces speed limit based on grade.
-        max_grade: The grade threshold.
+        links: Link dictionaries in ALTRIOS format.
+        default_speed_mps: Main-line speed limit, m/s.
+        siding_speed_mps: Siding speed limit, m/s.
+        limit_by_grade: Unused.
+        max_grade: Unused.
 
     Returns:
-        List of links with updated speed_set.
+        The same list with 'speed_set' populated.
     """
     for link in links:
         if link.get("idx_curr", -1) == 0:
@@ -134,15 +141,16 @@ def add_endpoint_buffer(
     geometry_points: List[Tuple[float, float]], train_length_meters: float
 ) -> List[Tuple[float, float]]:
     """
-    Adds an end point to the geometry to account for train length.
-    Extends the last segment by train_length_meters.
+    Extend a polyline's last segment by the train length.
+
+    The new point continues the final segment's bearing on a spherical earth.
 
     Args:
-        geometry_points: List of (lon, lat) tuples.
-        train_length_meters: The length to extend in meters.
+        geometry_points: (lon, lat) tuples in degrees.
+        train_length_meters: Distance to extend, m.
 
     Returns:
-        Updated list of geometry points.
+        The points plus one appended (lon, lat); unchanged if fewer than two points.
     """
     from math import radians, cos, sin, asin, sqrt, atan2, degrees
 
@@ -180,8 +188,13 @@ def add_endpoint_buffer(
 
 def load_network_file(file_path: Union[str, Path]) -> Any:
     """
-    Loads network data from various file types (JSON, YAML, CSV).
-    Returns parsed data.
+    Load a JSON, YAML or CSV network file.
+
+    Args:
+        file_path: Path to the file; the suffix selects the parser.
+
+    Returns:
+        Parsed JSON or YAML, or a list of row dicts for CSV.
     """
     path = Path(file_path)
     if not path.exists():

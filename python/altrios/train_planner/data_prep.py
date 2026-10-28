@@ -212,12 +212,13 @@ def append_loco_info(loco_info: pd.DataFrame) -> pd.DataFrame:
             return loco_type["res"]["energy_capacity_joules"]
 
     def get_has_battery(loco: alt.Locomotive) -> bool:
-        """True when the locomotive carries a reversible energy storage system.
+        """Report whether the locomotive has a battery.
 
-        Used in preference to ``Fuel_Type`` wherever behavior depends on having a
-        battery rather than on which fuel the locomotive is accounted against: a
-        hybrid is ``Fuel_Type == "Diesel"`` but still has a pack whose state of
-        charge must be managed.
+        Args:
+            loco: Locomotive to inspect.
+
+        Returns:
+            True when the locomotive has a reversible energy storage system.
         """
         loco_dict = loco.to_pydict()
         loco_type = next(iter(loco_dict["loco_type"].values()))
@@ -239,6 +240,16 @@ def loco_info_to_pool(
     loco_pool: pl.DataFrame,
     config: planner_config.TrainPlannerConfig
 ) -> pl.DataFrame:
+    """Join locomotive-type attributes onto the pool.
+
+    Args:
+        loco_pool: Pool with `Locomotive_Type` and `Node` columns.
+        config: Planner config whose `loco_info` supplies per-type attributes.
+
+    Returns:
+        Pool with `Locomotive_Type` and `Node` cast to Categorical and the
+        `loco_info` columns other than `Rust_Loco` joined on `Locomotive_Type`.
+    """
     info_df = pl.from_pandas(
         config.loco_info.drop(labels="Rust_Loco", axis=1),
         schema_overrides={
@@ -254,16 +265,17 @@ def loco_info_to_pool(
     )
 
 def add_loco_status_columns(loco_pool: pl.DataFrame) -> pl.DataFrame:
-    """Initialize the canonical locomotive-pool status/refueling columns.
+    """Add the refueling and scheduling bookkeeping columns.
 
-    Adds the per-locomotive scheduling and refueling-session bookkeeping columns
-    consumed by :mod:`altrios.train_planner.refueling` and
-    :mod:`altrios.train_planner.planner` (all time columns ``_Hr``-suffixed, energy
-    columns ``_J``-suffixed). Values are the neutral "Ready, unscheduled" defaults,
-    matching the schema :func:`build_locopool` constructs directly; charger columns
-    (``Refueler_J_Per_Hr`` etc.) are refreshed from the refuelers when a locomotive
-    arrives at a node. These defaults are also written by ``build_locopool``'s own
-    constructor, so re-applying them there is a harmless no-op.
+    Args:
+        loco_pool: Locomotive pool frame.
+
+    Returns:
+        Pool with `Arrival_Time_Hr`, `Servicing_Done_Time_Hr`,
+        `Refueling_Done_Time_Hr`, `Refuel_Start_Time_Hr`, `Refuel_Duration_Hr`,
+        `Refuel_Energy_J`, `Trip_Energy_J`, `Refueler_J_Per_Hr`,
+        `Refueler_Efficiency`, `Port_Count` and `SOC_Target_J` set to their
+        "Ready, unscheduled" defaults.
     """
     return loco_pool.with_columns(
         pl.lit(0.0).alias("Arrival_Time_Hr"),
@@ -647,10 +659,20 @@ def append_charging_guidelines(
 _HEADROOM_WILDCARDS = ("all", "any", "")
 
 
-def _narrow(rows: pl.DataFrame, column: str, value) -> pl.DataFrame:
-    """Keep the rows matching `value` in `column`; fall back to the wildcard rows,
-    then to `rows` unchanged. Unchanged (rather than empty) is deliberate: a
-    table that simply does not break out this dimension should still apply."""
+def _narrow(
+    rows: pl.DataFrame, column: str, value: str | float | None
+) -> pl.DataFrame:
+    """Filter guideline rows to `value`, falling back to wildcards.
+
+    Args:
+        rows: Charging-guideline rows.
+        column: Column to match on.
+        value: Value to match; None skips the filter.
+
+    Returns:
+        Rows matching `value` exactly; else the rows that are null or a wildcard
+        in `column`; else `rows` unchanged.
+    """
     if value is None or column not in rows.columns or rows.height == 0:
         return rows
     col = rows.get_column(column)
@@ -674,19 +696,24 @@ def dispatch_headroom_j(
     destination: str | None = None,
     tons_per_loco: float | None = None,
 ) -> pl.Series:
-    """Per-locomotive allowable battery headroom (J) for one dispatch.
+    """Compute per-locomotive battery headroom (J) for one dispatch.
 
-    THE one place departure state of charge is decided. The pack must leave a
-    terminal with room to absorb the regenerated energy the route ahead will
-    produce, and how much room depends on four things at once: which way the
-    train is going (`Destination`), how heavy it is (`Load_Class`), what kind of
-    locomotive is carrying the pack (`Locomotive_Type`) and how big that pack is
-    (`Battery_MWh`). Collapsing any of them -- as a per-origin `.min()` does --
-    applies one route's reserve to another's.
+    Rows narrow by origin, destination, load class, locomotive type and pack size.
 
-    Returns a Float64 Series aligned with `dispatched`, 0.0 wherever the
-    guidelines are absent or have no applicable row, which leaves that
-    locomotive's departure SOC uncapped.
+    Args:
+        network_charging_guidelines: Guideline table with `Origin` and
+            `Allowable_Battery_Headroom_MWh`, optionally `Destination`,
+            `Load_Class`, `Tons_Per_Loco_Split`, `Locomotive_Type` and
+            `Battery_MWh`; None disables headroom.
+        dispatched: Locomotives in the consist, with `Locomotive_Type` and
+            `Capacity_J` when available.
+        origin: Origin node of the train.
+        destination: Destination node of the train.
+        tons_per_loco: Train tons per locomotive, used to pick `Load_Class`.
+
+    Returns:
+        Float64 `Battery_Headroom_J` Series aligned with `dispatched`; 0.0 where no
+        guideline row applies, leaving that departure SOC uncapped.
     """
     zeros = pl.Series("Battery_Headroom_J", [0.0] * dispatched.height, dtype=pl.Float64)
     if network_charging_guidelines is None or dispatched.height == 0:
@@ -744,6 +771,17 @@ def dispatch_headroom_j(
 
 
 def get_freight_to_car_mapping(rail_vehicles: list[alt.RailVehicle]) -> dict[str, str]:
+    """Map each freight type to its car type.
+
+    Args:
+        rail_vehicles: Rail vehicles, each with a unique `freight_type`.
+
+    Returns:
+        `freight_type` to `car_type`.
+
+    Raises:
+        ValueError: When two rail vehicles share a `freight_type`.
+    """
     # Create mapping from freight types to car types
     freight_type_to_car_type = {}
     for rv in rail_vehicles:
@@ -798,19 +836,19 @@ def configure_rail_vehicles(
 
 def raise_rv_speed_max(
     rv_to_use: list[alt.RailVehicle],
-    speed_max_meters_per_second: float,
+    speed_max_meters_per_second: float | None,
 ) -> list[alt.RailVehicle]:
-    """Lift each rail vehicle's speed ceiling to at least the given value.
+    """Raise rail vehicle speed ceilings below the given value.
 
-    A train's maximum speed is the minimum ``speed_max`` across its car types
-    (see ``TrainConfig`` in altrios-core), so a car model rated below the speed
-    a train was actually observed running caps it there no matter what the
-    track allows. Rather than editing the shared rolling-stock files -- which
-    would change every study that loads them -- the observed ceiling travels
-    with the train, on the consist plan, and is applied here.
+    A train's top speed is the lowest `speed_max` among its car types.
 
-    Only raises, never lowers: a car type rated above the observed speed keeps
-    its rating.
+    Args:
+        rv_to_use: Rail vehicles in the train.
+        speed_max_meters_per_second: Floor (m/s) for each vehicle's
+            `speed_max_meters_per_second`; None returns the input unchanged.
+
+    Returns:
+        Rail vehicles with ratings below the floor raised to it.
     """
     if speed_max_meters_per_second is None:
         return rv_to_use
@@ -828,13 +866,33 @@ def scale_rv_mass_and_length(
     rv_to_use: list[alt.RailVehicle],
     n_cars_by_type: dict[str, int],
     locos: list[alt.Locomotive],
-    total_mass_kilograms: float = None,
-    total_length_meters: float = None,
-    train_num_axles: float = None,
+    total_mass_kilograms: float | None = None,
+    total_length_meters: float | None = None,
+    train_num_axles: float | None = None,
     max_allowed_scaler: float = 1E3,
     include_loco_weight: bool = True,
-    assumed_loco_length_meters: float = 75.0 * alt.utilities.M_PER_FT,
+    assumed_loco_length_meters: float | None = 75.0 * alt.utilities.M_PER_FT,
 ) -> list[alt.RailVehicle]:
+    """Scale rail vehicles to match train mass and length.
+
+    Freight mass scales first; base mass is scaled too when freight alone falls short.
+
+    Args:
+        rv_to_use: Rail vehicles in the train; replaced in place and returned.
+        n_cars_by_type: Car count per `car_type`.
+        locos: Locomotives in the consist, for their mass and count.
+        total_mass_kilograms: Target train mass (kg); None skips mass scaling.
+        total_length_meters: Target train length (m); None skips length scaling.
+        train_num_axles: Total axle count across the cars; sets each car's
+            `axle_count`. None leaves it unchanged.
+        max_allowed_scaler: Scalers at or above this value are ignored.
+        include_loco_weight: Whether locomotive mass counts toward the target.
+        assumed_loco_length_meters: Length per locomotive (m) subtracted from
+            the target length; None counts no locomotive length.
+
+    Returns:
+        The scaled rail vehicles.
+    """
     loco_kilograms = 0
     if include_loco_weight:
         loco_kilograms = sum(loco.to_pydict()["mass_kilograms"] for loco in locos)

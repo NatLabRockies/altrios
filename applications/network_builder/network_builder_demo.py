@@ -75,6 +75,12 @@ DEFAULT_OUTPUT_DIR = THIS_DIR / "results"
 
 
 def main(args: argparse.Namespace) -> None:
+    """Build the configured corridor network and plot it.
+
+    Args:
+        args: Parsed options: config, download, input, output_dir,
+            with_elevation, no_plot and format.
+    """
     global CONFIG
     if args.config:
         logger.info(f"Loading corridor config from {args.config}")

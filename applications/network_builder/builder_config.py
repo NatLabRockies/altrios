@@ -93,17 +93,19 @@ class BuilderConfig:
 
     @classmethod
     def from_file(cls, filepath: str | Path) -> "BuilderConfig":
-        """Load a corridor config from a YAML file (matching the .yaml format
-        of the other ALTRIOS inputs; JSON also parses, being a YAML subset).
+        """Load a corridor config from a YAML file.
 
-        The file holds any subset of the BuilderConfig fields (missing fields
-        keep their defaults); unknown keys are an error. ``waypoints`` entries
-        are ``[name, lat, lon]`` lists. Example:
+        Any subset of the fields may be given; missing fields keep their defaults.
 
-            output_name: winnipeg_chicago
-            waypoints:
-              - [Winnipeg, 49.899, -97.139]
-              - [Chicago, 41.879, -87.638]
+        Args:
+            filepath: YAML (or JSON) file whose keys are BuilderConfig fields;
+                `waypoints` entries are `[name, lat, lon]` lists.
+
+        Returns:
+            Config with the file's values applied.
+
+        Raises:
+            ValueError: If the file contains unknown keys.
         """
         data = yaml.safe_load(Path(filepath).read_text())
         valid = {f.name for f in fields(cls)}
@@ -122,15 +124,27 @@ class BuilderConfig:
 
     @property
     def start_pt(self) -> Tuple[float, float]:
-        """(lat, lon) of the first waypoint -- the route start."""
+        """Return the route start as (lat, lon).
+
+        Returns:
+            Latitude and longitude of the first waypoint, degrees.
+        """
         return (self.waypoints[0][1], self.waypoints[0][2])
 
     @property
     def end_pt(self) -> Tuple[float, float]:
-        """(lat, lon) of the last waypoint -- the route end."""
+        """Return the route end as (lat, lon).
+
+        Returns:
+            Latitude and longitude of the last waypoint, degrees.
+        """
         return (self.waypoints[-1][1], self.waypoints[-1][2])
 
     @property
     def route_waypoints(self) -> List[Tuple[float, float]]:
-        """(lat, lon) intermediate waypoints the mainline is routed through."""
+        """Return the intermediate waypoints as (lat, lon) pairs.
+
+        Returns:
+            Coordinates of all waypoints except the first and last, degrees.
+        """
         return [(lat, lon) for _name, lat, lon in self.waypoints[1:-1]]

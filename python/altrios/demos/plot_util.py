@@ -15,7 +15,15 @@ def extract_conv_from_train_sim(ts: alt.SetSpeedTrainSim) -> list:
         return False
     return loco_list
 
-def extract_dualmode_from_train_sim(ts: alt.SetSpeedTrainSim) -> list:
+def extract_dualmode_from_train_sim(ts: alt.SetSpeedTrainSim) -> list[dict] | bool:
+    """Collect the dual-mode locomotives of a train simulation.
+
+    Args:
+        ts: Train simulation whose consist is searched.
+
+    Returns:
+        Locomotive dicts with a DualModeLoco type, or False if none.
+    """
     ts_dict = ts.to_pydict()
     ts_list = ts_dict["loco_con"]["loco_vec"]
     loco_list = []

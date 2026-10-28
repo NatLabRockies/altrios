@@ -21,6 +21,7 @@ import json
 import os
 import sys
 import numpy as np
+from typing import Sequence
 from scipy.signal import savgol_filter
 from scipy import interpolate
 
@@ -73,21 +74,26 @@ MAX_GRADE = 0.04
 
 
 def smooth_elevation_savgol(
-    elevations, distances, window_length=200, order=3, segment_length=50
-):
+    elevations: Sequence[float],
+    distances: Sequence[float],
+    window_length: int = 200,
+    order: int = 3,
+    segment_length: float = 50,
+) -> list[float]:
     """
-    Apply Savitzky-Golay filter to smooth elevations, similar to network_builder.py.
-    This helps eliminate grade spikes from noisy elevation data.
+    Smooth elevations with a Savitzky-Golay filter on a uniform resample.
+
+    Endpoints keep their original values; inputs shorter than five points pass through.
 
     Args:
-        elevations: List of elevation values in meters
-        distances: Cumulative distances along the path (for proper interpolation)
-        window_length: Window size for the Savgol filter
-        order: Polynomial order for the filter
-        segment_length: Resample interval in meters
+        elevations: Elevations in meters.
+        distances: Cumulative distances along the path, m.
+        window_length: Filter window in resampled points, trimmed to the data, odd.
+        order: Polynomial order of the filter.
+        segment_length: Resample spacing, m.
 
     Returns:
-        Smoothed elevation values
+        Smoothed elevations at the original points.
     """
     if len(elevations) < 5:
         return elevations
@@ -135,20 +141,25 @@ def smooth_elevation_savgol(
     return list(smoothed)
 
 
-def filter_grade_spikes(elevations, distances, max_grade=MAX_GRADE, edge_buffer_m=500):
+def filter_grade_spikes(
+    elevations: Sequence[float],
+    distances: Sequence[float],
+    max_grade: float = MAX_GRADE,
+    edge_buffer_m: float = 500,
+) -> list[float]:
     """
-    Filter out grade spikes that exceed the maximum allowable grade.
-    Uses the approach from network_builder.py: exclude points near edges
-    and cap grades that exceed the threshold.
+    Cap point-to-point grades at max_grade.
+
+    Points within edge_buffer_m of either end are left alone.
 
     Args:
-        elevations: List of elevation values in meters
-        distances: Cumulative distances along the path
-        max_grade: Maximum allowed grade as decimal (0.04 = 4%)
-        edge_buffer_m: Buffer distance from edges to exclude (meters)
+        elevations: Elevations in meters.
+        distances: Cumulative distances along the path, m.
+        max_grade: Grade limit as a decimal (0.04 = 4%).
+        edge_buffer_m: Distance from each end to leave untouched, m.
 
     Returns:
-        Filtered elevation values with grade spikes removed
+        Elevations with excess rises and falls clipped.
     """
     if len(elevations) < 3:
         return elevations
@@ -185,19 +196,25 @@ def filter_grade_spikes(elevations, distances, max_grade=MAX_GRADE, edge_buffer_
     return list(elevations)
 
 
-def fetch_elevations_usgs_epqs(locations, max_workers=8):
-    """Fetch elevations for [(lat, lon), …] from the USGS 3DEP Elevation Point
-    Query Service (EPQS), one request per point.
+def fetch_elevations_usgs_epqs(
+    locations: Sequence[tuple[float, float]], max_workers: int = 8
+) -> list[float | None]:
+    """
+    Fetch elevations per point from the USGS EPQS service.
 
-    Returns a list the same length as ``locations`` with ``None`` wherever
-    EPQS has no coverage (it reports a large negative sentinel outside the
-    3DEP footprint).
+    Args:
+        locations: (lat, lon) pairs in degrees.
+        max_workers: Concurrent requests.
+
+    Returns:
+        Elevations in meters, one per location; None where 3DEP has no coverage.
     """
     from concurrent.futures import ThreadPoolExecutor
 
     session = requests.Session()
 
-    def _one(pt):
+    def _one(pt: tuple[float, float]) -> float | None:
+        """Query one point, retrying up to four times."""
         lat, lon = pt
         for attempt in range(4):
             try:
@@ -225,16 +242,20 @@ def fetch_elevations_usgs_epqs(locations, max_workers=8):
         return list(ex.map(_one, locations))
 
 
-def fetch_elevations_3dep_bulk(locations, mapzen_fallback=True):
-    """Fetch elevations for [(lat, lon), …].
+def fetch_elevations_3dep_bulk(
+    locations: Sequence[tuple[float, float]], mapzen_fallback: bool = True
+) -> list[float]:
+    """
+    Fetch path elevations from ned10m (US) and EPQS (Canada).
 
-    US points (lat < 49.001) are fetched in bulk from OpenTopoData's ned10m
-    (USGS NED 10 m). Points at/above the border are fetched directly from the
-    USGS 3DEP EPQS service, whose coverage extends past the border and shares
-    the US-side vertical datum — this avoids a dataset seam (and artificial
-    grade step) at border crossings. Mapzen via OpenTopoData is the fallback
-    for points beyond 3DEP coverage; pass ``mapzen_fallback=False`` for
-    USGS-only elevations (uncovered points are interpolated along the path).
+    Both sources share the US vertical datum, which avoids a grade step at the border.
+
+    Args:
+        locations: (lat, lon) pairs in degrees; lat >= 49.001 counts as Canada.
+        mapzen_fallback: Use Mapzen outside 3DEP coverage; otherwise interpolate.
+
+    Returns:
+        Elevations in meters, one per location.
     """
     elevations = [None] * len(locations)
 
@@ -246,7 +267,8 @@ def fetch_elevations_3dep_bulk(locations, mapzen_fallback=True):
         f"{len(ca_indices)} CA (USGS 3DEP EPQS, mapzen fallback)"
     )
 
-    def _fetch(indices, dataset="mapzen"):
+    def _fetch(indices: list[int], dataset: str = "mapzen") -> None:
+        """Fill elevations at indices from OpenTopoData, 80 per request."""
         if not indices:
             return
         chunk = 80
@@ -323,7 +345,19 @@ def fetch_elevations_3dep_bulk(locations, mapzen_fallback=True):
     return elevations
 
 
-def haversine_distance(lon1, lat1, lon2, lat2):
+def haversine_distance(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
+    """
+    Great-circle distance between two points.
+
+    Args:
+        lon1: Longitude of the first point, degrees.
+        lat1: Latitude of the first point, degrees.
+        lon2: Longitude of the second point, degrees.
+        lat2: Latitude of the second point, degrees.
+
+    Returns:
+        Distance in meters.
+    """
     lon1, lat1, lon2, lat2 = map(math.radians, [lon1, lat1, lon2, lat2])
     dlon = lon2 - lon1
     dlat = lat2 - lat1
@@ -334,7 +368,19 @@ def haversine_distance(lon1, lat1, lon2, lat2):
     return 2 * math.asin(math.sqrt(a)) * R_EARTH
 
 
-def get_bearing(lat1, lon1, lat2, lon2):
+def get_bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """
+    Rhumb-line bearing from the first point to the second.
+
+    Args:
+        lat1: Latitude of the first point, degrees.
+        lon1: Longitude of the first point, degrees.
+        lat2: Latitude of the second point, degrees.
+        lon2: Longitude of the second point, degrees.
+
+    Returns:
+        Bearing in degrees clockwise from north, 0 to 360.
+    """
     lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
     dlon = lon2 - lon1
     dphi = math.log(math.tan(lat2 / 2 + math.pi / 4) / math.tan(lat1 / 2 + math.pi / 4))
@@ -346,9 +392,18 @@ def get_bearing(lat1, lon1, lat2, lon2):
 # ── OSM parse ────────────────────────────────────────────────────────────────
 
 
-def parse_osm_xml_to_graph(xml_file):
-    """Parse OSM XML → NetworkX graph.  Preserves *all* rail edges so sidings
-    are in the graph even when they are not on the mainline shortest path."""
+def parse_osm_xml_to_graph(xml_file: str | os.PathLike) -> nx.Graph:
+    """
+    Parse an OSM XML extract into an undirected NetworkX graph.
+
+    Every rail way becomes edges, so sidings off the mainline are kept.
+
+    Args:
+        xml_file: Path to the OSM XML file.
+
+    Returns:
+        Graph with lat/lon on nodes and weight (m), osm_way_id and tags on edges.
+    """
     logger.info(f"Parsing {xml_file}…")
     tree = ET.parse(xml_file)
     root = tree.getroot()
@@ -386,7 +441,20 @@ def parse_osm_xml_to_graph(xml_file):
     return G
 
 
-def find_nearest_node(G, lat, lon):
+def find_nearest_node(
+    G: nx.Graph, lat: float, lon: float
+) -> tuple[str | None, float]:
+    """
+    Find the graph node closest to a coordinate.
+
+    Args:
+        G: Graph with lat/lon node attributes.
+        lat: Target latitude, degrees.
+        lon: Target longitude, degrees.
+
+    Returns:
+        (node id, distance in meters).
+    """
     best_d, best_n = float("inf"), None
     for n, d in G.nodes(data=True):
         dd = haversine_distance(lon, lat, d["lon"], d["lat"])
@@ -398,17 +466,19 @@ def find_nearest_node(G, lat, lon):
 # ── siding detection ─────────────────────────────────────────────────────────
 
 
-def _identify_sidings(G, mainline_nodes):
-    """Return a list of siding *segments* that branch off the mainline.
-
-    Each siding is a list of OSM node IDs forming a contiguous path whose
-    first and last nodes are on the mainline (a passing siding) **or** whose
-    first node is on the mainline and the path dead-ends.
-
-    We only include sidings where the branch node is on the mainline, so
-    that we can wire alternate link indices.
+def _identify_sidings(G: nx.Graph, mainline_nodes: Sequence[str]) -> list[list[str]]:
     """
+    Find siding segments that branch off the mainline.
 
+    Each segment leaves the mainline and either rejoins it or dead-ends.
+
+    Args:
+        G: Rail graph with 'tags' on edges.
+        mainline_nodes: Ordered node ids of the mainline path.
+
+    Returns:
+        List of node-id lists, one per siding.
+    """
     mainline_set = set(mainline_nodes)
 
     # Collect all edges tagged as sidings
@@ -476,13 +546,17 @@ def _identify_sidings(G, mainline_nodes):
 # ── ALTRIOS export ───────────────────────────────────────────────────────────
 
 
-def validate_siding_wiring(links):
-    """Check the alternate-index reciprocity invariants ALTRIOS requires:
+def validate_siding_wiring(links: list[dict]) -> list[str]:
+    """
+    Check the alternate-index reciprocity ALTRIOS requires.
 
-        A.idx_next_alt = B  =>  B.idx_prev == A or B.idx_prev_alt == A
-        A.idx_prev_alt = B  =>  B.idx_next == A or B.idx_next_alt == A
+    An alt link must be reciprocated by the target's prev/next or alt indices.
 
-    Returns a list of violation strings (empty when the wiring is consistent).
+    Args:
+        links: Link dictionaries in ALTRIOS format.
+
+    Returns:
+        Violation messages; empty when the wiring is consistent.
     """
     by_idx = {l["idx_curr"]: l for l in links}
     violations = []
@@ -511,17 +585,19 @@ def validate_siding_wiring(links):
     return violations
 
 
-def _write_network(network_config, output_prefix, output_format):
-    """Write ``network_config`` (header dict + link list) as ``{output_prefix}.{format}``.
+def _write_network(network_config: dict, output_prefix: str, output_format: str) -> str:
+    """
+    Write the network as {output_prefix}.{output_format}.
 
-    MessagePack must be produced by altrios itself: the Rust side serializes with
-    ``rmp-serde``, whose layout differs from what the ``msgpack`` Python package
-    writes. Round-tripping through ``altrios.Network`` guarantees the file is
-    exactly what ``Network.from_file`` expects. Initialization is skipped so the
-    file holds the builder's output verbatim, as the YAML path always did;
-    validation happens on load, as before.
+    MessagePack is written through altrios.Network to match rmp-serde; init is skipped.
 
-    Returns the written path.
+    Args:
+        network_config: Header dict plus link list.
+        output_prefix: Output path without extension.
+        output_format: "msgpack" or "yaml".
+
+    Returns:
+        The written path.
     """
     if output_format not in NETWORK_FORMATS:
         raise ValueError(
@@ -539,42 +615,46 @@ def _write_network(network_config, output_prefix, output_format):
 
 
 def export_path_with_sidings(
-    G,
-    mainline_nodes,
-    sidings,
-    output_prefix,
-    fast_mode=False,
-    max_grade=MAX_GRADE,
-    include_lat_lons=True,
-    mapzen_fallback=True,
-    endpoint_buffer_meters=3000.0,
-    origin_name="Spokane",
-    destination_name="Lethbridge",
-    origin_regions=("WECC", "WA", "WA"),
-    destination_regions=("WECC", "ab", "ab"),
-    output_format=DEFAULT_NETWORK_FORMAT,
-):
-    """Build an ALTRIOS network file that includes the mainline plus
-    siding branches with proper idx_next_alt / idx_prev_alt wiring.
+    G: nx.Graph,
+    mainline_nodes: Sequence[str],
+    sidings: Sequence[Sequence[str]],
+    output_prefix: str,
+    fast_mode: bool = False,
+    max_grade: float = MAX_GRADE,
+    include_lat_lons: bool = True,
+    mapzen_fallback: bool = True,
+    endpoint_buffer_meters: float = 3000.0,
+    origin_name: str = "Spokane",
+    destination_name: str = "Lethbridge",
+    origin_regions: tuple[str, str, str] = ("WECC", "WA", "WA"),
+    destination_regions: tuple[str, str, str] = ("WECC", "ab", "ab"),
+    output_format: str = DEFAULT_NETWORK_FORMAT,
+) -> str:
+    """
+    Write mainline and sidings as a wired ALTRIOS network.
 
-    ``output_format`` selects the network serialization (``"msgpack"``, the
-    default, or ``"yaml"``); see ``_write_network``. Returns the written path.
+    Also writes {output_prefix}_geometry.json and _locations.csv.
 
-    ``origin_name`` / ``destination_name`` label the corridor endpoints in the
-    locations CSV; ``*_regions`` are their (grid emissions, electricity price,
-    liquid fuel price) region codes. Each location gets a forward- and a
-    reverse-direction row so trains can be dispatched either way.
+    Args:
+        G: Rail graph from parse_osm_xml_to_graph.
+        mainline_nodes: Ordered node ids of the mainline path.
+        sidings: Siding node paths from _identify_sidings.
+        output_prefix: Output path without extension.
+        fast_mode: Use zero elevations instead of fetching them.
+        max_grade: Grade cap used when smoothing elevations, decimal.
+        include_lat_lons: Add lat/lon to each heading entry.
+        mapzen_fallback: See fetch_elevations_3dep_bulk.
+        endpoint_buffer_meters: Length of the start and end buffer links; must exceed
+            train length plus braking distance.
+        origin_name: Origin label in the locations CSV.
+        destination_name: Destination label in the locations CSV.
+        origin_regions: Region codes: grid emissions, electricity price, fuel price.
+        destination_regions: Same for the destination.
+        output_format: "msgpack" or "yaml".
 
-    ``endpoint_buffer_meters`` sets the length of the start/end buffer links.
-    ALTRIOS puts the train's TAIL at offset 0 of the origin link, so this must
-    exceed the train length by at least the friction-braking distance from the
-    buffer's speed limit; the front-of-train travel surplus over the corridor
-    length is (buffer - train length).
-
-    With ``include_lat_lons`` (default), each link's ``headings`` entries also
-    carry the optional ``lat`` / ``lon`` fields from the ALTRIOS ``Heading``
-    schema — ignored by the simulation but available to downstream tools."""
-
+    Returns:
+        The written network path.
+    """
     # ────── Elevations ──────
     # Collect unique nodes we need elevations for
     all_nodes_ordered = list(mainline_nodes)
@@ -660,7 +740,8 @@ def export_path_with_sidings(
     # not numpy binary blobs (which ALTRIOS cannot parse).
     elevations = [float(e) for e in elevations]
 
-    def elev_of(node):
+    def elev_of(node: str) -> float:
+        """Elevation of a node, m."""
         return elevations[node_to_idx[node]]
 
     # ────── Link index management ──────
@@ -668,7 +749,8 @@ def export_path_with_sidings(
     # (fwd and rev).  idx 0 is the dummy sentinel.
     next_idx = [1]  # mutable counter (use list so inner funcs can mutate)
 
-    def alloc_pair():
+    def alloc_pair() -> tuple[int, int]:
+        """Reserve the next (forward, reverse) link index pair."""
         fwd = next_idx[0]
         rev = next_idx[0] + 1
         next_idx[0] += 2
@@ -697,7 +779,10 @@ def export_path_with_sidings(
     )
 
     # ────── Helper to make a link pair for an edge u→v ──────
-    def make_link_pair(u, v, osm_tags, fwd_idx, rev_idx):
+    def make_link_pair(
+        u: str, v: str, osm_tags: dict, fwd_idx: int, rev_idx: int
+    ):
+        """Build forward and reverse link dicts for one edge."""
         u_d, v_d = G.nodes[u], G.nodes[v]
         length = max(
             haversine_distance(u_d["lon"], u_d["lat"], v_d["lon"], v_d["lat"]), 1.0
@@ -707,7 +792,8 @@ def export_path_with_sidings(
         )
         u_e, v_e = elev_of(u), elev_of(v)
 
-        def heading_point(offset, heading, node_data):
+        def heading_point(offset: float, heading: float, node_data: dict) -> dict:
+            """One heading entry, with lat/lon when include_lat_lons is set."""
             pt = {"offset_meters": offset, "heading_radians": heading}
             if include_lat_lons:
                 pt["lat"] = node_data["lat"]
@@ -1175,33 +1261,46 @@ def export_path_with_sidings(
 
 
 def build_network(
-    input_xml,
-    output_prefix,
-    start_pt,
-    end_pt,
-    waypoints,
-    fast=False,
-    max_grade=MAX_GRADE,
-    include_lat_lons=True,
-    mapzen_fallback=True,
-    endpoint_buffer_meters=3000.0,
-    origin_name="Spokane",
-    destination_name="Lethbridge",
-    origin_regions=("WECC", "WA", "WA"),
-    destination_regions=("WECC", "ab", "ab"),
-    output_format=DEFAULT_NETWORK_FORMAT,
-):
-    """Build an ALTRIOS network (mainline + sidings) from a local OSM XML extract.
+    input_xml: str | os.PathLike,
+    output_prefix: str,
+    start_pt: tuple[float, float],
+    end_pt: tuple[float, float],
+    waypoints: Sequence[tuple[float, float]],
+    fast: bool = False,
+    max_grade: float = MAX_GRADE,
+    include_lat_lons: bool = True,
+    mapzen_fallback: bool = True,
+    endpoint_buffer_meters: float = 3000.0,
+    origin_name: str = "Spokane",
+    destination_name: str = "Lethbridge",
+    origin_regions: tuple[str, str, str] = ("WECC", "WA", "WA"),
+    destination_regions: tuple[str, str, str] = ("WECC", "ab", "ab"),
+    output_format: str = DEFAULT_NETWORK_FORMAT,
+) -> str:
+    """
+    Build an ALTRIOS network from a local OSM XML extract.
 
-    Parses ``input_xml`` into a rail graph, finds the shortest mainline path from
-    ``start_pt`` through ``waypoints`` to ``end_pt``, detects sidings, and writes
-    ``{output_prefix}.msgpack`` (or ``.yaml`` with ``output_format="yaml"``),
-    ``{output_prefix}_geometry.json`` and ``{output_prefix}_locations.csv``. Set
-    ``fast=True`` to skip the elevation fetch (no network access required).
-    ``max_grade`` caps the track grade (decimal, e.g. 0.04 = 4%) used to smooth
-    elevation spikes.
+    Parse the graph, route the mainline via waypoints, find sidings, write files.
 
-    Returns the path to the written network file.
+    Args:
+        input_xml: Path to the OSM XML file.
+        output_prefix: Output path without extension.
+        start_pt: (lat, lon) of the mainline start.
+        end_pt: (lat, lon) of the mainline end.
+        waypoints: (lat, lon) points the mainline passes through, in order.
+        fast: Skip the elevation fetch and use zero elevations.
+        max_grade: Grade cap used when smoothing elevations, decimal.
+        include_lat_lons: Add lat/lon to each heading entry.
+        mapzen_fallback: See fetch_elevations_3dep_bulk.
+        endpoint_buffer_meters: Length of the start and end buffer links.
+        origin_name: Origin label in the locations CSV.
+        destination_name: Destination label in the locations CSV.
+        origin_regions: Region codes: grid emissions, electricity price, fuel price.
+        destination_regions: Same for the destination.
+        output_format: "msgpack" or "yaml".
+
+    Returns:
+        Path to the written network file.
     """
     G = parse_osm_xml_to_graph(input_xml)
 
@@ -1266,7 +1365,8 @@ def build_network(
 # ── main ─────────────────────────────────────────────────────────────────────
 
 
-def main():
+def main() -> None:
+    """Build the Spokane-Lethbridge network from the command line."""
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__)

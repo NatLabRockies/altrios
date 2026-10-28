@@ -96,9 +96,11 @@ class EconomicParameters:
     discount_rate: float = DISCOUNT_RATE
 
     def pvaf(self) -> float:
-        """Present-value annuity factor ``sum_{t=1}^{N} (1+r)^{-t}``.
+        """Return the present-value annuity factor.
 
-        Equals ``N`` when the discount rate is zero.
+        Returns:
+            ``sum_{t=1}^{N} (1+r)^{-t}`` for horizon ``N`` and rate ``r``; equals
+            ``N`` when the rate is zero.
         """
         r = float(self.discount_rate)
         n = int(self.project_lifespan_years)
@@ -447,8 +449,15 @@ class _ProblemData:
     cell_regen_kwh: Dict[Hashable, float] = field(default_factory=dict)
 
 
-def _first_not_none(*values: Optional[float]) -> float:
-    """Return the first non-``None`` value, or ``0.0`` if all are ``None``."""
+def _first_not_none(*values: float | None) -> float:
+    """Return the first value that is not ``None``.
+
+    Args:
+        *values: Candidate values in priority order.
+
+    Returns:
+        The first non-``None`` value, or ``0.0`` when all are ``None``.
+    """
     for value in values:
         if value is not None:
             return value
@@ -456,23 +465,27 @@ def _first_not_none(*values: Optional[float]) -> float:
 
 
 def _cell_energy_from_density(
-    density_by_link: Optional[Dict[int, float]],
-    cell_ids: List[Hashable],
-    piece_ids: List[Hashable],
-    piece_cell: Dict[Hashable, Hashable],
-    piece_link: Dict[Hashable, int],
-    cell_len_miles: Dict[Hashable, float],
-) -> Dict[Hashable, float]:
-    """Per-cell single-traversal energy (kWh) from a per-link kWh/mi density.
+    density_by_link: dict[int, float] | None,
+    cell_ids: list[Hashable],
+    piece_ids: list[Hashable],
+    piece_cell: dict[Hashable, Hashable],
+    piece_link: dict[Hashable, int],
+    cell_len_miles: dict[Hashable, float],
+) -> dict[Hashable, float]:
+    """Convert per-link energy densities to per-cell energies.
 
-    ``energy[cell] = mean(density[link] over the cell's TRAVELLED pieces) *
-    cell corridor length (miles)``. Parallel tracks clustered into one corridor
-    cell share the same location and the corridor is traversed once, so the rate
-    that belongs to the cell is the rate of a track carrying traffic -- NOT the
-    mean over every piece, which mixes in untravelled tracks at density 0 and
-    reports a fraction of the real rate. Pieces whose density is exactly 0 are
-    therefore excluded from the average; a cell where no piece carries traffic
-    keeps the all-piece mean. Returns ``{}`` when no density is supplied.
+    A cell's rate is the mean density over its pieces with nonzero density.
+
+    Args:
+        density_by_link: Energy per corridor-mile (kWh/mi), keyed by link index.
+        cell_ids: Corridor cell ids.
+        piece_ids: Track piece ids.
+        piece_cell: Cell id of each piece.
+        piece_link: Link index of each piece.
+        cell_len_miles: Corridor length (miles) of each cell.
+
+    Returns:
+        Rate times cell length (kWh) per cell; ``{}`` when no density is given.
     """
     if not density_by_link:
         return {}
@@ -496,6 +509,7 @@ def _cell_energy_from_density(
             counts[c] += 1
 
     def _rate(c: Hashable) -> float:
+        """Return the mean piece density (kWh/mi) of cell ``c``."""
         if counts[c]:
             return sums[c] / counts[c]
         # No piece in this cell carries traffic: fall back to the all-piece mean
@@ -515,12 +529,19 @@ def _compute_piece_benefit(
     miles: float,
     high_grade: bool,
 ) -> float:
-    """Objective coefficient ``b_p`` for one piece.
+    """Return the objective coefficient ``b_p`` of one piece.
 
-    Delegates to ``inputs.piece_benefit_fn`` when supplied (the seam for custom,
-    non-grade objectives such as diesel gallons displaced); otherwise applies the
-    default grade heuristic ``miles * (high_grade_benefit_weight if high_grade
-    else 1)``.
+    Args:
+        inputs: Optimizer inputs; ``piece_benefit_fn`` overrides the grade rule.
+        link_idx: Index of the link the piece belongs to.
+        off0: Piece start offset along the link (m).
+        off1: Piece end offset along the link (m).
+        miles: Piece length (miles).
+        high_grade: Whether the piece's cell is high-grade.
+
+    Returns:
+        ``piece_benefit_fn`` value when set; otherwise ``miles`` scaled by
+        ``high_grade_benefit_weight`` for high-grade pieces.
     """
     if inputs.piece_benefit_fn is not None:
         return float(
@@ -547,10 +568,19 @@ def _compute_piece_annual_opex(
     miles: float,
     high_grade: bool,
 ) -> float:
-    """Annual net operating cost delta ($/yr) for electrifying one piece.
+    """Return one piece's annual net operating cost delta.
 
-    Delegates to ``inputs.piece_opex_fn`` (electricity purchased minus displaced
-    diesel; negative = saving). Returns ``0.0`` when no opex model is supplied.
+    Args:
+        inputs: Optimizer inputs supplying ``piece_opex_fn``.
+        link_idx: Index of the link the piece belongs to.
+        off0: Piece start offset along the link (m).
+        off1: Piece end offset along the link (m).
+        miles: Piece length (miles).
+        high_grade: Whether the piece's cell is high-grade.
+
+    Returns:
+        ``piece_opex_fn`` value ($/yr, negative for a saving); ``0.0`` when no
+        opex model is supplied.
     """
     if inputs.piece_opex_fn is None:
         return 0.0
@@ -570,7 +600,17 @@ def _compute_piece_annual_opex(
 def _haversine_miles(
     lat1: float, lon1: float, lat2: float, lon2: float
 ) -> float:
-    """Great-circle distance in miles between two lat/lon points."""
+    """Return the great-circle distance between two points.
+
+    Args:
+        lat1: Latitude of the first point (degrees).
+        lon1: Longitude of the first point (degrees).
+        lat2: Latitude of the second point (degrees).
+        lon2: Longitude of the second point (degrees).
+
+    Returns:
+        Distance (miles).
+    """
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     d_phi = math.radians(lat2 - lat1)
     d_lambda = math.radians(lon2 - lon1)
@@ -581,8 +621,15 @@ def _haversine_miles(
     return _EARTH_RADIUS_MILES * 2.0 * math.asin(math.sqrt(a))
 
 
-def _link_midpoint_latlon(link: dict) -> Optional[Tuple[float, float]]:
-    """Representative (lat, lon) for a link, taken from its geometry."""
+def _link_midpoint_latlon(link: dict) -> tuple[float, float] | None:
+    """Return a representative (lat, lon) for a link.
+
+    Args:
+        link: Link dict with a ``headings`` geometry list.
+
+    Returns:
+        (lat, lon) of the middle heading vertex, or ``None`` without geometry.
+    """
     headings = link.get("headings") or []
     if not headings:
         return None
@@ -594,7 +641,15 @@ def _link_midpoint_latlon(link: dict) -> Optional[Tuple[float, float]]:
 
 
 def _link_max_grade(link: dict) -> float:
-    """Maximum grade along a link (0.0 if geometry is insufficient)."""
+    """Return the maximum grade along a link.
+
+    Args:
+        link: Link dict with an ``elevs`` elevation profile.
+
+    Returns:
+        Largest rise/run between consecutive samples with nonzero run; ``0.0``
+        when fewer than two samples exist.
+    """
     elevs = link.get("elevs") or []
     if len(elevs) < 2:
         return 0.0
@@ -608,8 +663,15 @@ def _link_max_grade(link: dict) -> float:
     return max_grade if max_grade != -float("inf") else 0.0
 
 
-def _ordered_path_link_idxs(est_time_net: alt.EstTimeNet) -> List[int]:
-    """Ordered, de-duplicated link indices traversed by an est-time net."""
+def _ordered_path_link_idxs(est_time_net: alt.EstTimeNet) -> list[int]:
+    """Return the link indices an est-time net traverses.
+
+    Args:
+        est_time_net: Estimated-time network of one train's path.
+
+    Returns:
+        Link indices ordered by scheduled clear time, consecutive repeats removed.
+    """
     ordered = (
         pl.DataFrame(est_time_net.to_pydict()["val"])
         .lazy()
@@ -637,17 +699,19 @@ def _ordered_path_link_idxs(est_time_net: alt.EstTimeNet) -> List[int]:
 
 
 def _candidate_link_idxs(
-    inputs: EnergizationPlacementInputs, link_by_idx: Dict[int, dict]
-) -> List[int]:
-    """Link indices eligible for electrification.
+    inputs: EnergizationPlacementInputs, link_by_idx: dict[int, dict]
+) -> list[int]:
+    """Return the link indices eligible for electrification.
 
-    With ``est_time_nets``, restrict candidates to links the trains actually
-    traverse, and include the opposite-direction link (``idx_flip``) of each so a
-    physical track carrying traffic *in either direction* is eligible (a train
-    running one way generates traffic on one directional link; its flip is the
-    same rail). Links no train ever uses in either direction are dropped, so the
-    optimizer cannot electrify trafficless spurs/branches purely for their grade.
-    Without ``est_time_nets`` every link is a candidate (unchanged behavior).
+    With est-time nets, keep traversed links and their ``idx_flip`` counterparts.
+
+    Args:
+        inputs: Optimizer inputs (``est_time_nets``, ``excluded_link_idxs``).
+        link_by_idx: Link dicts keyed by ``idx_curr``.
+
+    Returns:
+        Candidate link indices with ``excluded_link_idxs`` removed; every link is
+        a candidate when no est-time nets are given.
     """
     if not inputs.est_time_nets:
         candidates = list(link_by_idx.keys())
@@ -672,9 +736,16 @@ def _candidate_link_idxs(
 
 
 def _merge_intervals(
-    intervals: List[Tuple[float, float]]
-) -> List[Tuple[float, float]]:
-    """Merge overlapping/adjacent (start, end) intervals."""
+    intervals: list[tuple[float, float]]
+) -> list[tuple[float, float]]:
+    """Merge overlapping or adjacent intervals.
+
+    Args:
+        intervals: ``(start, end)`` pairs in any order.
+
+    Returns:
+        Sorted, disjoint ``(start, end)`` pairs.
+    """
     if not intervals:
         return []
     ordered = sorted(intervals)
@@ -688,14 +759,27 @@ def _merge_intervals(
 
 
 def _resolve_substations(
-    inputs: EnergizationPlacementInputs, link_by_idx: Dict[int, dict]
-) -> Tuple[
-    List[Hashable],
-    Dict[Hashable, float],
-    Dict[Hashable, Tuple[float, float]],
-    List[Tuple[float, float]],
+    inputs: EnergizationPlacementInputs, link_by_idx: dict[int, dict]
+) -> tuple[
+    list[Hashable],
+    dict[Hashable, float],
+    dict[Hashable, tuple[float, float]],
+    list[tuple[float, float]],
 ]:
-    """Resolve substation positions/costs, splitting existing vs candidate."""
+    """Resolve substation positions and capital costs.
+
+    Args:
+        inputs: Optimizer inputs supplying ``substations`` and ``costs``.
+        link_by_idx: Link dicts keyed by ``idx_curr``, for ``link_idx`` locations.
+
+    Returns:
+        Candidate substation ids, their capital cost ($, fixed plus per-mile
+        connection cost), their (lat, lon), and the (lat, lon) of existing
+        substations.
+
+    Raises:
+        ValueError: If a substation has neither lat/lon nor a valid ``link_idx``.
+    """
     sub_per_mile = _first_not_none(
         inputs.costs.substation_cost_per_mile, inputs.costs.cost_per_mile
     )
@@ -726,12 +810,23 @@ def _resolve_substations(
 
 
 def _piece_coverage(
-    pos: Optional[Tuple[float, float]],
-    existing_positions: List[Tuple[float, float]],
-    sub_positions: Dict[Hashable, Tuple[float, float]],
+    pos: tuple[float, float] | None,
+    existing_positions: list[tuple[float, float]],
+    sub_positions: dict[Hashable, tuple[float, float]],
     feed_dist: float,
-) -> Tuple[List[Hashable], bool]:
-    """Return (candidate covering substation ids, auto_covered by existing)."""
+) -> tuple[list[Hashable], bool]:
+    """Find substations within great-circle feed range of a point.
+
+    Args:
+        pos: (lat, lon) of the point, or ``None`` when unknown.
+        existing_positions: (lat, lon) of already-built substations.
+        sub_positions: (lat, lon) of candidate substations, keyed by id.
+        feed_dist: Maximum feeding distance (miles).
+
+    Returns:
+        Candidate ids in range, and whether an existing substation already covers
+        the point (the id list is then empty).
+    """
     if pos is None:
         return [], False
     if any(
@@ -762,11 +857,22 @@ class _ArcCoverage:
     def __init__(
         self,
         network_dict: tuple,
-        existing_positions: List[Tuple[float, float]],
-        sub_positions: Dict[Hashable, Tuple[float, float]],
+        existing_positions: list[tuple[float, float]],
+        sub_positions: dict[Hashable, tuple[float, float]],
         feed_dist_miles: float,
         sample_spacing_meters: float = 200.0,
     ) -> None:
+        """Project substations onto the mainline corridor arc.
+
+        Falls back to great-circle distance when no corridor arc can be built.
+
+        Args:
+            network_dict: ``network.to_pydict()`` output.
+            existing_positions: (lat, lon) of already-built substations.
+            sub_positions: (lat, lon) of candidate substations, keyed by id.
+            feed_dist_miles: Maximum feeding distance (miles).
+            sample_spacing_meters: Along-track sample spacing (m) for the arc.
+        """
         self._existing = list(existing_positions)
         self._subs = dict(sub_positions)
         self._feed_miles = float(feed_dist_miles)
@@ -788,25 +894,42 @@ class _ArcCoverage:
         except Exception:  # noqa: BLE001 - no mainline -> crow-flies fallback
             self._project = None
 
-    def ordered_mainline_links(self) -> List[int]:
-        """Mainline link indices in corridor order (by cumulative arc length).
+    def ordered_mainline_links(self) -> list[int]:
+        """Return mainline link indices in corridor order.
 
-        This is the exact, contiguous corridor ordering of the mainline path --
-        unlike per-cell mean arc positions, it never leaves spurious gaps -- so it
-        gives the minimum-run-length constraint a single unbroken site sequence.
+        Returns:
+            Link indices sorted by the arc position of their start; empty when no
+            arc was built.
         """
         return sorted(self._arc_start, key=lambda k: self._arc_start[k])
 
-    def arc(self, lat: Optional[float], lon: Optional[float]) -> Optional[float]:
-        """Along-corridor arc position (meters) of ``(lat, lon)``, or ``None``."""
+    def arc(self, lat: float | None, lon: float | None) -> float | None:
+        """Return the along-corridor arc position of a point.
+
+        Args:
+            lat: Latitude (degrees).
+            lon: Longitude (degrees).
+
+        Returns:
+            Arc position (m), or ``None`` without an arc or coordinates.
+        """
         if self._project is None or lat is None or lon is None:
             return None
         return self._project(lat, lon)
 
     def coverage(
-        self, lat: Optional[float], lon: Optional[float]
-    ) -> Tuple[List[Hashable], bool]:
-        """Return ``(covering candidate ids, auto_covered_by_existing)``."""
+        self, lat: float | None, lon: float | None
+    ) -> tuple[list[Hashable], bool]:
+        """Find substations within track-distance feed range of a point.
+
+        Args:
+            lat: Latitude (degrees).
+            lon: Longitude (degrees).
+
+        Returns:
+            Candidate ids whose arc separation is within range, and whether an
+            existing substation already covers the point.
+        """
         if lat is None or lon is None:
             return [], False
         if self._project is None:  # fallback: great-circle distance
@@ -823,21 +946,26 @@ class _ArcCoverage:
 
 
 def link_coverage(
-    network,
-    substations,
-    built_substation_ids=None,
+    network: alt.Network,
+    substations: list[Substation] | None,
+    built_substation_ids: list[Hashable] | None = None,
     *,
     substation_feed_distance_miles: float = 20.0,
     sample_spacing_meters: float = 200.0,
-) -> Dict[int, bool]:
-    """Per-link feeding coverage (bool) by along-corridor TRACK distance.
+) -> dict[int, bool]:
+    """Report which links lie within substation feed range.
 
-    Returns ``{link_idx: covered}`` where ``covered`` is ``True`` iff the link's
-    midpoint is within ``substation_feed_distance_miles`` **track miles** (corridor
-    arc distance -- the same metric the optimizer and ``apply_line_losses`` use) of
-    any EXISTING substation or any substation whose id is in
-    ``built_substation_ids``. This mirrors the optimizer's feeding rule, so a map's
-    "within range" shading matches what actually governed the optimization.
+    Range is measured along the corridor arc, with a great-circle fallback.
+
+    Args:
+        network: Network whose links are checked.
+        substations: Substations; existing ones and built ones provide coverage.
+        built_substation_ids: Ids of candidate substations treated as built.
+        substation_feed_distance_miles: Maximum feeding distance (miles).
+        sample_spacing_meters: Along-track sample spacing (m) for the arc.
+
+    Returns:
+        ``True`` per link index when the link midpoint is within range.
     """
     built = set(built_substation_ids or [])
     network_dict = network.to_pydict()
@@ -878,7 +1006,15 @@ def link_coverage(
 
 
 def _prepare(inputs: EnergizationPlacementInputs) -> _ProblemData:
-    """Extract problem data; dispatch to per-link or corridor-cell mode."""
+    """Build problem data for the selected formulation mode.
+
+    Args:
+        inputs: Optimizer inputs.
+
+    Returns:
+        Structure-site problem data when ``structure_spacing_miles`` is set,
+        otherwise per-link problem data.
+    """
     network_dict = inputs.network.to_pydict()
     link_by_idx: Dict[int, dict] = {
         link["idx_curr"]: link for link in network_dict[1][1:]
@@ -902,14 +1038,28 @@ def _prepare(inputs: EnergizationPlacementInputs) -> _ProblemData:
 def _prepare_per_link(
     inputs: EnergizationPlacementInputs,
     network_dict: tuple,
-    link_by_idx: Dict[int, dict],
-    substation_ids: List[Hashable],
-    sub_cost: Dict[Hashable, float],
-    sub_positions: Dict[Hashable, Tuple[float, float]],
-    existing_positions: List[Tuple[float, float]],
-    arc_cov: "_ArcCoverage",
+    link_by_idx: dict[int, dict],
+    substation_ids: list[Hashable],
+    sub_cost: dict[Hashable, float],
+    sub_positions: dict[Hashable, tuple[float, float]],
+    existing_positions: list[tuple[float, float]],
+    arc_cov: _ArcCoverage,
 ) -> _ProblemData:
-    """Per-link mode: each link is one cell containing one whole-link piece."""
+    """Build problem data with one whole-link piece per cell.
+
+    Args:
+        inputs: Optimizer inputs.
+        network_dict: ``network.to_pydict()`` output.
+        link_by_idx: Link dicts keyed by ``idx_curr``.
+        substation_ids: Candidate substation ids.
+        sub_cost: Capital cost ($) of each candidate substation.
+        sub_positions: (lat, lon) of each candidate substation.
+        existing_positions: (lat, lon) of already-built substations.
+        arc_cov: Feeding-coverage evaluator.
+
+    Returns:
+        Problem data in which every candidate link is its own cell and piece.
+    """
     cat_per_mile = _first_not_none(
         inputs.costs.energization_cost_per_mile, inputs.costs.cost_per_mile
     )
@@ -1003,27 +1153,18 @@ def _prepare_per_link(
 
 
 def _network_vertex_df(
-    network_dict: tuple, candidate_idxs: Optional[List[int]] = None
+    network_dict: tuple, candidate_idxs: list[int] | None = None
 ) -> pl.DataFrame:
-    """Explode link geometry into a per-vertex Polars dataframe.
+    """Explode link geometry into a per-vertex dataframe.
 
-    Provides the ``Network -> pydict -> Polars`` bridge for the geometry (GIS)
-    steps of structure-site mode. Returns one row per heading vertex with columns
-    ``idx_curr``, ``length_meters``, ``offset_meters``, ``lat``, ``lon`` (rows
-    lacking lat/lon are dropped), sorted by link then offset.
+    Args:
+        network_dict: ``network.to_pydict()`` output; the dummy link is skipped.
+        candidate_idxs: Link indices to keep; ``None`` keeps every link.
 
-    Parameters
-    ----------
-    network_dict : tuple
-        ``network.to_pydict()`` output (``[config, [links]]``); index 0 of the
-        links list is the dummy link and is skipped.
-    candidate_idxs : list of int, optional
-        If given, keep only these link indices.
-
-    Returns
-    -------
-    pl.DataFrame
-        Per-vertex geometry table.
+    Returns:
+        One row per heading vertex with ``idx_curr``, ``length_meters``,
+        ``offset_meters``, ``lat`` and ``lon``, sorted by link then offset; rows
+        lacking coordinates are dropped.
     """
     rows = [
         {
@@ -1051,31 +1192,22 @@ def _network_vertex_df(
 
 def _densify_links(
     network_dict: tuple,
-    candidate_idxs: List[int],
+    candidate_idxs: list[int],
     spacing_m: float,
-) -> Tuple[
-    List[int], List[float], List[float], List[float], List[float], List[float]
+) -> tuple[
+    list[int], list[float], list[float], list[float], list[float], list[float]
 ]:
     """Split each candidate link into uniform along-track pieces.
 
-    This is the shared "reduced virtual links" representation used by both the
-    optimizer and the even-spacing placer: each link is cut into pieces of about
-    ``spacing_m`` meters, with lat/lon interpolated at each piece midpoint.
+    Args:
+        network_dict: ``network.to_pydict()`` output.
+        candidate_idxs: Link indices to densify.
+        spacing_m: Target piece length (m).
 
-    Parameters
-    ----------
-    network_dict : tuple
-        ``network.to_pydict()`` output.
-    candidate_idxs : list of int
-        Link indices to densify.
-    spacing_m : float
-        Target along-track piece length (meters).
-
-    Returns
-    -------
-    tuple of lists
-        ``(link_idx, off_start_m, off_end_m, mid_lat, mid_lon, length_m)`` with
-        one entry per piece.
+    Returns:
+        Parallel lists ``(link_idx, off_start_m, off_end_m, mid_lat, mid_lon,
+        length_m)`` with one entry per piece; lat/lon are interpolated at the
+        piece midpoint.
     """
     import numpy as np
 
@@ -1118,22 +1250,33 @@ def _densify_links(
 def _prepare_sites(
     inputs: EnergizationPlacementInputs,
     network_dict: tuple,
-    link_by_idx: Dict[int, dict],
-    substation_ids: List[Hashable],
-    sub_cost: Dict[Hashable, float],
-    sub_positions: Dict[Hashable, Tuple[float, float]],
-    existing_positions: List[Tuple[float, float]],
-    arc_cov: "_ArcCoverage",
+    link_by_idx: dict[int, dict],
+    substation_ids: list[Hashable],
+    sub_cost: dict[Hashable, float],
+    sub_positions: dict[Hashable, tuple[float, float]],
+    existing_positions: list[tuple[float, float]],
+    arc_cov: _ArcCoverage,
 ) -> _ProblemData:
-    """Structure-site mode: geometry-only shared-structure clustering.
+    """Build problem data with pieces clustered into structure sites.
 
-    Densifies every candidate link into uniform along-track pieces, then clusters
-    piece midpoints that fall within ``corridor_width_miles`` of each other into
-    shared **structure sites**. Parallel tracks (both directions, sidings) at the
-    same location cluster into one site and share a single structure cost; each
-    track then pays only a marginal per-mile electrification cost. Requires lat/lon
-    geometry but NO centerline, topology, or est-time nets, so it is safe on
-    arbitrary imported networks (e.g. OpenRailwayMap).
+    Piece midpoints within ``corridor_width_miles`` of each other share one cell.
+
+    Args:
+        inputs: Optimizer inputs.
+        network_dict: ``network.to_pydict()`` output.
+        link_by_idx: Link dicts keyed by ``idx_curr``.
+        substation_ids: Candidate substation ids.
+        sub_cost: Capital cost ($) of each candidate substation.
+        sub_positions: (lat, lon) of each candidate substation.
+        existing_positions: (lat, lon) of already-built substations.
+        arc_cov: Feeding-coverage evaluator; also orders the mainline sites.
+
+    Returns:
+        Problem data with per-site structure costs, per-piece marginal costs and
+        the mainline site sequence used by the run and gap constraints.
+
+    Raises:
+        ValueError: If no candidate link carries lat/lon geometry.
     """
     import numpy as np
     from scipy.spatial import cKDTree
@@ -1182,6 +1325,7 @@ def _prepare_sites(
     parent = list(range(n_pieces))
 
     def _find(a: int) -> int:
+        """Return the union-find root of piece ``a``."""
         while parent[a] != a:
             parent[a] = parent[parent[a]]
             a = parent[a]
@@ -1321,18 +1465,20 @@ def _prepare_sites(
 
 
 def _build_link_chains(
-    link_by_idx: Dict[int, dict],
-    link_pieces: Dict[int, List[Hashable]],
-) -> List[List[Hashable]]:
-    """Concatenate per-link ordered pieces into maximal linear physical chains.
+    link_by_idx: dict[int, dict],
+    link_pieces: dict[int, list[Hashable]],
+) -> list[list[Hashable]]:
+    """Chain per-link piece lists into linear physical sequences.
 
-    Links are chained forward via ``idx_next`` only where the connection is
-    unambiguous (the successor is a candidate, the current link has no candidate
-    ``idx_next_alt``, and the successor has exactly one candidate predecessor), so
-    chains are simple sequences that break at junctions. Each returned chain is a
-    list of piece ids in physical (increasing-offset, forward-travel) order. This
-    lets the minimum-run-length constraint span link boundaries so a short link in
-    the middle of a corridor is treated as interior track, not an exempt boundary.
+    Links join through ``idx_next`` only where the connection is unambiguous.
+
+    Args:
+        link_by_idx: Link dicts keyed by ``idx_curr``.
+        link_pieces: Piece ids of each candidate link in increasing-offset order.
+
+    Returns:
+        Chains of piece ids in forward-travel order; each chain ends at a
+        junction or ambiguous connection.
     """
     cand = set(link_pieces.keys())
     succ: Dict[int, int] = {}
@@ -1367,28 +1513,25 @@ def _build_link_chains(
 
 
 def _install_corridor_buckets(
-    model: pyo.ConcreteModel, data: "_ProblemData", bucket_mi: float,
+    model: pyo.ConcreteModel, data: _ProblemData, bucket_mi: float,
     tie_structure_to_x: bool = True,
-) -> Tuple[int, List[float], Dict[Hashable, int]]:
-    """Install the shared corridor bucket layer for the run-length / gap constraints.
+) -> tuple[int, list[float], dict[Hashable, int]]:
+    """Install the shared corridor bucket layer.
 
-    First ties structure to actual electrification (``s[c] <= sum_{p in c} x[p]``)
-    so each ``s[c]`` -- and hence each bucket ``u[b]`` -- is a faithful "corridor
-    site energized" indicator even when structure costs are zero. Then, when a
-    contiguous mainline corridor exists, tiles it into uniform ~``bucket_mi``
-    buckets (accumulating cell length so sequential bucket ids 0,1,2,... leave no
-    gaps) and couples ``s[c] == u[bucket(c)]``. This coarse granularity keeps the
-    MILP small (one binary per bucket instead of one per ~250 ft link) while
-    preserving the run/gap guarantees.
+    Adds ``structure_used``, one binary ``u[b]`` per bucket and ``run_couple`` rows.
 
-    Both the minimum-run-length and maximum-gap constraints share this single
-    bucket layer; when both are active the caller passes the finer ``bucket_mi``
-    so each is enforced at adequate resolution.
+    Args:
+        model: Model holding ``C``, ``s`` and, unless whole-site, ``x``; receives
+            ``structure_used`` (``s[c] <= sum_{p in c} x[p]``), set ``RunBucket``,
+            variables ``u`` and ``run_couple`` (``s[c] == u[bucket(c)]``).
+        data: Problem data with ``mainline_site_seq`` and cell lengths.
+        bucket_mi: Target bucket length (corridor miles).
+        tie_structure_to_x: Whether to add ``structure_used``; ``False`` in
+            whole-site mode, where ``s`` is the electrification variable.
 
-    Returns ``(n_buckets, bucket_len_miles, cell_bucket)``: the bucket count, each
-    bucket's corridor length (miles), and the cell -> bucket map. Returns
-    ``(0, [], {})`` when no mainline corridor exists (only ``structure_used`` is
-    installed); callers needing buckets must then fall back or raise.
+    Returns:
+        Bucket count, each bucket's length (miles) and the cell-to-bucket map;
+        ``(0, [], {})`` when no contiguous mainline sequence exists.
     """
     pieces_in_cell: Dict[Hashable, List[Hashable]] = {}
     for p in data.piece_ids:
@@ -1397,7 +1540,8 @@ def _install_corridor_buckets(
     # Structure only where at least one track is energized (ties s to x). Skipped
     # in whole-site mode, where s IS the electrification (there is no x).
     if tie_structure_to_x:
-        def _structure_used_rule(m, c):
+        def _structure_used_rule(m: pyo.ConcreteModel, c: Hashable):
+            """Bound ``s[c]`` by the electrified pieces in cell ``c``."""
             ps = pieces_in_cell.get(c, [])
             if not ps:
                 return m.s[c] == 0
@@ -1437,7 +1581,8 @@ def _install_corridor_buckets(
     couple = list(cell_bucket.items())
     model.run_couple_index = pyo.Set(initialize=range(len(couple)), ordered=True)
 
-    def _couple_rule(m, t):
+    def _couple_rule(m: pyo.ConcreteModel, t: int):
+        """Tie a cell's ``s[c]`` to its bucket's ``u[b]``."""
         c, bkt = couple[t]
         return m.s[c] == m.u[bkt]
 
@@ -1448,37 +1593,33 @@ def _install_corridor_buckets(
 def _install_soc_state_model(
     model: pyo.ConcreteModel,
     n_buckets: int,
-    bucket_net: List[float],
-    bucket_charge: List[float],
-    prefix_mi: List[float],
+    bucket_net: list[float],
+    bucket_charge: list[float],
+    prefix_mi: list[float],
     pack_kwh: float,
 ) -> None:
-    """Install the explicit SOC-recursion (Tier 2) battery-range model.
+    """Install the explicit state-of-charge battery-range model.
 
-    A continuous state of charge evolves bucket-to-bucket along the mainline:
+    Adds continuous ``soc`` and ``curtail`` variables with a per-bucket energy balance.
 
-        soc[b] = soc[b-1] + charge_b * u[b] - net_drain_b - curtail[b],
-        0 <= soc[b] <= pack_kwh,   curtail[b] >= 0,
-
-    starting full (``soc[-1] = pack_kwh``). The lower bound forbids depletion; the
-    upper bound is charge SATURATION, made exact and LINEAR (no big-M) by the free
-    ``curtail`` slack -- the solver discards exactly the charge that would overflow
-    the pack because nothing rewards a lower SOC. ``net_drain`` already nets regen
-    out of drain, and ``charge_b`` (the per-bucket net charge if energized, 0 on
-    regen buckets) is credited only when the bucket is electrified (``u[b]``).
-
-    Path-ordered and faithful (it subsumes the covering gap families, which are its
-    window relaxations), at the cost of continuous state: it is no longer totally
-    unimodular, but adds no integers or big-M, so the relaxation stays tractable.
-    Infeasibility (an un-closeable stretch) is reported by the solver rather than a
-    pre-check.
+    Args:
+        model: Model holding bucket binaries ``u``; receives set ``SocBucket``,
+            ``soc[b]`` in ``[0, pack_kwh]``, slack ``curtail[b] >= 0`` and
+            ``soc_balance`` (``soc[b] == soc[b-1] + charge*u[b] - net -
+            curtail[b]``, starting from a full pack).
+        n_buckets: Number of corridor buckets.
+        bucket_net: Net drain (drain minus regen) per bucket (kWh).
+        bucket_charge: Charge banked per bucket when energized (kWh).
+        prefix_mi: Cumulative corridor length (miles) at each bucket boundary.
+        pack_kwh: Usable pack energy (kWh); the initial and maximum ``soc``.
     """
     model.SocBucket = pyo.Set(initialize=range(n_buckets), ordered=True)
     model.soc = pyo.Var(model.SocBucket, domain=pyo.NonNegativeReals,
                         bounds=(0.0, pack_kwh))
     model.curtail = pyo.Var(model.SocBucket, domain=pyo.NonNegativeReals)
 
-    def _soc_rule(m, b):
+    def _soc_rule(m: pyo.ConcreteModel, b: int):
+        """Balance ``soc[b]`` against charge, net drain and curtailment."""
         prev = pack_kwh if b == 0 else m.soc[b - 1]
         return (
             m.soc[b]
@@ -1491,7 +1632,23 @@ def _install_soc_state_model(
 def build_model(
     inputs: EnergizationPlacementInputs, data: _ProblemData
 ) -> pyo.ConcreteModel:
-    """Construct the energization-placement MILP."""
+    """Construct the energization-placement MILP.
+
+    Args:
+        inputs: Optimizer inputs selecting the objective and optional constraints.
+        data: Pre-computed cells, pieces, costs and feeding coverage.
+
+    Returns:
+        Model with binaries ``s`` (structure per cell), ``x`` (per piece, absent
+        in whole-site mode) and ``y`` (per substation); the structure-linking,
+        coverage, run-length, gap, high-grade and budget constraints requested;
+        and the objective ``obj``.
+
+    Raises:
+        ValueError: If a requested constraint lacks its prerequisites, a gap
+            cannot be closed by any reachable substation, or ``objective`` is
+            unknown.
+    """
     model = pyo.ConcreteModel(name="energization_placement")
 
     model.C = pyo.Set(initialize=data.cell_ids, ordered=True)
@@ -1534,7 +1691,8 @@ def build_model(
     # if its corridor cell's shared structure is installed. (Whole-site mode has
     # no per-piece x -- s IS the electrification -- so this is skipped.)
     if not _per_cell:
-        def _structure_rule(m, p):
+        def _structure_rule(m: pyo.ConcreteModel, p: Hashable):
+            """Allow ``x[p]`` only when its cell's structure is installed."""
             return m.x[p] <= m.s[data.piece_cell[p]]
 
         model.structure = pyo.Constraint(model.P, rule=_structure_rule)
@@ -1544,7 +1702,8 @@ def build_model(
     # substation are auto-covered (unconstrained); those with no in-range
     # candidate (and no existing feed) are forced off.
     if not _per_cell:
-        def _coverage_rule(m, p):
+        def _coverage_rule(m: pyo.ConcreteModel, p: Hashable):
+            """Allow ``x[p]`` only when an in-range substation is built."""
             if data.piece_auto_covered[p]:
                 return pyo.Constraint.Skip
             covering = data.piece_cover[p]
@@ -1554,7 +1713,8 @@ def build_model(
 
         model.coverage = pyo.Constraint(model.P, rule=_coverage_rule)
     else:
-        def _coverage_rule_cell(m, c):
+        def _coverage_rule_cell(m: pyo.ConcreteModel, c: Hashable):
+            """Allow ``s[c]`` only when an in-range substation is built."""
             if cell_auto[c]:
                 return pyo.Constraint.Skip
             cov = cell_cover[c]
@@ -1638,7 +1798,8 @@ def build_model(
                     initialize=range(len(tl)), ordered=True
                 )
 
-                def _min_run_rule(m, t):
+                def _min_run_rule(m: pyo.ConcreteModel, t: int):
+                    """Force ``u[j]`` on when a run starts at ``i``."""
                     j, i, i_prev = tl[t]
                     return m.u[j] >= m.u[i] - m.u[i_prev]
 
@@ -1683,7 +1844,8 @@ def build_model(
                     initialize=range(len(tl)), ordered=True
                 )
 
-                def _min_run_rule(m, t):
+                def _min_run_rule(m: pyo.ConcreteModel, t: int):
+                    """Force ``s[j]`` on when a run starts at ``i``."""
                     j, i, i_prev = tl[t]
                     return m.s[j] >= m.s[i] - m.s[i_prev]
 
@@ -1808,7 +1970,8 @@ def build_model(
                     initialize=range(len(rows)), ordered=True
                 )
 
-                def _max_gap_rule(m, t):
+                def _max_gap_rule(m: pyo.ConcreteModel, t: int):
+                    """Require window charge credit to cover its over-drain."""
                     w, rhs = rows[t]
                     # Floor per-bucket credit at 0: a regen bucket (net<0) with no
                     # charge cannot make the covering easier by being energized.
@@ -1866,7 +2029,8 @@ def build_model(
                     initialize=range(len(wl)), ordered=True
                 )
 
-                def _max_gap_rule(m, t):
+                def _max_gap_rule(m: pyo.ConcreteModel, t: int):
+                    """Require at least one energized bucket in the window."""
                     return sum(m.u[b] for b in wl[t]) >= 1
 
                 model.max_gap = pyo.Constraint(
@@ -1900,12 +2064,14 @@ def build_model(
         if _per_cell:
             req_cells = {data.piece_cell[p] for p in req_set}
 
-            def _require_cell(m, c):
+            def _require_cell(m: pyo.ConcreteModel, c: Hashable):
+                """Force ``s[c]`` on for high-grade cells."""
                 return m.s[c] == 1 if c in req_cells else pyo.Constraint.Skip
 
             model.require_high_grade = pyo.Constraint(model.C, rule=_require_cell)
         else:
-            def _require_rule(m, p):
+            def _require_rule(m: pyo.ConcreteModel, p: Hashable):
+                """Force ``x[p]`` on for high-grade mainline pieces."""
                 if p in req_set:
                     return m.x[p] == 1
                 return pyo.Constraint.Skip
@@ -1978,22 +2144,28 @@ def build_model(
 def solve_model(
     model: pyo.ConcreteModel,
     *,
-    time_limit_seconds: Optional[float] = None,
-    mip_gap: Optional[float] = None,
+    time_limit_seconds: float | None = None,
+    mip_gap: float | None = None,
     tee: bool = False,
-    solver_threads: Optional[int] = None,
+    solver_threads: int | None = None,
     warmstart: bool = False,
-) -> Tuple[pyo.ConcreteModel, str, bool, Optional[float], Optional[float]]:
-    """Solve the model with the HiGHS solver via Pyomo APPSI.
+) -> tuple[pyo.ConcreteModel, str, bool, float | None, float | None]:
+    """Solve the model with HiGHS through Pyomo APPSI.
 
-    Returns ``(model, termination_condition, has_solution, best_bound,
-    best_incumbent)``. ``load_solution`` is disabled so that hitting the time limit
-    with NO feasible incumbent (common for the heavy Tier-1 / SOC-state models)
-    returns gracefully -- ``has_solution`` is then ``False`` -- instead of raising
-    when APPSI tries to auto-load a nonexistent solution. ``best_bound`` /
-    ``best_incumbent`` are the solver's dual bound and incumbent objective (for the
-    optimality gap). When ``warmstart`` is set, any variable values pre-seeded on
-    the model are passed to HiGHS as a MIP start (an infeasible seed is discarded).
+    Variable values are loaded only when the solver found a feasible incumbent.
+
+    Args:
+        model: Model from :func:`build_model`.
+        time_limit_seconds: Solver wall-clock limit (s); ``None`` for no limit.
+        mip_gap: Relative MIP gap tolerance; ``None`` uses the solver default.
+        tee: Whether to stream solver output.
+        solver_threads: Thread cap for HiGHS; ``None`` uses all cores.
+        warmstart: Whether to pass pre-seeded variable values as a MIP start.
+
+    Returns:
+        The model, the termination condition, whether a solution was loaded, the
+        best objective bound and the incumbent objective (both ``None`` when
+        unavailable).
     """
     solver = Highs()
     if time_limit_seconds is not None:
@@ -2024,15 +2196,14 @@ def solve_model(
     )
 
 
-def _seed_warmstart(model: pyo.ConcreteModel, data: "_ProblemData") -> None:
-    """Seed a feasible 'electrify all reachable track' MIP start.
+def _seed_warmstart(model: pyo.ConcreteModel, data: _ProblemData) -> None:
+    """Seed a fully wired feasible MIP start.
 
-    Builds every candidate substation and energizes every coverable piece (with the
-    shared structure/bucket indicators set to match). This is trivially feasible for
-    the coverage, min-run, gap, and SOC constraints (a fully wired mainline never
-    depletes), so it guarantees HiGHS an incumbent immediately. HiGHS silently
-    discards the start if a corner case makes it inconsistent, so an approximate
-    seed is safe.
+    Builds every substation, energizes every coverable piece and holds a full pack.
+
+    Args:
+        model: Model from :func:`build_model`.
+        data: Problem data giving each piece's coverage and cell.
     """
     for j in model.J:
         model.y[j].set_value(1, skip_validation=True)
@@ -2063,7 +2234,18 @@ def extract_result(
     model: pyo.ConcreteModel,
     status: str,
 ) -> EnergizationPlacementResult:
-    """Translate the solved model into a :class:`EnergizationPlacementResult`."""
+    """Translate the solved model into a result object.
+
+    Args:
+        inputs: Optimizer inputs (network, power limit, objective settings).
+        data: Problem data used to build the model.
+        model: Solved model with variable values loaded.
+        status: Solver termination condition string.
+
+    Returns:
+        Result holding the energized network, per-link energized intervals, built
+        substations, installed cells, costs, mileages and the objective value.
+    """
     if inputs.electrify_whole_site:
         # Whole-site: energizing a site wires every piece at it (no per-piece x).
         _on_cells = {
@@ -2150,18 +2332,25 @@ def extract_result(
 def optimize_energization_placement(
     inputs: EnergizationPlacementInputs,
     *,
-    time_limit_seconds: Optional[float] = None,
-    mip_gap: Optional[float] = None,
+    time_limit_seconds: float | None = None,
+    mip_gap: float | None = None,
     tee: bool = False,
-    solver_threads: Optional[int] = None,
+    solver_threads: int | None = None,
     warmstart: bool = False,
 ) -> EnergizationPlacementResult:
-    """End-to-end entry point: prepare data, build, solve, and extract.
+    """Prepare, build, solve and extract in one call.
 
-    When the solver returns with no feasible incumbent (e.g. a heavy Tier-1/SOC
-    model hits the time limit), a result carrying only ``status`` (no network) is
-    returned rather than raising. ``warmstart`` seeds a feasible fully-wired MIP
-    start so the solver always has an incumbent.
+    Args:
+        inputs: Optimizer inputs.
+        time_limit_seconds: Solver wall-clock limit (s); ``None`` for no limit.
+        mip_gap: Relative MIP gap tolerance; ``None`` uses the solver default.
+        tee: Whether to stream solver output.
+        solver_threads: Thread cap for HiGHS; ``None`` uses all cores.
+        warmstart: Whether to seed a fully wired MIP start.
+
+    Returns:
+        Full result with optimality-gap fields, or one carrying only ``status``
+        and ``objective_bound`` when the solver found no feasible incumbent.
     """
     data = _prepare(inputs)
     model = build_model(inputs, data)

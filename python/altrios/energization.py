@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Callable, Optional, Tuple, List, Dict, Union
 import altrios as alt
 
 if TYPE_CHECKING:
+    import polars as pl
+
     from altrios.optimization.energization_placement import (
         EconomicParameters,
         EnergizationOptCosts,
@@ -115,7 +117,19 @@ def _config_from_defaults(
     onboard_efficiency: float,
     min_voltage_fraction: float,
 ) -> ElectrificationConfig:
-    """Build an :class:`ElectrificationConfig` using the per-km impedance table."""
+    """Build an electrification config from the impedance table.
+
+    Args:
+        name: Configuration name.
+        voltage: Nominal catenary voltage (V).
+        etype: Key into :data:`ELECTRIFICATION_IMPEDANCE_DEFAULTS`.
+        efficiency: Substation grid-to-catenary conversion efficiency.
+        onboard_efficiency: On-board front-end conversion efficiency.
+        min_voltage_fraction: Minimum pantograph voltage as a fraction of nominal.
+
+    Returns:
+        Config with the table's per-km impedances converted to ohm/m.
+    """
     r_km, x_km = ELECTRIFICATION_IMPEDANCE_DEFAULTS[etype]
     return ElectrificationConfig(
         name=name,
@@ -199,15 +213,24 @@ class SuggestedOptimizationInputs:
     #: The design per-train peak power (W) used to derive the values above.
     design_train_power_watts: float
 
-    def optimizer_kwargs(self) -> Dict[str, float]:
-        """Keyword args for :func:`energize_optimized` (power limit + feed distance)."""
+    def optimizer_kwargs(self) -> dict[str, float]:
+        """Return keyword arguments for :func:`energize_optimized`.
+
+        Returns:
+            ``uniform_power_limit_watts`` and ``substation_feed_distance_miles``.
+        """
         return {
             "uniform_power_limit_watts": self.uniform_power_limit_watts,
             "substation_feed_distance_miles": self.substation_feed_distance_miles,
         }
 
-    def line_loss_kwargs(self) -> Dict[str, float]:
-        """Keyword args for :func:`apply_line_losses` (electrical assumptions)."""
+    def line_loss_kwargs(self) -> dict[str, float | str]:
+        """Return keyword arguments for :func:`apply_line_losses`.
+
+        Returns:
+            Voltage, electrification type, impedances, substation defaults and the
+            minimum pantograph voltage fraction.
+        """
         return {
             "system_voltage_volts": self.system_voltage_volts,
             "electrification_type": self.electrification_type,
@@ -225,45 +248,23 @@ def max_gap_miles_from_battery(
     *,
     reserve_fraction: float = 0.0,
 ) -> float:
-    """Convert a battery-electric locomotive's battery size into a maximum
-    unelectrified-gap distance (miles) for ``energize_optimized(max_energized_gap_miles=...)``.
+    """Convert battery size into a maximum unelectrified gap.
 
-    Under the optimizer's simplifying assumptions -- any electrified segment
-    recharges the battery, and traction energy is drawn at a constant average
-    rate per mile -- a battery that can usefully deliver ``E`` kWh bridges a gap
-    of ``E / e`` miles, where ``e`` is the average consumption in kWh per mile.
-    Holding back a ``reserve_fraction`` of the pack (e.g. to protect state of
-    charge or cover accessory/HVAC loads) reduces the usable energy accordingly,
-    so the "kWh of energy lost between segments" is
-    ``usable_energy_kwh * (1 - reserve_fraction)`` and
+    Assumes constant consumption per mile and a full recharge on any energized track.
 
-    .. math::
+    Args:
+        usable_energy_kwh: Battery energy (kWh) available for traction.
+        avg_consumption_kwh_per_mile: Average traction draw per corridor-mile
+            (kWh/mi).
+        reserve_fraction: Fraction of the pack withheld as reserve, in ``[0, 1)``.
 
-        \\text{max gap (mi)} = \\frac{E_\\text{usable}\\,(1 - \\text{reserve})}{e}.
+    Returns:
+        ``usable_energy_kwh * (1 - reserve_fraction) / avg_consumption_kwh_per_mile``
+        (miles), for ``max_energized_gap_miles``.
 
-    Parameters
-    ----------
-    usable_energy_kwh : float
-        Battery energy (kWh) available for traction between charges (i.e. the
-        usable, not nameplate, capacity).
-    avg_consumption_kwh_per_mile : float
-        Average traction energy drawn per corridor-mile (kWh/mi). A convenient
-        source is the mean of the per-link ``electricity_kwh_per_track_mile``
-        densities used to build :func:`make_piece_opex_fn` from a first-pass
-        simulation.
-    reserve_fraction : float, default 0.0
-        Fraction of ``usable_energy_kwh`` withheld as a reserve (0 <= f < 1).
-
-    Returns
-    -------
-    float
-        Maximum contiguous unelectrified gap (miles).
-
-    Raises
-    ------
-    ValueError
-        If ``avg_consumption_kwh_per_mile`` is not positive, ``usable_energy_kwh``
-        is negative, or ``reserve_fraction`` is outside ``[0, 1)``.
+    Raises:
+        ValueError: If the consumption is not positive, the energy is negative or
+            the reserve fraction is outside ``[0, 1)``.
     """
     if avg_consumption_kwh_per_mile <= 0.0:
         raise ValueError("avg_consumption_kwh_per_mile must be positive.")
@@ -279,21 +280,19 @@ def max_gap_kwh_from_battery(
     *,
     reserve_fraction: float = 0.0,
 ) -> float:
-    """Usable battery traction energy (kWh) for ``max_energized_gap_kwh``.
+    """Return the usable battery traction energy between charges.
 
-    The ENERGY-based analogue of :func:`max_gap_miles_from_battery`: instead of
-    pre-dividing by an average per-mile consumption, it returns the raw kWh a BEL
-    may spend between charges, ``usable_energy_kwh * (1 - reserve_fraction)``. The
-    optimizer then bounds each unelectrified corridor window by its per-link drain
-    density (``gap_energy_kwh_per_mile_by_link``) instead of a flat distance, so
-    the wire is required where the battery actually depletes fastest.
+    Args:
+        usable_energy_kwh: Battery energy (kWh) available for traction.
+        reserve_fraction: Fraction of the pack withheld as reserve, in ``[0, 1)``.
 
-    Parameters
-    ----------
-    usable_energy_kwh : float
-        Battery energy (kWh) available for traction between charges.
-    reserve_fraction : float, default 0.0
-        Fraction withheld as reserve (0 <= f < 1).
+    Returns:
+        ``usable_energy_kwh * (1 - reserve_fraction)`` (kWh), for
+        ``max_energized_gap_kwh``.
+
+    Raises:
+        ValueError: If the energy is negative or the reserve fraction is outside
+            ``[0, 1)``.
     """
     if usable_energy_kwh < 0.0:
         raise ValueError("usable_energy_kwh must be non-negative.")
@@ -309,38 +308,23 @@ def min_recharge_miles_from_battery(
     recharge_fraction: float = 1.0,
     reserve_fraction: float = 0.0,
 ) -> float:
-    """Minimum energized-run length (miles) to recharge the pack (Tier 0 recharge).
+    """Size the energized run length that recharges the pack.
 
-    Sizes ``min_energized_length_miles`` from battery/charge physics so an
-    energized run is long enough to actually restore charge, replacing the
-    optimizer's optimistic "any energized segment fully recharges" assumption with
-    a physically sized minimum run. Under a roughly constant net charge rate
-    (charge power minus draw, per corridor-mile) the run needed to bank a fraction
-    ``recharge_fraction`` of the usable pack is
+    Args:
+        usable_energy_kwh: Usable battery capacity (kWh).
+        net_charge_kwh_per_mile: Net charge banked per energized corridor-mile
+            (kWh/mi), charge power minus traction draw; must be positive.
+        recharge_fraction: Fraction of the usable pack the run must restore.
+        reserve_fraction: Fraction of the pack withheld as reserve, in ``[0, 1)``.
 
-    .. math::
+    Returns:
+        ``usable_energy_kwh * (1 - reserve_fraction) * recharge_fraction /
+        net_charge_kwh_per_mile`` (miles), for ``min_energized_length_miles``.
 
-        L_\\text{recharge} = \\frac{E_\\text{usable}(1 - \\text{reserve})\\,
-        \\text{recharge\\_fraction}}{c_\\text{net}},
-
-    where ``c_net`` is the net charge in kWh per mile. This is the Tier-0 recharge
-    formulation: it keeps the minimum-run constraint measured in CORRIDOR MILES
-    (its matrix is unchanged), so it is structurally free; the "energy" only sizes
-    the threshold. Take the max with any anti-sliver minimum run.
-
-    Parameters
-    ----------
-    usable_energy_kwh : float
-        Usable (not nameplate) battery capacity (kWh).
-    net_charge_kwh_per_mile : float
-        Net charge delivered per energized corridor-mile (catenary charge power
-        minus traction draw, converted to energy per mile at line speed). Must be
-        positive.
-    recharge_fraction : float, default 1.0
-        Fraction of the usable pack the run must restore (e.g. 1.0 to refill a
-        fully depleted pack).
-    reserve_fraction : float, default 0.0
-        Fraction of the pack withheld as reserve (0 <= f < 1).
+    Raises:
+        ValueError: If the net charge rate is not positive, the energy or the
+            recharge fraction is negative, or the reserve fraction is outside
+            ``[0, 1)``.
     """
     if net_charge_kwh_per_mile <= 0.0:
         raise ValueError("net_charge_kwh_per_mile must be positive.")
@@ -357,67 +341,34 @@ def min_recharge_miles_from_battery(
 
 
 def suggest_optimization_inputs(
-    config: Union[str, ElectrificationConfig],
+    config: str | ElectrificationConfig,
     *,
     design_train_power_watts: float = DEFAULT_DESIGN_TRAIN_POWER_WATTS,
     concurrent_trains_per_substation: float = 2.0,
-    min_feed_distance_miles: Optional[float] = 1.0,
-    max_feed_distance_miles: Optional[float] = None,
+    min_feed_distance_miles: float | None = 1.0,
+    max_feed_distance_miles: float | None = None,
 ) -> SuggestedOptimizationInputs:
-    """Derive reasonable optimizer/line-loss inputs from an electrification choice.
+    """Derive optimizer and line-loss inputs from an electrification choice.
 
-    Given a configuration (e.g. ``"dc_9kv"``, ``"ac_25kv"``, ``"ac_50kv"``), this
-    pre-processing step computes a physically motivated substation feeding radius
-    and per-train power limit, plus matching substation rating and electrical
-    assumptions, so the optimizer and the line-loss model can be configured
-    consistently for that voltage class.
+    Feed distance is the single-sided voltage-drop limit ``V**2 (1 - f) / (|Z| P_d)``.
 
-    Feed distance is sized from the AC/DC voltage-drop limit (the same model used
-    by :func:`apply_line_losses`). For a train drawing the design power ``P_d`` at
-    the *single-sided* coverage boundary (distance ``d`` from its only feeding
-    substation), the pantograph voltage stays at or above the minimum fraction
-    ``f`` of nominal ``V`` when
+    Args:
+        config: Preset key in :data:`ELECTRIFICATION_CONFIGS` (case-insensitive)
+            or an explicit :class:`ElectrificationConfig`.
+        design_train_power_watts: Peak per-train catenary draw (W) sustained at
+            the coverage boundary; also the per-segment power limit.
+        concurrent_trains_per_substation: Design-power trains one substation
+            feeds at once; scales the substation rating.
+        min_feed_distance_miles: Lower clamp on the feed distance (miles).
+        max_feed_distance_miles: Upper clamp on the feed distance (miles).
 
-    .. math::
+    Returns:
+        Suggested power limit, feed distance, substation rating and efficiency,
+        plus the config's electrical assumptions.
 
-        V\\,(1 - f)\\,V \\;\\ge\\; |Z|\\,d\\,\\frac{P_d}{V}
-        \\quad\\Longrightarrow\\quad
-        d \\;\\le\\; \\frac{V^2 (1 - f)}{|Z|\\,P_d},
-
-    where :math:`|Z| = \\sqrt{R^2 + X^2}` is the per-meter loop impedance. The
-    suggested ``substation_feed_distance_miles`` is this ``d`` (interior track fed
-    from two substations gets roughly double the capability, so this is
-    conservative). Because ``d`` scales as ``V**2``, higher voltages permit much
-    wider substation spacing; DC's zero reactance further reduces ``|Z|``.
-
-    Parameters
-    ----------
-    config : str or ElectrificationConfig
-        A key into :data:`ELECTRIFICATION_CONFIGS` (case-insensitive) or an
-        explicit :class:`ElectrificationConfig`.
-    design_train_power_watts : float, default 10 MW
-        Peak per-train catenary power the system must sustain at the coverage
-        boundary. Also used as the per-segment ``uniform_power_limit_watts``.
-    concurrent_trains_per_substation : float, default 2.0
-        Number of design-power trains a substation should feed simultaneously;
-        sets ``substation_max_power_watts = design_power * this``.
-    min_feed_distance_miles, max_feed_distance_miles : float, optional
-        Optional clamps on the derived feed distance. ``min`` defaults to 1 mile
-        (avoids a degenerate near-zero radius); ``max`` is unset by default.
-
-    Returns
-    -------
-    SuggestedOptimizationInputs
-        The derived values, with ``optimizer_kwargs()`` / ``line_loss_kwargs()``
-        helpers for wiring into :func:`energize_optimized` and
-        :func:`apply_line_losses`.
-
-    Raises
-    ------
-    KeyError
-        If ``config`` is an unknown preset name.
-    ValueError
-        If ``design_train_power_watts`` is not positive.
+    Raises:
+        KeyError: If ``config`` names an unknown preset.
+        ValueError: If ``design_train_power_watts`` is not positive.
     """
     if isinstance(config, str):
         key = config.lower()
@@ -471,23 +422,14 @@ def energize_uniform(
     network: alt.Network,
     uniform_power_limit_watts: float,
 ) -> alt.Network:
-    """
-    Apply a uniform energization power limit spanning every link in the network.
+    """Electrify every link at one power limit.
 
-    Each non-dummy link is given a single ``cat_power_limits`` entry covering its
-    full length at the specified power limit, electrifying the entire network.
+    Args:
+        network: Network to electrify; a modified copy is returned.
+        uniform_power_limit_watts: Power limit (W) applied over each full link.
 
-    Parameters
-    ----------
-    network : alt.Network
-        Network to electrify. Not mutated; a new network is returned.
-    uniform_power_limit_watts : float
-        Energization power limit (W) applied to every link.
-
-    Returns
-    -------
-    alt.Network
-        A new network with energization power limits applied to all links.
+    Returns:
+        New network with a full-length ``cat_power_limits`` entry on every link.
     """
     network_dict = network.to_pydict()
     # Iterate through all links in the dictionary
@@ -511,27 +453,17 @@ def energize_high_grade(
     uniform_power_limit_watts: float,
     grade_threshold: float
 ) -> alt.Network:
-    """
-    Apply energization only to links whose maximum grade meets a threshold.
+    """Electrify links whose maximum grade meets a threshold.
 
-    For each link with at least two elevation points, the maximum grade is
-    computed from consecutive ``elevs`` samples; if it is greater than or equal to
-    ``grade_threshold`` the whole link is electrified at the given power limit.
+    Args:
+        network: Network to electrify; a modified copy is returned.
+        uniform_power_limit_watts: Power limit (W) applied over each qualifying
+            link.
+        grade_threshold: Minimum value of a link's maximum grade (rise/run) for
+            it to be electrified.
 
-    Parameters
-    ----------
-    network : alt.Network
-        Network to electrify. Not mutated; a new network is returned.
-    uniform_power_limit_watts : float
-        Energization power limit (W) applied to each qualifying link.
-    grade_threshold : float
-        Minimum maximum-grade (rise/run, unitless) at or above which a link is
-        electrified.
-
-    Returns
-    -------
-    alt.Network
-        A new network with energization power limits applied to high-grade links.
+    Returns:
+        New network with full-length ``cat_power_limits`` on qualifying links.
     """
     network_dict = network.to_pydict()
     for i in range(1, len(network_dict[1])):
@@ -554,175 +486,93 @@ def energize_high_grade(
 
 def energize_optimized(
     network: alt.Network,
-    substations: List["Substation"],
+    substations: list[Substation],
     uniform_power_limit_watts: float,
     *,
-    costs: Optional["EnergizationOptCosts"] = None,
-    budget: Optional[float] = None,
+    costs: EnergizationOptCosts | None = None,
+    budget: float | None = None,
     grade_threshold: float = 0.01,
     high_grade_benefit_weight: float = 10.0,
     substation_feed_distance_miles: float = 20.0,
     require_high_grade_coverage: bool = False,
-    est_time_nets: Optional[List[alt.EstTimeNet]] = None,
-    excluded_link_idxs: Optional[List[int]] = None,
-    structure_spacing_miles: Optional[float] = None,
+    est_time_nets: list[alt.EstTimeNet] | None = None,
+    excluded_link_idxs: list[int] | None = None,
+    structure_spacing_miles: float | None = None,
     corridor_width_miles: float = 0.05,
     electrify_whole_site: bool = False,
-    min_energized_length_miles: Optional[float] = None,
-    max_energized_gap_miles: Optional[float] = None,
-    max_energized_gap_kwh: Optional[float] = None,
-    gap_energy_kwh_per_mile_by_link: Optional[Dict[int, float]] = None,
-    charge_energy_kwh_per_mile_by_link: Optional[Dict[int, float]] = None,
-    regen_energy_kwh_per_mile_by_link: Optional[Dict[int, float]] = None,
+    min_energized_length_miles: float | None = None,
+    max_energized_gap_miles: float | None = None,
+    max_energized_gap_kwh: float | None = None,
+    gap_energy_kwh_per_mile_by_link: dict[int, float] | None = None,
+    charge_energy_kwh_per_mile_by_link: dict[int, float] | None = None,
+    regen_energy_kwh_per_mile_by_link: dict[int, float] | None = None,
     battery_soc_state_model: bool = False,
     objective: str = "max_benefit",
-    economics: Optional["EconomicParameters"] = None,
-    piece_opex_fn: Optional[Callable[["PieceBenefitContext"], float]] = None,
-    piece_benefit_fn: Optional[Callable[["PieceBenefitContext"], float]] = None,
-    time_limit_seconds: Optional[float] = None,
-    mip_gap: Optional[float] = None,
+    economics: EconomicParameters | None = None,
+    piece_opex_fn: Callable[[PieceBenefitContext], float] | None = None,
+    piece_benefit_fn: Callable[[PieceBenefitContext], float] | None = None,
+    time_limit_seconds: float | None = None,
+    mip_gap: float | None = None,
     tee: bool = False,
-    solver_threads: Optional[int] = None,
+    solver_threads: int | None = None,
     warmstart: bool = False,
-) -> "EnergizationPlacementResult":
-    """
-    Optimize energization placement with a MILP, prioritizing high-grade track.
+) -> EnergizationPlacementResult:
+    """Optimize energization placement with a MILP.
 
-    Thin convenience wrapper around
-    :mod:`altrios.optimization.energization_placement`. It jointly selects which track
-    segments to electrify and which candidate transmission substations to build,
-    subject to a capital ``budget`` and substation feeding/spacing constraints,
-    while prioritizing high-grade regions.
+    Selects track pieces and substations under a budget and feeding constraints.
 
-    If ``structure_spacing_miles`` is set, structure-site (corridor) mode is used:
-    every link is densified into uniform along-track pieces and parallel
-    tracks/sidings that share a location are clustered so they share a single
-    structure cost (see ``EnergizationOptCosts``). Clustering is purely geometric and
-    requires networks with lat/lon geometry, but needs no centerline, topology, or
-    est-time nets.
+    Args:
+        network: Network on which energization is placed; a copy is returned in
+            the result.
+        substations: Candidate and existing transmission substations.
+        uniform_power_limit_watts: Power limit (W) on every energized segment.
+        costs: Cost coefficients; ``None`` means all zero.
+        budget: Capital budget cap ($); ``None`` leaves spending unconstrained.
+        grade_threshold: Grade (rise/run) at or above which track is high-grade.
+        high_grade_benefit_weight: Objective weight of high-grade track relative
+            to 1.0 for other track.
+        substation_feed_distance_miles: Maximum track distance (miles) from an
+            energized segment to a built substation.
+        require_high_grade_coverage: Whether every high-grade segment must be
+            energized.
+        est_time_nets: Train paths that restrict candidates to traversed links.
+        excluded_link_idxs: Link indices removed from candidacy.
+        structure_spacing_miles: Piece length (miles) for structure-site mode;
+            ``None`` treats each link as one piece.
+        corridor_width_miles: Lateral distance (miles) within which parallel
+            pieces share one structure site.
+        electrify_whole_site: Whether energizing a site wires every piece at it,
+            replacing per-piece binaries with site binaries.
+        min_energized_length_miles: Minimum interior energized run (corridor
+            miles); requires structure-site mode.
+        max_energized_gap_miles: Maximum unelectrified mainline run (corridor
+            miles); requires structure-site mode with a contiguous mainline.
+        max_energized_gap_kwh: Usable battery energy (kWh) between charges;
+            bounds each unelectrified window's drain and overrides the miles gap.
+        gap_energy_kwh_per_mile_by_link: Traction drain per corridor-mile
+            (kWh/mi) by link index; required with ``max_energized_gap_kwh``.
+        charge_energy_kwh_per_mile_by_link: Net charge per energized
+            corridor-mile (kWh/mi) by link index; enables charge-credited gaps.
+        regen_energy_kwh_per_mile_by_link: Regenerative recovery per
+            corridor-mile (kWh/mi) by link index, netted against drain.
+        battery_soc_state_model: Whether to use the explicit state-of-charge
+            recursion instead of covering gap rows.
+        objective: ``"max_benefit"`` or ``"min_cost"`` (capital plus discounted
+            operating cost).
+        economics: Horizon and discount rate for ``"min_cost"``.
+        piece_opex_fn: Annual net operating cost ($/yr) per piece; required for
+            ``"min_cost"``. See :func:`make_piece_opex_fn`.
+        piece_benefit_fn: Per-piece benefit overriding the grade heuristic in
+            ``"max_benefit"``.
+        time_limit_seconds: Solver wall-clock limit (s); ``None`` for no limit.
+        mip_gap: Relative MIP gap tolerance; ``None`` uses the solver default.
+        tee: Whether to stream solver output.
+        solver_threads: Thread cap for HiGHS; ``None`` uses all cores.
+        warmstart: Whether to seed a fully wired feasible MIP start.
 
-    Parameters
-    ----------
-    network : alt.Network
-        Network on which energization is placed. Not mutated; the optimized network is
-        returned inside the result.
-    substations : list of Substation
-        Candidate (and optionally pre-existing) transmission substations.
-    uniform_power_limit_watts : float
-        Energization power limit (W) applied to every energized segment.
-    costs : EnergizationOptCosts, optional
-        Cost coefficients. Defaults to a zero-cost ``EnergizationOptCosts``.
-    budget : float, optional
-        Capital budget cap ($). ``None`` (default) leaves spending unconstrained.
-    grade_threshold : float, default 0.01
-        Grade (rise/run) at or above which a segment is treated as high priority.
-    high_grade_benefit_weight : float, default 10.0
-        Objective multiplier applied to high-grade segments relative to 1.0 for
-        ordinary segments.
-    substation_feed_distance_miles : float, default 20.0
-        Maximum distance (miles) from an energized segment to its nearest built
-        substation (the feeding/spacing constraint).
-    require_high_grade_coverage : bool, default False
-        If True, force every high-grade segment to be energized rather than merely
-        prioritizing it in the objective.
-    est_time_nets : list of alt.EstTimeNet, optional
-        In per-link mode, restricts candidate segments to traversed links.
-        Not required by structure-site (corridor) mode.
-    structure_spacing_miles : float, optional
-        If set, use structure-site (corridor) mode with along-track pieces of this
-        length (miles); otherwise (default) each link is treated as its own
-        segment.
-    corridor_width_miles : float, default 0.05
-        Lateral distance (miles) within which parallel-track pieces are clustered
-        into one shared structure site (structure-site mode only).
-    electrify_whole_site : bool, default False
-        If True, use the WHOLE-SITE formulation: energizing a structure site wires
-        every track piece at it (``x == s``), collapsing the per-piece binaries
-        onto the site indicators. Far fewer integer variables and a stronger LP
-        relaxation, so the optimality gap closes much faster; the trade-off is no
-        partial-cross-section electrification (parallel tracks/sidings at a site
-        are wired together).
-    min_energized_length_miles : float, optional
-        Minimum contiguous energized run length in CORRIDOR miles (parallel
-        tracks/sidings in a site count once). Prevents energizing tiny isolated
-        slivers even when structure/substation costs are zero; the run may start
-        at any position. Requires structure-site mode
-        (``structure_spacing_miles``); ``None`` (default) disables it.
-    max_energized_gap_miles : float, optional
-        Maximum contiguous UNelectrified gap (CORRIDOR miles) along the mainline
-        -- the range limit for a battery-electric locomotive, which must reach
-        the next electrified segment before its battery depletes. Derive it from
-        battery size with :func:`max_gap_miles_from_battery`. Can FORCE
-        electrification (a feasibility pre-check raises ``ValueError`` if a gap
-        cannot be closed by any reachable substation). Requires structure-site
-        mode with a contiguous mainline path; ``None`` (default) disables it.
-    max_energized_gap_kwh : float, optional
-        ENERGY-based range limit (kWh): the usable battery traction energy a BEL
-        may spend between charges (see :func:`max_gap_kwh_from_battery`). When set,
-        the gap constraint bounds each unelectrified window's cumulative DRAIN
-        energy (from ``gap_energy_kwh_per_mile_by_link``) instead of its distance,
-        so wire is required where the pack depletes fastest. Takes precedence over
-        ``max_energized_gap_miles``. ``None`` (default) disables it.
-    gap_energy_kwh_per_mile_by_link : dict[int, float], optional
-        Per-link single-locomotive traction DRAIN per corridor-mile (kWh/mi).
-        Required when ``max_energized_gap_kwh`` is set; also weights the
-        energy-priority objective term.
-    charge_energy_kwh_per_mile_by_link : dict[int, float], optional
-        Per-link NET CHARGE delivered per energized corridor-mile (kWh/mi). When
-        supplied with ``max_energized_gap_kwh`` this enables the charge-credited
-        (recharge Tier 1) gap family, which no longer assumes a single energized
-        bucket fully recharges the pack. ``None`` (default) uses the simpler
-        ``sum u >= 1`` energy-gap family.
-    regen_energy_kwh_per_mile_by_link : dict[int, float], optional
-        Per-link regenerative-braking recovery per corridor-mile (kWh/mi). When
-        supplied, the gap/SOC constraints use NET drain (``drain - regen``) so
-        regen extends the modeled battery range. ``None`` (default) treats regen
-        as zero.
-    battery_soc_state_model : bool, default False
-        If True, use the explicit SOC-recursion (Tier 2) range model instead of the
-        covering gap families: a continuous per-bucket state of charge with a
-        curtailment slack (linear, no big-M) that tracks charge/drain/regen exactly
-        and forbids depletion. Faithful (subsumes the covering gaps) but heavier
-        (continuous state, not TU). Requires ``max_energized_gap_kwh`` +
-        ``gap_energy_kwh_per_mile_by_link``.
-    objective : str, default "max_benefit"
-        ``"max_benefit"`` maximizes priority-weighted (grade) benefit subject to
-        ``budget`` -- the rule-based formulation. ``"min_cost"`` instead minimizes
-        lifecycle cost = capital + discounted operating cost, and requires
-        ``economics`` and ``piece_opex_fn``.
-    economics : EconomicParameters, optional
-        Horizon + discount rate for ``"min_cost"`` mode (see
-        :class:`~altrios.optimization.energization_placement.EconomicParameters`).
-    piece_opex_fn : callable, optional
-        ``PieceBenefitContext -> float`` giving each piece's **annual net operating
-        cost** ($/yr, electricity minus displaced diesel; negative = saving).
-        Required for ``"min_cost"``. Build it from a first-pass dual-mode
-        simulation and prices via :func:`make_piece_opex_fn`.
-    piece_benefit_fn : callable, optional
-        ``PieceBenefitContext -> float`` overriding the default grade-priority
-        benefit in ``"max_benefit"`` mode.
-    time_limit_seconds : float, optional
-        Solver wall-clock time limit (s). ``None`` (default) means no limit.
-    mip_gap : float, optional
-        Relative MIP optimality gap tolerance. ``None`` (default) uses the solver
-        default.
-    tee : bool, default False
-        If True, stream solver output.
-    solver_threads : int, optional
-        Cap the HiGHS solver's parallelism to this many threads. ``None``
-        (default) uses the solver default (all available cores).
-    warmstart : bool, default False
-        Seed a feasible fully-wired MIP start so HiGHS always has an incumbent
-        (useful for the heavy Tier-1/SOC models). A no-incumbent time-limit hit
-        returns a result carrying only ``status`` (``network`` is ``None``) rather
-        than raising.
-
-    Returns
-    -------
-    EnergizationPlacementResult
-        Result whose ``network`` field holds the network with the optimized
-        energization applied, along with the chosen substations, costs, and
-        diagnostics.
+    Returns:
+        Result with the energized network, built substations, costs and solver
+        diagnostics; ``network`` is ``None`` when no incumbent was found.
     """
     from altrios.optimization import energization_placement as cp
 
@@ -767,10 +617,15 @@ def energize_optimized(
 PriceByLink = Union[float, Dict[int, float]]
 
 
-def _price_lookup(price: "PriceByLink") -> Callable[[int], float]:
-    """``link_idx -> price`` for a scalar price or a per-link price map. A link
-    missing from the map takes the map's mean, so a partially mapped network
-    still prices every piece."""
+def _price_lookup(price: PriceByLink) -> Callable[[int], float]:
+    """Build a link-index-to-price lookup.
+
+    Args:
+        price: One corridor-wide price or a price per link index.
+
+    Returns:
+        Function returning the link's price; unmapped links take the map's mean.
+    """
     if isinstance(price, dict):
         default = (sum(price.values()) / len(price)) if price else 0.0
         return lambda idx: float(price.get(idx, default))
@@ -780,57 +635,39 @@ def _price_lookup(price: "PriceByLink") -> Callable[[int], float]:
 
 def make_piece_opex_fn(
     *,
-    diesel_gallons_per_track_mile_by_link: Dict[int, float],
-    electricity_kwh_per_track_mile_by_link: Dict[int, float],
-    diesel_price_usd_per_gallon: "PriceByLink",
-    electricity_price_usd_per_kwh: "PriceByLink",
+    diesel_gallons_per_track_mile_by_link: dict[int, float],
+    electricity_kwh_per_track_mile_by_link: dict[int, float],
+    diesel_price_usd_per_gallon: PriceByLink,
+    electricity_price_usd_per_kwh: PriceByLink,
     default_diesel_gallons_per_track_mile: float = 0.0,
     default_electricity_kwh_per_track_mile: float = 0.0,
-) -> Callable[["PieceBenefitContext"], float]:
-    """Build a per-piece annual operating-cost function for ``objective="min_cost"``.
+) -> Callable[[PieceBenefitContext], float]:
+    """Build a per-piece annual operating-cost function.
 
-    Returns a callable suitable for ``energize_optimized(piece_opex_fn=...)`` /
-    ``EnergizationPlacementInputs.piece_opex_fn``. For each piece it computes the
-    **annual net operating cost delta** of electrifying that piece:
+    Opex is electricity bought minus diesel displaced; negative values are savings.
 
-    ``opex = electricity_price * kwh - diesel_price * gallons``
+    Args:
+        diesel_gallons_per_track_mile_by_link: Annual diesel displaced per
+            track-mile (gal/mi), keyed by link index.
+        electricity_kwh_per_track_mile_by_link: Annual grid-side electricity
+            bought per track-mile (kWh/mi), keyed by link index.
+        diesel_price_usd_per_gallon: Diesel price ($/gal), corridor-wide or per
+            link index.
+        electricity_price_usd_per_kwh: Electricity price ($/kWh), corridor-wide
+            or per link index.
+        default_diesel_gallons_per_track_mile: Diesel density for unmapped links.
+        default_electricity_kwh_per_track_mile: Electricity density for unmapped
+            links.
 
-    where ``kwh`` and ``gallons`` are the piece's annual electricity purchased and
-    annual diesel displaced (both = per-track-mile density * piece length_miles).
-    A negative result is a saving. Because the optimizer only sees this scalar per
-    piece, all traffic/loading assumptions live here, in the densities:
-
-    The per-link densities encode **all the traffic assumptions** -- trains per
-    day, tonnage/loading, consist makeup (how many locomotives, how many dual-mode)
-    -- because they are meant to be produced by aggregating first-pass dual-mode
-    simulations over an annual train set (e.g. via the ALTRIOS demand /
-    train-planner / sim_manager pipeline and the ``annualize`` convention). The
-    electricity density should already include catenary line loss and substation
-    conversion loss (grid-side energy); the diesel density is the fuel the
-    dual-mode consist would otherwise burn on that segment.
-
-    Parameters
-    ----------
-    diesel_gallons_per_track_mile_by_link : dict[int, float]
-        Annual diesel gallons displaced per track-mile, keyed by link index.
-    electricity_kwh_per_track_mile_by_link : dict[int, float]
-        Annual grid-side electricity (kWh) purchased per track-mile, keyed by link
-        index.
-    diesel_price_usd_per_gallon, electricity_price_usd_per_kwh : float or dict[int, float]
-        Fuel and electricity prices, either one corridor-wide value or a price per
-        link index (regional price zones); unmapped links take the map's mean.
-    default_diesel_gallons_per_track_mile, default_electricity_kwh_per_track_mile : float
-        Fallback densities for links absent from the maps (default 0).
-
-    Returns
-    -------
-    callable
-        ``PieceBenefitContext -> float`` annual net operating cost ($/yr).
+    Returns:
+        Function mapping a :class:`PieceBenefitContext` to annual net operating
+        cost ($/yr), for ``objective="min_cost"``.
     """
     diesel_price = _price_lookup(diesel_price_usd_per_gallon)
     elec_price = _price_lookup(electricity_price_usd_per_kwh)
 
-    def _opex(ctx: "PieceBenefitContext") -> float:
+    def _opex(ctx: PieceBenefitContext) -> float:
+        """Price one piece's annual electricity minus displaced diesel."""
         gal_per_mi = diesel_gallons_per_track_mile_by_link.get(
             ctx.link_idx, default_diesel_gallons_per_track_mile
         )
@@ -846,58 +683,37 @@ def make_piece_opex_fn(
 
 def make_bel_piece_opex_fn(
     *,
-    traction_kwh_per_track_mile_by_link: Dict[int, float],
-    electricity_price_usd_per_kwh: "PriceByLink",
+    traction_kwh_per_track_mile_by_link: dict[int, float],
+    electricity_price_usd_per_kwh: PriceByLink,
     battery_roundtrip_efficiency: float,
     default_traction_kwh_per_track_mile: float = 0.0,
-) -> Callable[["PieceBenefitContext"], float]:
-    """Per-piece annual operating-cost function for a BATTERY-ELECTRIC fleet.
+) -> Callable[[PieceBenefitContext], float]:
+    """Build a per-piece operating-cost function for battery-electric fleets.
 
-    A BEL never burns mainline diesel, so the dual-mode "electricity minus diesel
-    displaced" opex (:func:`make_piece_opex_fn`) does not apply. To first order the
-    total grid energy a BEL draws is fixed by the route's traction demand
-    regardless of WHERE the wire hangs, so the electricity bill is nearly
-    layout-independent and the BEL problem is capital-dominated. The one
-    layout-dependent operating cost is the battery **round-trip loss** on the
-    energy that must pass through the pack: energizing a piece lets its traction
-    energy be drawn straight from the wire instead of via the battery, avoiding
-    that loss. The per-piece opex is therefore a SAVING (negative):
+    Energizing a piece avoids battery round-trip loss on its traction energy.
 
-    ``opex_p = - price_e * (1/eta_rt - 1) * E_p``
+    Args:
+        traction_kwh_per_track_mile_by_link: Annual traction energy per
+            track-mile (kWh/mi), keyed by link index.
+        electricity_price_usd_per_kwh: Electricity price ($/kWh), corridor-wide
+            or per link index.
+        battery_roundtrip_efficiency: Pack round-trip efficiency in ``(0, 1]``.
+        default_traction_kwh_per_track_mile: Traction density for unmapped links.
 
-    where ``E_p`` = annual traction kWh on the piece (per-track-mile density *
-    ``length_miles``). Minimizing ``capital + PVAF * sum_p opex_p * x_p`` thus
-    rewards energizing the highest-energy (steep/heavy) track first -- i.e.
-    "prioritize the segments with the largest energy requirement per mile" -- which
-    is exactly the gradient of the round-trip-loss term, not an ad hoc heuristic.
-    The range-extender diesel term (for a SOFT range limit) is intentionally
-    omitted; add it when soft gaps are modeled.
+    Returns:
+        Function mapping a :class:`PieceBenefitContext` to
+        ``-price * (1 / efficiency - 1) * annual_kwh`` ($/yr, a saving).
 
-    Parameters
-    ----------
-    traction_kwh_per_track_mile_by_link : dict[int, float]
-        Annual traction (at-the-wheel) energy per track-mile, keyed by link index.
-        Grade/speed/mass scaling and traffic assumptions live here, as in
-        :func:`make_piece_opex_fn`.
-    electricity_price_usd_per_kwh : float or dict[int, float]
-        Grid electricity price, corridor-wide or per link index (price zones).
-    battery_roundtrip_efficiency : float
-        Pack charge->discharge round-trip efficiency ``eta_rt`` in ``(0, 1]``.
-    default_traction_kwh_per_track_mile : float, default 0.0
-        Fallback density for links absent from the map.
-
-    Returns
-    -------
-    callable
-        ``PieceBenefitContext -> float`` annual net operating cost ($/yr, negative
-        = saving).
+    Raises:
+        ValueError: If ``battery_roundtrip_efficiency`` is outside ``(0, 1]``.
     """
     if not 0.0 < battery_roundtrip_efficiency <= 1.0:
         raise ValueError("battery_roundtrip_efficiency must be in (0, 1].")
     loss_factor = (1.0 / battery_roundtrip_efficiency) - 1.0
     elec_price = _price_lookup(electricity_price_usd_per_kwh)
 
-    def _opex(ctx: "PieceBenefitContext") -> float:
+    def _opex(ctx: PieceBenefitContext) -> float:
+        """Return the avoided round-trip loss cost of one piece."""
         kwh_per_mi = traction_kwh_per_track_mile_by_link.get(
             ctx.link_idx, default_traction_kwh_per_track_mile
         )
@@ -912,32 +728,19 @@ def _compute_energized_intervals(
     link_length: float,
     gap_meters: float,
     cat_meters: float,
-) -> Tuple[List[Tuple[float, float]], float]:
-    """
-    Compute the energization sub-link intervals for one link in a repeating pattern.
+) -> tuple[list[tuple[float, float]], float]:
+    """Lay a repeating gap/energized pattern across one link.
 
-    Walks from ``start_pos_in_cycle`` through the repeating gap/energization cycle
-    (``gap_meters`` of no energization followed by ``cat_meters`` of energization) across
-    ``link_length`` meters, producing precise ``(offset_start, offset_end)`` pairs
-    relative to the start of the link. The ending cycle position is returned so
-    consecutive links can be chained without floating-point drift.
+    Args:
+        start_pos_in_cycle: Position (m) within the gap/energized cycle at the
+            link start.
+        link_length: Link length (m).
+        gap_meters: Unelectrified length (m) of each cycle.
+        cat_meters: Electrified length (m) of each cycle.
 
-    Parameters
-    ----------
-    start_pos_in_cycle : float
-        Position (meters) within the gap/energization cycle at the start of the link.
-    link_length : float
-        Length of the link (meters).
-    gap_meters : float
-        Length (meters) of the un-electrified gap portion of the cycle.
-    cat_meters : float
-        Length (meters) of the electrified portion of the cycle.
-
-    Returns
-    -------
-    tuple of (list of tuple of (float, float), float)
-        The energized ``(offset_start, offset_end)`` intervals within the link and
-        the ending position within the cycle.
+    Returns:
+        Energized ``(offset_start, offset_end)`` pairs (m from the link start)
+        and the cycle position at the link end.
     """
     cycle_length = gap_meters + cat_meters
     intervals: List[Tuple[float, float]] = []
@@ -962,28 +765,17 @@ def _compute_energized_intervals(
 
 
 def _longest_mainline_path(
-    link_by_idx: Dict[int, dict], candidates: set
-) -> List[int]:
-    """
-    Return the longest through-route (ordered link idxs) by following ``idx_next``.
+    link_by_idx: dict[int, dict], candidates: set[int]
+) -> list[int]:
+    """Return the longest through-route found by following ``idx_next``.
 
-    Follows each source link's ``idx_next`` chain -- the primary/through pointer, so
-    it continues straight through junctions while sidings diverge via
-    ``idx_next_alt`` -- and returns the walk covering the greatest total length. This
-    is a best-effort continuous mainline centerline; the opposite direction and
-    sidings are associated separately by geometric proximity.
+    Args:
+        link_by_idx: Link dicts keyed by ``idx_curr``.
+        candidates: Link indices eligible for the mainline.
 
-    Parameters
-    ----------
-    link_by_idx : dict
-        Mapping of link index to link dict.
-    candidates : set
-        Link indices eligible to be part of the mainline.
-
-    Returns
-    -------
-    list of int
-        Ordered link indices of the longest through-route.
+    Returns:
+        Ordered link indices of the longest walk starting at a link that no
+        candidate points to, or at any candidate when every link is pointed to.
     """
     is_target: set = set()
     for a in candidates:
@@ -1014,49 +806,31 @@ def _longest_mainline_path(
 def energize_even_spacing(
     network: alt.Network,
     uniform_power_limit_watts: float,
-    spacing_meters: Tuple[float, float],
+    spacing_meters: tuple[float, float],
     *,
     sample_spacing_meters: float = 200.0,
     corridor_match_meters: float = 1000.0,
 ) -> alt.Network:
-    """
-    Place energization in an even gap/energized pattern measured in CORRIDOR distance.
+    """Place energization in a repeating gap/energized corridor pattern.
 
-    ``spacing_meters`` is ``(gap_meters, energized_meters)``: a repeating pattern of
-    ``gap_meters`` of no energization followed by ``energized_meters`` of energization,
-    laid out along the corridor's linear distance. All tracks that make up the corridor
-    at a given location -- both directions of a double-track line plus adjacent sidings --
-    inherit the SAME pattern state, so the pattern is measured once in corridor distance
-    (not multiplied per parallel track).
+    Parallel tracks and sidings take the pattern phase of the nearest mainline point.
 
-    The corridor is reduced to uniform "virtual link" pieces (see ``_densify_links``);
-    the longest through-route (followed via ``idx_next``) is the reference mainline whose
-    cumulative arc-length drives the pattern, and every other piece (opposite direction,
-    sidings, branches) inherits the pattern from the nearest mainline arc-length by
-    lat/lon proximity. This replaces the old est-time-net mainline heuristic, giving
-    exact intervals (the cycle phase is continuous along the corridor) and robust,
-    geometry-based siding handling.
+    Args:
+        network: Network to electrify; a modified copy is returned. Links need
+            lat/lon geometry.
+        uniform_power_limit_watts: Power limit (W) on every energized interval.
+        spacing_meters: ``(gap_meters, energized_meters)`` of the repeating
+            pattern, measured along the corridor.
+        sample_spacing_meters: Along-track piece length (m) used to reduce the
+            network to virtual links.
+        corridor_match_meters: Maximum lateral distance (m) from the mainline for
+            a link to receive the pattern.
 
-    Parameters
-    ----------
-    network : alt.Network
-        Network to electrify. Not mutated; a new network is returned. Requires lat/lon
-        geometry on the links.
-    uniform_power_limit_watts : float
-        Energization power limit (W) applied to every energized interval.
-    spacing_meters : tuple of (float, float)
-        ``(gap_meters, energized_meters)`` of the repeating corridor pattern.
-    sample_spacing_meters : float, default 200.0
-        Along-track piece length (m) for the reduced representation; smaller values give
-        finer siding-to-corridor matching at some extra cost.
-    corridor_match_meters : float, default 1000.0
-        Maximum lateral distance (m) from a piece to the reference mainline for it to be
-        treated as part of the corridor; pieces farther than this are left un-energized.
+    Returns:
+        New network with energized sub-link intervals applied.
 
-    Returns
-    -------
-    alt.Network
-        A new network with evenly spaced energization sub-link intervals applied.
+    Raises:
+        ValueError: If no link has lat/lon geometry or no mainline can be built.
     """
     import math
     import numpy as np
@@ -1158,8 +932,18 @@ def energize_even_spacing(
     return alt.Network.from_pydict(network_dict)
 
 
-def _latlon_at_offset(link: dict, offset_meters: float) -> Optional[Tuple[float, float]]:
-    """Interpolate a link's (lat, lon) at a given along-track offset (meters)."""
+def _latlon_at_offset(
+    link: dict, offset_meters: float
+) -> tuple[float, float] | None:
+    """Interpolate a link's (lat, lon) at an along-track offset.
+
+    Args:
+        link: Link dict with a ``headings`` geometry list.
+        offset_meters: Offset from the link start (m); clamped to the geometry.
+
+    Returns:
+        Interpolated (lat, lon), or ``None`` when the link has no coordinates.
+    """
     headings = link.get("headings") or []
     pts = [
         (float(h["offset_meters"]), float(h["lat"]), float(h["lon"]))
@@ -1185,21 +969,20 @@ def _latlon_at_offset(link: dict, offset_meters: float) -> Optional[Tuple[float,
 def _build_corridor_arc(
     network_dict: tuple,
     sample_spacing_meters: float,
-):
-    """Build a corridor arc-length reference from the network geometry.
+) -> tuple[dict[int, float], set[int], Callable[[float, float], float]]:
+    """Build a corridor arc-length reference from network geometry.
 
-    Reuses the shared densify + longest-mainline machinery to produce, for every
-    link: the cumulative corridor arc-length at the link start (for mainline
-    links) plus a KD-tree that maps any lat/lon to the nearest mainline
-    arc-length (for sidings / opposite-direction / branch tracks).
+    Args:
+        network_dict: ``network.to_pydict()`` output.
+        sample_spacing_meters: Along-track piece length (m) for densification.
 
-    Returns
-    -------
-    tuple
-        ``(arc_start_of_link, mainline_link_set, project_fn)`` where
-        ``project_fn(lat, lon) -> arc_meters`` returns the nearest mainline
-        arc-length, and ``arc_start_of_link[idx]`` is the corridor arc at the
-        start of mainline link ``idx`` (absent for non-mainline links).
+    Returns:
+        Arc position (m) at the start of each mainline link, the mainline link
+        set, and a function mapping (lat, lon) to the nearest mainline arc
+        position (m).
+
+    Raises:
+        ValueError: If no link has lat/lon geometry or no mainline can be built.
     """
     import math
     import numpy as np
@@ -1245,7 +1028,8 @@ def _build_corridor_arc(
     m_per_deg_lat = 111_320.0
     m_per_deg_lon = 111_320.0 * math.cos(math.radians(lat0))
 
-    def _to_xy(lat: float, lon: float):
+    def _to_xy(lat: float, lon: float) -> tuple[float, float]:
+        """Project (lat, lon) to local equirectangular meters."""
         return ((lon - lon0) * m_per_deg_lon, (lat - lat0) * m_per_deg_lat)
 
     main_xy = np.array([_to_xy(p_lat[i], p_lon[i]) for i in mainline_pieces])
@@ -1256,6 +1040,7 @@ def _build_corridor_arc(
         main_arc.append(arc_start_of_link[p_link[i]] + float(p_off0[i]))
 
     def project_fn(lat: float, lon: float) -> float:
+        """Return the nearest mainline arc position (m)."""
         _dist, k = main_tree.query(_to_xy(lat, lon))
         return float(main_arc[k])
 
@@ -1264,83 +1049,58 @@ def _build_corridor_arc(
 
 def apply_line_losses(
     network: alt.Network,
-    substations: "List[Substation]",
+    substations: list[Substation],
     *,
     system_voltage_volts: float = 25_000.0,
-    resistance_ohms_per_meter: Optional[float] = None,
-    reactance_ohms_per_meter: Optional[float] = None,
+    resistance_ohms_per_meter: float | None = None,
+    reactance_ohms_per_meter: float | None = None,
     electrification_type: str = "ac_25kv_1x25",
     default_substation_max_power_watts: float = DEFAULT_SUBSTATION_MAX_POWER_WATTS,
     default_substation_efficiency: float = DEFAULT_SUBSTATION_EFFICIENCY,
     min_pantograph_voltage_fraction: float = DEFAULT_MIN_PANTOGRAPH_VOLTAGE_FRACTION,
-    base_power_limit_watts: Optional[float] = None,
+    base_power_limit_watts: float | None = None,
     sample_spacing_meters: float = 200.0,
     corridor_match_meters: float = 1000.0,
-) -> "Tuple[alt.Network, Dict[str, dict]]":
-    """Precompute AC catenary line losses and derate energized power limits.
+) -> tuple[alt.Network, dict[str, dict]]:
+    """Derate energized intervals for catenary line losses.
 
-    For every energized ``cat_power_limits`` interval already present on the
-    network, this computes the effective series resistance/reactance from the
-    interval to its feeding substation network along the rail corridor, then:
+    Each interval is fed from the nearest substations along the corridor arc.
 
-    - stamps ``resistance_to_source_ohms`` / ``reactance_to_source_ohms`` /
-      ``voltage_volts`` / ``district_id`` on the interval so the simulation can
-      compute resistive line loss (``loss = resistance * (pwr / voltage)**2``)
-      each time step, and
-    - derates the interval ``power_limit_watts`` to the minimum of its base
-      rating, the substation-capacity-limited power (accounting for loss), and
-      the voltage-drop-limited power (minimum pantograph voltage).
+    Args:
+        network: Network already carrying ``cat_power_limits``; a modified copy
+            is returned.
+        substations: Feeding substations; each needs lat/lon or a ``link_idx``.
+        system_voltage_volts: Nominal catenary voltage (V) for substations that
+            set none; also written to the network config.
+        resistance_ohms_per_meter: Loop series resistance (ohm/m); ``None``
+            takes the ``electrification_type`` default.
+        reactance_ohms_per_meter: Loop series reactance (ohm/m); ``None`` takes
+            the ``electrification_type`` default.
+        electrification_type: Key into :data:`ELECTRIFICATION_IMPEDANCE_DEFAULTS`.
+        default_substation_max_power_watts: Rating (W) for substations without
+            ``max_power_watts``.
+        default_substation_efficiency: Grid-to-catenary efficiency for
+            substations without ``efficiency``.
+        min_pantograph_voltage_fraction: Minimum pantograph voltage as a
+            fraction of nominal, for the voltage-drop power limit.
+        base_power_limit_watts: Pre-loss rating (W) to derate from; ``None``
+            uses each interval's existing ``power_limit_watts``.
+        sample_spacing_meters: Along-track piece length (m) for the corridor arc.
+        corridor_match_meters: Lateral match tolerance (m) for off-mainline
+            intervals; currently unused.
 
-    The corridor is treated as linear in graph space (branching neglected); a
-    train between two adjacent substations is fed from both sides in parallel, so
-    the effective resistance at corridor position ``x`` between substations at
-    ``a < b`` is ``r * (x - a) * (b - x) / (b - a)`` (half the single-sided loss
-    at mid-span); beyond the outermost substation it is ``r * |x - a|``.
+    Returns:
+        The derated network, whose intervals carry ``resistance_to_source_ohms``,
+        ``reactance_to_source_ohms``, ``voltage_volts``, ``district_id``,
+        ``district_id_secondary`` and ``feed_fraction`` and whose power limit is
+        the least of the base rating, the substation-capacity limit and the
+        voltage-drop limit; and substation metadata keyed by district id with
+        ``grid_emissions_region``, ``max_power_watts``, ``voltage_volts``,
+        ``efficiency`` and ``arc_meters``.
 
-    Parameters
-    ----------
-    network : alt.Network
-        A network that already carries ``cat_power_limits`` (e.g. from
-        :func:`energize_uniform`, :func:`energize_even_spacing`, or the
-        optimizer). Not mutated; a new network is returned.
-    substations : list of Substation
-        Feeding substations (user-provided or optimizer-produced). Each must have
-        a resolvable location (``lat``/``lon`` or ``link_idx``). ``max_power_watts``,
-        ``grid_emissions_region``, and ``voltage_volts`` are used if set.
-    system_voltage_volts : float, default 25000
-        Global nominal catenary voltage. Used where a substation does not
-        override it; also written to the network config.
-    resistance_ohms_per_meter, reactance_ohms_per_meter : float, optional
-        Loop series resistance/reactance per meter. If ``None``, taken from
-        ``electrification_type`` via :data:`ELECTRIFICATION_IMPEDANCE_DEFAULTS`.
-    electrification_type : str, default "ac_25kv_1x25"
-        Key into :data:`ELECTRIFICATION_IMPEDANCE_DEFAULTS` for default impedance.
-    default_substation_max_power_watts : float
-        Fallback substation power rating when a substation omits ``max_power_watts``.
-    default_substation_efficiency : float, default 0.99
-        Fallback grid->catenary conversion efficiency when a substation omits
-        ``efficiency``. 0.99 suits AC (transformer only); use a lower value (~0.97)
-        for DC substations to capture AC->DC rectifier loss.
-    min_pantograph_voltage_fraction : float, default 0.7
-        Minimum allowed pantograph voltage as a fraction of nominal, for the
-        voltage-drop-limited capacity.
-    base_power_limit_watts : float, optional
-        Base (pre-loss) power rating to derate from. If ``None``, each interval's
-        existing ``power_limit_watts`` is used as its base rating.
-    sample_spacing_meters : float, default 200.0
-        Along-track piece length for building the corridor arc-length reference.
-    corridor_match_meters : float, default 1000.0
-        Maximum lateral distance for matching an off-mainline interval to the
-        corridor; ignored (no loss modeled) beyond this.
-
-    Returns
-    -------
-    tuple of (alt.Network, dict)
-        The derated network and a ``substation_meta`` dict keyed by string
-        district id, each with ``grid_emissions_region``, ``max_power_watts``,
-        ``voltage_volts``, ``efficiency``, and corridor ``arc_meters``. Pass the
-        metadata to :func:`compute_line_losses` for grid-region attribution and
-        conversion-loss scaling.
+    Raises:
+        ValueError: If ``electrification_type`` is unknown while an impedance is
+            ``None``, or a substation has no resolvable location.
     """
     import math
     from altrios.optimization.energization_placement import _link_midpoint_latlon
@@ -1416,8 +1176,8 @@ def apply_line_losses(
     sub_records.sort(key=lambda s: s["arc"])
     sub_arcs = [s["arc"] for s in sub_records]
 
-    def _feed(x: float):
-        """Return (left_record, right_record) feeding substations by corridor arc."""
+    def _feed(x: float) -> tuple[dict | None, dict | None]:
+        """Return the left and right feeding substations at ``x``."""
         import bisect
 
         left = None
@@ -1531,43 +1291,27 @@ def apply_line_losses(
 
 
 def compute_line_losses(
-    train_sim,
-    substation_meta: Optional[Dict[str, dict]] = None,
-):
+    train_sim: alt.SpeedLimitTrainSim | dict,
+    substation_meta: dict[str, dict] | None = None,
+) -> pl.DataFrame:
     """Aggregate catenary line losses from a solved train simulation.
 
-    Reads the per-time-step resistive line loss the simulation recorded in each
-    dual-mode locomotive's catenary interface history, attributes it to the
-    feeding substation/district (by mapping the train position to the energized
-    ``cat_power_limits`` interval that carries the ``district_id``), and, if
-    ``substation_meta`` is provided, to each substation's grid-emissions region.
+    Exact cumulative totals are apportioned to districts by sampled power history.
 
-    Parameters
-    ----------
-    train_sim : SpeedLimitTrainSim or dict
-        A solved train simulation (or its ``to_pydict()``), saved with a history
-        (``save_interval`` set).
-    substation_meta : dict, optional
-        The metadata returned by :func:`apply_line_losses`, keyed by district id.
+    Args:
+        train_sim: Solved train simulation, or its ``to_pydict()``, saved with a
+            per-step history.
+        substation_meta: Metadata from :func:`apply_line_losses`, keyed by
+            district id, giving each district's region and efficiency.
 
-    Returns
-    -------
-    polars.DataFrame
+    Returns:
         One row per district with ``district_id``, ``grid_emissions_region``,
-        ``line_loss_energy_joules``, ``catenary_energy_joules`` (pantograph
-        energy drawn), and ``substation_energy_joules`` (grid-side substation
-        input = pantograph + line loss, scaled up by ``1/efficiency`` when the
-        substation's conversion ``efficiency`` is known from ``substation_meta``).
-        A final ``"__total__"`` row carries the network-wide totals.
+        ``line_loss_energy_joules``, ``catenary_energy_joules`` and
+        ``substation_energy_joules`` (pantograph energy plus loss, divided by
+        efficiency), ending with a ``"__total__"`` row.
 
-    Notes
-    -----
-    Network-wide totals come from each locomotive's *cumulative*
-    ``energy_line_loss`` / ``energy_elec_in`` (integrated every simulation step,
-    so exact regardless of ``save_interval``). When more than one district feeds
-    the train, the totals are apportioned across districts using the
-    (down-sampled) per-step power history as weights; the split is therefore
-    approximate but the totals are exact.
+    Raises:
+        ValueError: If the history lacks train offsets or time steps.
     """
     import polars as pl
 
@@ -1608,7 +1352,7 @@ def compute_line_losses(
         for c in path_cpls
     ]
 
-    def _feed_at(offset: float):
+    def _feed_at(offset: float) -> tuple[str | None, str | None, float]:
         """Return (primary_id, secondary_id, frac_primary) at a path offset."""
         for s, e, did, did2, frac in cpl_bounds:
             if offset < s:
@@ -1706,29 +1450,25 @@ def compute_line_losses(
 
 
 def substation_load_curves(
-    train_sim,
-    substation_meta: Optional[Dict[str, dict]] = None,
-):
-    """Per-substation load curves (power vs. time) from a solved train sim.
+    train_sim: alt.SpeedLimitTrainSim | dict,
+    substation_meta: dict[str, dict] | None = None,
+) -> pl.DataFrame:
+    """Build per-substation load curves from a solved train simulation.
 
-    Splits each recorded time step's substation load (pantograph power drawn plus
-    line loss) between the one or two feeding substations by the same
-    current-division fractions used in :func:`compute_line_losses`, giving a load
-    time series per substation. Resolution follows the simulation ``save_interval``.
+    Each step's pantograph power plus line loss is split by feed fraction.
 
-    Parameters
-    ----------
-    train_sim : SpeedLimitTrainSim or dict
-        A solved train simulation (or its ``to_pydict()``) with history.
-    substation_meta : dict, optional
-        Metadata from :func:`apply_line_losses` (adds a ``grid_emissions_region``
-        column is not applied here; regions are available via that mapping).
+    Args:
+        train_sim: Solved train simulation, or its ``to_pydict()``, saved with a
+            per-step history.
+        substation_meta: Metadata from :func:`apply_line_losses`; currently
+            unused.
 
-    Returns
-    -------
-    polars.DataFrame
-        Columns ``time_seconds`` and ``load_watts__<district_id>`` (one per
-        substation), plus ``load_watts__total``.
+    Returns:
+        Columns ``time_seconds``, one ``load_watts__<district_id>`` per
+        substation, and ``load_watts__total``.
+
+    Raises:
+        ValueError: If the history lacks train offsets or times.
     """
     import polars as pl
 
@@ -1755,7 +1495,8 @@ def substation_load_curves(
         for c in path_cpls
     ]
 
-    def _feed_at(offset: float):
+    def _feed_at(offset: float) -> tuple[str | None, str | None, float]:
+        """Return (primary_id, secondary_id, frac_primary) at a path offset."""
         for s, e, did, did2, frac in cpl_bounds:
             if offset < s:
                 break
@@ -1810,9 +1551,18 @@ def substation_load_curves(
     return pl.DataFrame(data)
 
 
-def __getattr__(name: str):
-    """Lazily re-export :class:`Substation` (source-independent) without eagerly
-    importing the optimizer's heavy dependencies (pyomo, etc.)."""
+def __getattr__(name: str) -> type[Substation]:
+    """Lazily re-export :class:`Substation` from the optimizer module.
+
+    Args:
+        name: Attribute name being looked up.
+
+    Returns:
+        The :class:`Substation` class.
+
+    Raises:
+        AttributeError: If ``name`` is anything else.
+    """
     if name == "Substation":
         from altrios.optimization.energization_placement import Substation
 

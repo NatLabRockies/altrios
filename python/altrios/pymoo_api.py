@@ -17,6 +17,7 @@ try:
     from pymoo.algorithms.base.genetic import GeneticAlgorithm
     from pymoo.algorithms.moo.nsga2 import NSGA2  # noqa: F401
     from pymoo.algorithms.moo.nsga3 import NSGA3  # noqa: F401
+    from pymoo.core.algorithm import Algorithm
 
     # Imports for convenient use in scripts
     from pymoo.core.problem import (
@@ -48,16 +49,17 @@ def get_error_val(
     test: npt.NDArray[np.float64],
     time_steps: npt.NDArray[np.float64],
 ) -> float:
-    """
-    Return time-averaged error for model and test signal.
+    """Return the time-averaged absolute error between two signals.
 
-    # Args:
-        - `model`: array of values for signal from model
-        - `test`: array of values for signal from test data
-        - `time_steps`: array (or scalar for constant) of values for model time steps [s]
+    Args:
+        model: Signal values from the model.
+        test: Signal values from test data, same length as `model`.
+        time_steps: Model time steps [s].
 
-    # Returns:
-        - `error`: integral of absolute value of difference between model and test per time
+    Returns:
+        Squared difference for scalar inputs; otherwise the integral of
+        |model - test| over `time_steps` divided by the elapsed time, or the
+        summed absolute difference when `time_steps` has another length.
     """
     if isinstance(model, float) and isinstance(test, float):
         return abs(model - test)**2
@@ -139,8 +141,12 @@ class ModelObjectives:
     n_obj: int | None = None
     n_constr: int | None = None
 
-    def __post_init__(self):
-        """Initialize special attributes and check for proper setup"""
+    def __post_init__(self) -> None:
+        """Derive parameter functions, bounds and objective counts.
+
+        Raises:
+            AssertionError: If `n_obj` was given or input lengths disagree.
+        """
         assert self.n_obj is None, "`n_obj` is not intended to be user provided"
         assert len(self.dfs) == len(self.models), f"{len(self.dfs)} != {len(self.models)}"
         self.param_fns = tuple(pb[0] for pb in self.param_fns_and_bounds)
@@ -149,8 +155,16 @@ class ModelObjectives:
         self.n_obj = len(self.models) * len(self.obj_fns)
         self.n_constr = len(self.models) * len(self.constr_fns)
 
-    def update_params(self, xs: list[Any]):
-        """Update model parameters based on `x`, which must match length of self.param_fns"""
+    def update_params(self, xs: list[Any]) -> dict[str, Any]:
+        """Apply parameter values and instantiate simulation objects.
+
+        Args:
+            xs: New parameter values, one per entry in `param_fns`.
+
+        Returns:
+            Simulation objects keyed by model name; the caught exception where
+            instantiation failed.
+        """
         assert len(xs) == len(self.param_fns), f"({len(xs)} != {len(self.param_fns)}"
 
         t0 = time.perf_counter()
@@ -189,15 +203,15 @@ class ModelObjectives:
             dict[str, Any],
         ]
     ):
-        """
-        Calculate model errors w.r.t. test data for each element in dfs/models for each objective.
+        """Calculate objectives and constraint violations for every model.
 
-        # Args:
-            - `sim_drives`: dictionary with user-defined keys and SimDrive instances
-            - `return_mods`: if true, also returns dict of solved models. Defaults to False.
+        Args:
+            sim_drives: Simulation objects keyed by model name.
+            return_mods: Also return the solved and unsolved model dicts.
 
-        # Returns:
-            Objectives and optionally solved models
+        Returns:
+            Objectives and constraint violations keyed by model name, plus the
+            solved and unsolved model dicts when `return_mods` is True.
         """
         objectives: dict[str, list[float]] = {}
         constraint_violations: dict[str, list[float]] = {}
@@ -227,23 +241,30 @@ class ModelObjectives:
     def append_all_objs_for_trip(
         self,
         return_mods: bool,
-        sim,
-        unsolved_mods,
-        key,
-        df_exp,
-        objectives,
-        constraint_violations,
-        solved_mods,
-    ):
-        """
-        Append objectives for all trips
+        sim: Any,
+        unsolved_mods: dict[str, Any],
+        key: str,
+        df_exp: pd.DataFrame | float,
+        objectives: dict[str, list[float]],
+        constraint_violations: dict[str, list[float]],
+        solved_mods: dict[str, Any],
+    ) -> pd.DataFrame | float:
+        """Walk one simulation and append its objectives and constraints.
 
-        # Arguments
-        - `return_mods`: whether to return solved models
-        - `sim_dict`: dictionary of solved simulations
-        - `df_exp`: dictionary of reference data for calibration
-        - `walk_success`: whether the simulation succeeded
-        - `objectives`: objectives to mutably append for each trip
+        Args:
+            return_mods: Store the model dicts in `unsolved_mods` and
+                `solved_mods`.
+            sim: Simulation object to walk.
+            unsolved_mods: Receives the model dict before walking, by `key`.
+            key: Trip name used as the dict key.
+            df_exp: Reference test data for the trip, or a scalar target.
+            objectives: Receives the trip's objective values, by `key`.
+            constraint_violations: Receives the trip's constraint values, by
+                `key`.
+            solved_mods: Receives the model dict after walking, by `key`.
+
+        Returns:
+            `df_exp` trimmed to the length of the completed simulation.
         """
         if return_mods:
             unsolved_mods[key] = sim.to_pydict()
@@ -311,23 +332,30 @@ class ModelObjectives:
     def append_obj_for_trip(
         self,
         obj_fn: Callable | tuple[Callable, Callable],
-        sim_dict,
-        df_exp,
-        walk_success,
-        objectives,
-        key,
-    ):
-        """
-        Append objectives for each trip
+        sim_dict: dict[str, Any],
+        df_exp: pd.DataFrame | float,
+        walk_success: bool,
+        objectives: dict[str, list[float]],
+        key: str,
+    ) -> Callable | tuple[Callable, Callable]:
+        """Append one objective value for a trip.
 
-        # Arguments
-        - `obj_fn`: objective function
-        - `sim_dict`: dictionary of solved simulations
-        - `df_exp`: dictionary of reference data for calibration
-        - `walk_success`: whether the simulation succeeded
-        - `objectives`: objectives to loop through for each trip
+        A failed or incomplete simulation receives a large penalty value instead.
 
+        Args:
+            obj_fn: Model signal extractor, or a (model, reference) pair of
+                extractors for error against test data.
+            sim_dict: Solved simulation as a dict.
+            df_exp: Reference test data for the trip, or a scalar target.
+            walk_success: Whether the simulation completed.
+            objectives: Receives the objective value, by `key`.
+            key: Trip name used as the dict key.
 
+        Returns:
+            `obj_fn`, unchanged.
+
+        Raises:
+            ValueError: If a tuple `obj_fn` does not have two elements.
         """
         if isinstance(obj_fn, Sequence):
             if len(obj_fn) == 2:
@@ -381,8 +409,14 @@ if PYMOO_AVAILABLE:
         def __init__(
             self,
             mod_obj: ModelObjectives,
-            elementwise_runner=LoopedElementwiseEvaluation(),
-        ):
+            elementwise_runner: Callable[..., list] = LoopedElementwiseEvaluation(),
+        ) -> None:
+            """Size the pymoo problem from the model objectives.
+
+            Args:
+                mod_obj: Objectives, constraints and parameter bounds.
+                elementwise_runner: pymoo runner that evaluates each design.
+            """
             self.mod_obj = mod_obj
             super().__init__(
                 n_var=len(self.mod_obj.param_fns),
@@ -393,7 +427,21 @@ if PYMOO_AVAILABLE:
                 n_ieq_constr=self.mod_obj.n_constr,
             )
 
-        def _evaluate(self, x, out, *args, **kwargs):  # noqa: ARG002
+        def _evaluate(
+            self,
+            x: np.ndarray,
+            out: dict[str, Any],
+            *args: Any,  # noqa: ARG002
+            **kwargs: Any,  # noqa: ARG002
+        ) -> None:
+            """Evaluate one design vector for pymoo.
+
+            Args:
+                x: Parameter values for one design.
+                out: Receives objectives under "F" and constraints under "G".
+                *args: Ignored.
+                **kwargs: Ignored.
+            """
             sim_drives = self.mod_obj.update_params(x)
             (errs, cvs) = self.mod_obj.get_errors(sim_drives)
             out["F"] = list(errs.values())
@@ -403,7 +451,8 @@ if PYMOO_AVAILABLE:
     class CustomOutput(Output):
         """Adds custom columns to pymoo output"""
 
-        def __init__(self):
+        def __init__(self) -> None:
+            """Add non-dominated count, elapsed time and norm columns."""
             super().__init__()
             self.t_gen_start = time.perf_counter()
             self.n_nds = Column("n_nds", width=8)
@@ -411,8 +460,12 @@ if PYMOO_AVAILABLE:
             self.euclid_min = Column("euclid min", width=13)
             self.columns += [self.n_nds, self.t_s, self.euclid_min]
 
-        def update(self, algorithm):
-            """Update new row"""
+        def update(self, algorithm: Algorithm) -> None:
+            """Fill the custom columns for the current generation.
+
+            Args:
+                algorithm: Running pymoo algorithm providing `opt` and `pop`.
+            """
             super().update(algorithm)
             self.n_nds.set(len(algorithm.opt))
             self.t_s.set(f"{(time.perf_counter() - self.t_gen_start):.3g}")
@@ -429,7 +482,21 @@ if PYMOO_AVAILABLE:
         copy_termination: bool = False,
         save_history: bool = False,
     ) -> tuple[Result, pd.DataFrame]:
-        """Wrap pymoo.optimize.minimize and add various helpful features"""
+        """Run pymoo minimize and tabulate the results.
+
+        Args:
+            problem: Calibration problem to solve.
+            algorithm: Genetic algorithm instance.
+            termination: Termination criteria.
+            save_path: Directory receiving `pymoo_res_df.csv`.
+            copy_algorithm: Let pymoo deep-copy `algorithm` before running.
+            copy_termination: Let pymoo deep-copy `termination` before running.
+            save_history: Keep every generation in the result.
+
+        Returns:
+            The pymoo result and a DataFrame of parameter values, objective
+            values and their Euclidean norm per solution.
+        """
         print("`run_minimize` starting at")
         alt.utils.print_dt()
 
@@ -486,16 +553,16 @@ def get_parser(
     def_n_max_gen: int = 500,
     def_pop_size: int = 12,
 ) -> argparse.ArgumentParser:
-    """
-    Generate parser for optimization hyper params and misc. other params
+    """Build an argument parser for optimization hyperparameters.
 
-    # Args:
-        - `def_p`: default number of processes
-        - `def_n_max_gen`: max allowed generations
-        - `def_pop_size`: default population size
+    Args:
+        def_description: Parser description text.
+        def_p: Default number of pool processes.
+        def_n_max_gen: Default maximum number of generations.
+        def_pop_size: Default population size per generation.
 
-    # Returns:
-        argparse.ArgumentParser: _description_
+    Returns:
+        Parser with process, termination, population and skip options.
     """
     parser = argparse.ArgumentParser(description=def_description)
     parser.add_argument(
@@ -549,16 +616,13 @@ def get_parser(
 
 
 def get_delta_seconds(ds: pd.Series) -> pd.Series:
-    """
-    Get time delta in seconds from series
+    """Compute per-row time deltas of a datetime series.
 
-    Arugments:
-    ----------
-    - ds: pandas.Series; data of the current segment previously passed to to_datetime_from_format
-    returns:
-    - out: pandas.Series; a pandas.Series data that shows the datetime deltas between rows of the
-    segment. Row i has time elasped between `i` and row `i-1`. Row 0 has value 0.
-    Returns pd.Series of time delta [s]
+    Args:
+        ds: Datetime series; row i is differenced against row i-1.
+
+    Returns:
+        Elapsed seconds between consecutive rows, with 0 in the first row.
     """
     out = (ds - ds.shift(1)) / np.timedelta64(1, "s")
     out.iloc[0] = 0.0
@@ -569,12 +633,17 @@ def min_error_selection(
     param_num: int,
     norm_num: int = 2
 ) -> np.ndarray:
-    """
-    Arguments:
-    ----------
-    result_df: pd.DataFrame containing pymoo res.X and res.F concatenated
-    param_num: number of parameters
-    norm_num: norm number -- e.g. 2 would result in RMS error
+    """Select the parameter values of the lowest-error result row.
+
+    Adds an `overall_error` column holding the norm of the objective columns.
+
+    Args:
+        result_df: pymoo `res.X` and `res.F` columns concatenated.
+        param_num: Number of leading parameter columns.
+        norm_num: Norm order for combining the objectives; 2 gives RMS.
+
+    Returns:
+        Parameter values of the selected row.
     """
     result_df['overall_error'] = (
         result_df.iloc[:, param_num:] ** norm_num).sum(1).pow(float(1.0 / norm_num))
