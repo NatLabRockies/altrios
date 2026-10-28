@@ -375,8 +375,11 @@ def copy_demo_files(demo_path: Path = Path("demos")):
     v = f"v{__version__}"
     demo_path.mkdir(exist_ok=True)
 
-    for src_file in (package_root() / "demos").iterdir():
-        if src_file.suffix != ".py":
+    copied = 0
+    for src_file in sorted((package_root() / "demos").iterdir()):
+        # Skip the package marker and the pytest harness; keep plot_util.py, which
+        # several demos import.
+        if src_file.suffix != ".py" or src_file.name == "__init__.py" or src_file.name.startswith("test_"):
             continue
         src_file: Path
         dest_file = demo_path / src_file.name
@@ -389,8 +392,9 @@ def copy_demo_files(demo_path: Path = Path("demos")):
             file_content = prepend + file_content
             file.seek(0)
             file.writelines(file_content)
+        copied += 1
 
-    print(f"Saved {dest_file.name} to {dest_file}")
+    print(f"Copied {copied} demo scripts to {demo_path.resolve()}")
 
 
 def show_plots() -> bool:

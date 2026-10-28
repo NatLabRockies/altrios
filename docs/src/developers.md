@@ -14,13 +14,15 @@ Clone the repository:
    the [ALTRIOS repository](https://github.com/NatLabRockies/ALTRIOS) with e.g. `git clone
 https://github.com/NatLabRockies/ALTRIOS.git`.
 
-## Installing the Python Package
-
-Within the ALTRIOS folder, run `pip install -e ".[dev]"`
-
 ## Rust Installation
 
-Install Rust: <https://www.rust-lang.org/tools/install>.
+Install Rust: <https://www.rust-lang.org/tools/install>. The editable Python install below
+compiles the Rust core, so do this first.
+
+## Installing the Python Package
+
+Within the ALTRIOS folder, with your Python environment activated, run `pip install -e ".[dev]"`.
+This builds the Rust extension and installs the test and development tools.
 
 ## Automated Building and Testing
 
@@ -41,7 +43,8 @@ runtime computational performance penalty.
 
 Whenever updating code, always run `cargo test --release` inside `ALTRIOS/` to ensure that all
 tests pass. Also, be sure to rebuild the Python API regularly to ensure that it is up to date.
-Python unit tests run with `python -m unittest discover` in the root folder of the git repository.
+Python tests, including every demo script, run with `pytest python/altrios` in the root folder of
+the git repository (set `SHOW_PLOTS=false` to keep plot windows from opening).
 
 ### With GitHub Actions
 
