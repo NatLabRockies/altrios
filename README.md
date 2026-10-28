@@ -2,7 +2,7 @@
 
 ![Altrios Logo](https://raw.githubusercontent.com/NatLabRockies/altrios/main/.github/images/ALTRIOS-logo-web.png)
 
-[![homepage](https://img.shields.io/badge/homepage-altrios-blue)](https://www.nlr.gov/transportation/altrios.html) [![rust-tests](https://github.com/NatLabRockies/altrios/actions/workflows/rust-tests.yaml/badge.svg)](https://github.com/NatLabRockies/altrios/actions/workflows/rust-tests.yaml) [![py-tests](https://github.com/NatLabRockies/altrios/actions/workflows/py-tests.yaml/badge.svg)](https://github.com/NatLabRockies/altrios/actions/workflows/py-tests.yaml) [![wheels](https://github.com/NatLabRockies/altrios/actions/workflows/wheels.yaml/badge.svg)](https://github.com/NatLabRockies/altrios/actions/workflows/wheels.yaml?event=release) [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://pypi.org/project/altrios/) [![Documentation](https://img.shields.io/badge/doc-mdBook-blue.svg)](https://natlabrockies.github.io/altrios/) [![GitHub](https://img.shields.io/badge/GitHub-altrios-blue.svg)](https://github.com/NatLabRockies/altrios)
+[![homepage](https://img.shields.io/badge/homepage-altrios-blue)](https://www.nlr.gov/transportation/altrios.html) [![rust-tests](https://github.com/NatLabRockies/altrios/actions/workflows/rust-tests.yaml/badge.svg)](https://github.com/NatLabRockies/altrios/actions/workflows/rust-tests.yaml) [![py-tests](https://github.com/NatLabRockies/altrios/actions/workflows/py-tests.yaml/badge.svg)](https://github.com/NatLabRockies/altrios/actions/workflows/py-tests.yaml) [![wheels](https://github.com/NatLabRockies/altrios/actions/workflows/wheels.yaml/badge.svg)](https://github.com/NatLabRockies/altrios/actions/workflows/wheels.yaml?event=release) [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue)](https://pypi.org/project/altrios/) [![Documentation](https://img.shields.io/badge/doc-mdBook-blue.svg)](https://natlabrockies.github.io/altrios/) [![GitHub](https://img.shields.io/badge/GitHub-altrios-blue.svg)](https://github.com/NatLabRockies/altrios)
 
 
 ![Model Framework Schematic](https://raw.githubusercontent.com/NatLabRockies/altrios/main/.github/images/ALTRIOS_schematic.png)
@@ -18,23 +18,23 @@ If you are an ALTRIOS developer, see [Developer Documentation](https://NatLabRoc
 ### Python Setup
 
 1. Python installation options:
-   - Option 1 -- Python: https://www.python.org/downloads/. We recommend Python 3.12. Be sure to check the `Add to PATH` option during installation.
+   - Option 1 -- Python: https://www.python.org/downloads/. Be sure to check the `Add to PATH` option during installation.
    - Option 2 -- Anaconda: we recommend https://docs.conda.io/en/latest/miniconda.html.
-1. Setup a python environment. ALTRIOS requires Python 3.10 or newer, and we recommend 3.12. Create a python environment for ALTRIOS with either of two methods:
+1. Setup a python environment. ALTRIOS supports Python 3.10 through 3.14. Create a python environment for ALTRIOS with either of two methods:
    - Option 1 -- [Python Venv](https://docs.python.org/3/library/venv.html)
      1. Navigate to the ALTRIOS folder you just cloned or any folder you'd like for using ALTRIOS. Remember the folder you use!
-     1. Assuming you have Python 3.12 installed, run 
-         - `(path to your python3.12 e.g. ~/AppData/Local/Programs/Python/Python312/python.exe) -m venv altrios-venv` in Windows
-         - `python3.12 -m venv altrios-venv` in Mac/Unix/Linux
+     1. Using a supported Python (3.13 in this example), run 
+         - `(path to your python3.13 e.g. ~/AppData/Local/Programs/Python/Python313/python.exe) -m venv altrios-venv` in Windows
+         - `python3.13 -m venv altrios-venv` in Mac/Unix/Linux
         in your terminal enviroment (we recommend PowerShell in Windows, which comes pre-installed). 
       
-        This tells Python 3.12 to use the `venv` module to create a virtual environment (which will be ignored by git if named `altrios-venv`) in the `ALTRIOS/altrios-venv/`.
+        This tells Python to use the `venv` module to create a virtual environment (which will be ignored by git if named `altrios-venv`) in the `ALTRIOS/altrios-venv/`.
      1. Activate the environment you just created to install packages or anytime you're running ALTRIOS:
         - Mac and Linux: `source altrios-venv/bin/activate`
         - Windows: `altrios-venv/Scripts/activate.bat` in a windows command prompt or power shell or `source altrios-venv/Scripts/activate` in git bash terminal
         - When the environment is activated, your terminal session will have a decorator that looks like `(altrios-venv)`.
    - Option 2 -- Anaconda:
-     1. Open an Anaconda prompt (in Windows, we recommend _Anaconda_ Powershell Prompt) and run the command `conda create -n altrios python=3.12` to create an Anaconda environment named `altrios`.
+     1. Open an Anaconda prompt (in Windows, we recommend _Anaconda_ Powershell Prompt) and run the command `conda create -n altrios python=3.13` to create an Anaconda environment named `altrios`.
      1. Activate the environment to install packages or anytime you're running ALTRIOS: run `conda activate altrios`.
 
 ### ALTRIOS Setup
