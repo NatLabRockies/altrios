@@ -8,11 +8,28 @@ on:
 
 # run tests, build, upload
 jobs:
+  check-version:
+    name: tag matches declared version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: verify pyproject.toml version matches the release tag
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          DECLARED=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+          echo "release tag implies: $TAG"
+          echo "pyproject declares:  $DECLARED"
+          if [ "$TAG" != "$DECLARED" ]; then
+            echo "::error::Release tag ${GITHUB_REF_NAME} implies version ${TAG}, but pyproject.toml declares ${DECLARED}. maturin stamps the pyproject value onto every wheel, so this release would publish ${DECLARED}. Bump pyproject.toml or retag."
+            exit 1
+          fi
+
   call-tests:
     uses: natlabrockies/altrios/.github/workflows/py-tests.yaml@main
   build:
     name: build py3.${{ matrix.python-version }} on ${{ matrix.platform || matrix.os }}
-    needs: call-tests
+    needs: [check-version, call-tests]
     strategy:
       fail-fast: false
       matrix:
