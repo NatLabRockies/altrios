@@ -505,13 +505,22 @@ def run_train_planner(
                         "Destination_ID": "Destination",
                         "Departure_Time_Planned_Hr": "Hour"})
                 .drop(cs.starts_with("Refuel"))
-                .group_by(~cs.starts_with("Locomotive_"))
+                # Departure_SOC_J is per locomotive, so it can't be a train grouping key
+                .group_by(~(cs.starts_with("Locomotive_") | cs.by_name("Departure_SOC_J", require_all=False)))
                     .agg(pl.col("Locomotive_ID").unique().alias("Locomotive_IDs"),
                          pl.col("Locomotive_Type").cast(pl.Utf8).alias("Locomotive_Types"))
                 .with_columns(pl.sum_horizontal("Cars_Loaded", "Cars_Empty").alias("Number_of_Cars"))
                 # group_by order is undefined; the dispatch loop numbers trains in row order
                 .sort("Hour", "Train_ID")
-            )            
+            )
+            split_trains = dispatch_schedule.filter(
+                pl.len().over("Train_ID", "Origin", "Destination", "Hour") > 1
+            ).get_column("Train_ID").unique().sort()
+            if split_trains.len() > 0:
+                raise ValueError(
+                    "Locomotive rows of the same train in `consist_plan_in` disagree on "
+                    f"train-level columns, so the train would be split; Train_IDs: {split_trains.to_list()}"
+                )
 
     # Create refuelers if not provided
     if refuelers is None:
