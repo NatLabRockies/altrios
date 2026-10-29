@@ -148,6 +148,42 @@ print(f"Elapsed time to run `to_pydict()`: {t1_tolist - t0_tolist:.3g} s")
 
 sim0 = sims_list[0]
 
+# %%
+# Export one train's speed profile as a CSV and a plot.  Times are relative to the
+# start of the trip so the profile is easy to compare against other trips.
+speed_profile = pl.DataFrame(
+    {
+        "Time_Hr": (
+            np.asarray(sim0["history"]["time_seconds"])
+            - sim0["history"]["time_seconds"][0]
+        )
+        / 3_600,
+        "Speed_MPH": np.asarray(sim0["history"]["speed_meters_per_second"])
+        / utilities.MPS_PER_MPH,
+        "Speed_Limit_MPH": np.asarray(sim0["history"]["speed_limit_meters_per_second"])
+        / utilities.MPS_PER_MPH,
+    }
+)
+speed_profile_path = plot_dir / f"train_{sim0['train_id']}_speed_profile.csv"
+speed_profile.write_csv(speed_profile_path)
+
+fig, ax = plt.subplots()
+ax.plot(speed_profile["Time_Hr"], speed_profile["Speed_MPH"], label="Actual")
+ax.plot(speed_profile["Time_Hr"], speed_profile["Speed_Limit_MPH"], label="Speed limit")
+ax.set(
+    xlabel="Trip time [hr]",
+    ylabel="Speed [mph]",
+    title=f"Train {sim0['train_id']} speed profile",
+)
+ax.legend()
+fig.tight_layout()
+speed_profile_plot_path = plot_dir / f"train_{sim0['train_id']}_speed_profile.png"
+fig.savefig(speed_profile_plot_path, dpi=200)
+if SHOW_PLOTS:
+    plt.show()
+plt.close(fig)
+print(f"Speed profile data written to: {speed_profile_path.resolve()}")
+print(f"Speed profile plot written to: {speed_profile_plot_path.resolve()}")
 
 # %%
 
@@ -168,4 +204,24 @@ v_total_fuel_gal = (
 )
 
 print(f"Total fuel used: {v_total_fuel_gal:.3g} gallons")
+
+# %%
+# Net onboard battery energy used across all trips, from each battery-equipped
+# locomotive's state-of-charge history.  A positive value means the batteries ended
+# with less energy than they started with; regenerative braking can make an
+# individual trip, or the total, negative.  The demo plan is all diesel, so this is
+# zero unless the plan includes BEL locomotives.
+e_total_battery_joules = 0.0
+for sim in sims_list:
+    for loco in sim["loco_con"]["loco_vec"]:
+        res = next(iter(loco["loco_type"].values())).get("res")
+        if res is None:
+            continue
+        soc_history = res["history"]["soc"]
+        if soc_history:
+            e_total_battery_joules += (soc_history[0] - soc_history[-1]) * res[
+                "energy_capacity_joules"
+            ]
+print(f"Total net battery energy used: {e_total_battery_joules / 3.6e9:.3g} MWh")
+
 print(f"Total elapsed time: {time.perf_counter() - t0_total} s")
