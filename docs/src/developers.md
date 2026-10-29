@@ -51,6 +51,15 @@ the git repository (set `SHOW_PLOTS=false` to keep plot windows from opening).
 Any time anyone pushes to `main` or does any pull request, the [GitHub Actions test
 workflows](https://github.com/NatLabRockies/altrios/tree/main/.github/workflows) are triggered.
 
+## Python Docstrings
+
+Python docstrings use the [Google
+style](https://google.github.io/styleguide/pyguide.html#38-comments-and-docstrings), which
+`pydoc-markdown` renders directly into the [Python API
+docs](https://natlabrockies.github.io/altrios/api-doc/python-doc.html). Data types belong in the signature as type hints. 
+
+`ruff check --select D <file>` checks a file against the convention configured in `pyproject.toml`.
+
 ## Releasing
 
 ### To PyPI With GitHub Actions

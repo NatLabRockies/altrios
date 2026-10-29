@@ -654,16 +654,19 @@ def dispatch_hourly_demand_optimized_departure(
     freight_type_to_car_type: Dict[str, str],
     config: planner_config.TrainPlannerConfig,
 ) -> pl.DataFrame:
-    """
-    Converts a table of demand into a dispatch plan where trains depart from each origin in uniformly spaced intervals.
-    Arguments:
-    ----------
-    demand: `DataFrame` or `LazyFrame` representing origin-destination demands (number of trains).
-    rail_vehicles: List of `altrios.RailVehicle` objects.
-    config: `TrainPlannerConfig` object.
-    Outputs:
-    ----------
-    Updated demand `DataFrame` or `LazyFrame` representing dispatches, each defined with an origin, destination, train type, number of (loaded and empty) cars, tonnage, and HP per ton requirement.
+    """Converts a table of demand into a dispatch plan where trains depart from each origin in uniformly spaced intervals.
+
+    Args:
+        demand_hourly: `DataFrame` or `LazyFrame` representing origin-destination
+            demands (number of trains).
+        rail_vehicles: List of `altrios.RailVehicle` objects.
+        freight_type_to_car_type: Mapping from freight type to car type.
+        config: `TrainPlannerConfig` object.
+
+    Returns:
+        Updated demand `DataFrame` or `LazyFrame` representing dispatches, each defined
+        with an origin, destination, train type, number of (loaded and empty) cars,
+        tonnage, and HP per ton requirement.
     """
     min_num_cars_per_train = config.min_cars_per_train[
         "Intermodal_Loaded"
@@ -750,19 +753,18 @@ def dispatch_uniform_demand_uniform_departure(
     freight_type_to_car_type: Dict[str, str],
     config: planner_config.TrainPlannerConfig,
 ) -> pl.DataFrame:
-    """
-    Generate a tabulated demand pair to indicate the expected dispatching interval
-    and actual dispatching timesteps after rounding, with departures from each terminal
-    spaced as evenly as possible
-    Arguments:
-    ----------
-    demand: `DataFrame` or `LazyFrame` representing origin-destination demands (number of trains).
-    rail_vehicles: List of `altrios.RailVehicle` objects.
-    config: `TrainPlannerConfig` object.
-    Outputs:
-    ----------
-    schedule: Tabulated dispatching time for each demand pair for each train type
-    in hours
+    """Generate a tabulated demand pair to indicate the expected dispatching interval and actual dispatching timesteps after rounding, with departures from each terminal spaced as evenly as possible.
+
+    Args:
+        demand: `DataFrame` or `LazyFrame` representing origin-destination demands
+            (number of trains).
+        rail_vehicles: List of `altrios.RailVehicle` objects.
+        freight_type_to_car_type: Mapping from freight type to car type.
+        config: `TrainPlannerConfig` object.
+
+    Returns:
+        schedule: Tabulated dispatching time for each demand pair for each train type in
+            hours
     """
     hours = config.simulation_days * 24
     grouping_vars = ["Origin", "Destination", "Train_Type"]

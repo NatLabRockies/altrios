@@ -6,45 +6,41 @@ substations to build. It prioritizes high-grade regions (where electrification
 yields the largest operational benefit) while respecting substation-feeding
 (spacing) constraints.
 
-Decision variables
-------------------
-- ``x[p] in {0, 1}``  -- electrify track piece ``p`` (a link sub-interval).
-- ``s[c] in {0, 1}``  -- install shared energization structure in corridor cell ``c``.
-- ``y[j] in {0, 1}``  -- build candidate substation ``j`` (lump-sum capital).
+Decision variables:
 
-Structure sites and parallel tracks
------------------------------------
-When ``structure_spacing_miles`` is set, every link is densified into uniform
-along-track **pieces**, and pieces whose midpoints fall within
-``corridor_width_miles`` of one another are clustered into shared **structure
-sites** ``s[c]`` (masts, foundations). Both directions of a double-track line and
-any sidings at the same location fall into one site and share a single structure
-cost; each individual track then pays only a marginal per-mile electrification
-cost via ``x[p]``. This makes it economical to wire every parallel track once the
-structure is built. Clustering is purely geometric (lat/lon), needing no
-centerline, topology, or est-time nets, so it is safe on arbitrary imported
-networks. When ``structure_spacing_miles`` is ``None``, each link is treated as
-its own single-piece cell (no parallel grouping).
+- `x[p] in {0, 1}`: electrify track piece `p` (a link sub-interval).
+- `s[c] in {0, 1}`: install shared energization structure in corridor cell `c`.
+- `y[j] in {0, 1}`: build candidate substation `j` (lump-sum capital).
 
-Formulation / best-practice notes
-----------------------------------
-- Feeding uses the STRONG disaggregated covering constraint
-  ``x[p] <= sum_{j in cover(p)} y[j]``; structure sharing likewise uses the
-  strong per-piece linking ``x[p] <= s[c]`` rather than an aggregated Big-M row.
-  Both yield a tight LP relaxation (near totally unimodular). The only row that
-  breaks total unimodularity is the single budget knapsack constraint, so the
-  MILP solves quickly.
-- Costs are linear in the decisions, so the whole program is a MILP.
+Structure sites and parallel tracks: when `structure_spacing_miles` is set, every
+link is densified into uniform along-track **pieces**, and pieces whose midpoints
+fall within `corridor_width_miles` of one another are clustered into shared
+**structure sites** `s[c]` (masts, foundations). Both directions of a
+double-track line and any sidings at the same location fall into one site and
+share a single structure cost; each individual track then pays only a marginal
+per-mile electrification cost via `x[p]`. This makes it economical to wire every
+parallel track once the structure is built. Clustering is purely geometric
+(lat/lon), needing no centerline, topology, or est-time nets, so it is safe on
+arbitrary imported networks. When `structure_spacing_miles` is `None`, each link
+is treated as its own single-piece cell (no parallel grouping).
 
-Data-schema assumption
-----------------------
-Substation candidates and track segments are assumed to expose geographic
-positions. A ``Substation`` may be located either directly by ``(lat, lon)`` or
-by ``link_idx`` (in which case the location is taken from that link's geometry).
-Segment positions are derived from each link's ``headings`` (lat/lon) geometry.
+Data-schema assumption: substation candidates and track segments are assumed to
+expose geographic positions. A `Substation` may be located either directly by
+`(lat, lon)` or by `link_idx` (in which case the location is taken from that
+link's geometry). Segment positions are derived from each link's `headings`
+(lat/lon) geometry.
 
-The optimizer targets ``pyomo`` for modeling and the HiGHS solver (``highspy``)
-via Pyomo's APPSI interface.
+The optimizer targets `pyomo` for modeling and the HiGHS solver (`highspy`) via
+Pyomo's APPSI interface.
+
+Notes:
+    - Feeding uses the STRONG disaggregated covering constraint
+      `x[p] <= sum_{j in cover(p)} y[j]`; structure sharing likewise uses the
+      strong per-piece linking `x[p] <= s[c]` rather than an aggregated Big-M row.
+      Both yield a tight LP relaxation (near totally unimodular). The only row
+      that breaks total unimodularity is the single budget knapsack constraint,
+      so the MILP solves quickly.
+    - Costs are linear in the decisions, so the whole program is a MILP.
 """
 
 from __future__ import annotations

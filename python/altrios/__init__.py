@@ -47,11 +47,11 @@ data_formats = [
 
 
 def to_pydict(self, data_fmt: str = "msg_pack", flatten: bool = False) -> Dict:
-    """
-    Returns self converted to pure python dictionary with no nested Rust objects
-    # Arguments
-    - `flatten`: if True, returns dict without any hierarchy
-    - `data_fmt`: data format for intermediate conversion step
+    """Returns self converted to pure python dictionary with no nested Rust objects.
+
+    Args:
+        data_fmt: data format for intermediate conversion step
+        flatten: if True, returns dict without any hierarchy
     """
     data_fmt = data_fmt.lower()
     assert data_fmt in data_formats, f"`data_fmt` must be one of {data_formats}"
@@ -123,12 +123,12 @@ def get_hist_len(obj: Dict) -> Optional[int]:
 
 
 def get_flattened(obj: Dict | List, hist_len: int, prepend_str: str = "") -> Dict:
-    """
-    Flattens and returns dictionary, separating keys and indices with a `"."`
-    # Arguments
-    # - `obj`: object to flatten
-    # -  hist_len: length of any lists storing history data
-    # - `prepend_str`: prepend this to all keys in the returned `flat` dict
+    """Flattens and returns dictionary, separating keys and indices with a `"."`.
+
+    Args:
+        obj: object to flatten
+        hist_len: length of any lists storing history data
+        prepend_str: prepend this to all keys in the returned `flat` dict
     """
     flat: Dict = {}
     if isinstance(obj, dict):
@@ -155,13 +155,13 @@ def get_flattened(obj: Dict | List, hist_len: int, prepend_str: str = "") -> Dic
 def from_pydict(
     cls, pydict: Dict, data_fmt: str = "msg_pack", skip_init: bool = False
 ) -> Self:  # type: ignore[misc]
-    """
-    Instantiates Self from pure python dictionary
-    # Arguments
-    - `pydict`: dictionary to be converted to ALTRIOS object
-    - `data_fmt`: data format for intermediate conversion step
-    - `skip_init`: passed to `SerdeAPI` methods to control whether initialization
-      is skipped
+    """Instantiates Self from pure python dictionary.
+
+    Args:
+        pydict: dictionary to be converted to ALTRIOS object
+        data_fmt: data format for intermediate conversion step
+        skip_init: passed to `SerdeAPI` methods to control whether initialization is
+            skipped
     """
     data_fmt = data_fmt.lower()
     assert data_fmt in data_formats, f"`data_fmt` must be one of {data_formats}"
@@ -185,12 +185,13 @@ def from_pydict(
 def to_dataframe(
     self, pandas: bool = False, allow_partial: bool = False
 ) -> Union[pd.DataFrame, pl.DataFrame]:
-    """
-    Returns time series results from ALTRIOS object as a Polars or Pandas dataframe.
+    """Returns time series results from ALTRIOS object as a Polars or Pandas dataframe.
 
-    # Arguments
-    - `pandas`: returns pandas dataframe if True; otherwise, returns polars dataframe by default
-    - `allow_partial`: tries to return dataframe of length equal to solved time steps if simulation fails early
+    Args:
+        pandas: returns pandas dataframe if True; otherwise, returns polars dataframe by
+            default
+        allow_partial: tries to return dataframe of length equal to solved time steps if
+            simulation fails early
     """
     obj_dict = self.to_pydict(flatten=True)
     history_keys = ["history.", "cyc."]

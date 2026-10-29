@@ -1,48 +1,19 @@
-"""Choose what a simulation records, per component and per series.
+"""Select which history series a simulation records, per component.
 
-Saved history is the dominant memory cost of a walked train plan, and studies
-differ enormously in how much of it they read. ALTRIOS has always let each
-component carry its own ``save_interval``; what it could not do until now is
-record only *some* series within a component, because ``save_interval`` gates
-the whole ``HistoryVec`` push. A study that needs one number off the consist --
-fuel power, say -- paid for all twenty of its series.
-
-``configure`` sets both levers at once, from one total specification::
-
-    from altrios import history
+`configure` takes a spec mapping each component of a `SpeedLimitTrainSim` or
+`SetSpeedTrainSim` to a recording `interval` (time steps) and the series to
+`keep`; components not in the spec record nothing::
 
     sim = history.configure(sim, {
-        "<root>":   dict(interval=120, keep=["time_seconds",
-                                             "speed_meters_per_second",
-                                             "offset_meters"]),
-        "loco_con": dict(interval=120, keep=["pwr_fuel_watts",
-                                             "energy_fuel_joules"]),
-        "loco_vec": dict(interval=120, keep=["pwr_aux_watts"]),
+        "<root>":   dict(interval=120, keep=["time_seconds", "offset_meters"]),
+        "loco_con": dict(interval=120, keep=["pwr_fuel_watts"]),
     })
 
-Components not named are switched off entirely. That is deliberate: a spec is a
-complete statement of what a study reads, so adding a metric that needs a new
-series fails loudly at configuration time rather than yielding a null column
-several steps downstream.
-
-Two rules the model imposes, both checked here rather than discovered later.
-
-**Intervals compose down the tree.** ``save_state`` recurses into children
-*inside* the parent's interval check, so a component only records on steps where
-every ancestor also records -- the effective interval is the LCM of the chain.
-Name an interval that is not a multiple of its parent's and you get something
-coarser than either value you wrote, silently. ``configure`` rejects that
-instead.
-
-**The step counter is always recorded.** ``i`` has no mask entry and cannot be
-switched off. It is what makes histories at different intervals joinable: a
-coarser component's samples can be aligned to the train's by ``i``, where
-aligning by position stops meaning anything as soon as two intervals differ.
-
-Applies to a ``SpeedLimitTrainSim``. Call it through ``sim_manager``'s
-``configure_sim`` hook, which runs after ``set_save_interval`` (which recurses
-and would otherwise undo this) and before the walk, while history is still empty
-and the round-trip is cheap.
+Components: `"<root>"` (the train; required), `"fric_brake"` (speed-limit
+sims only), `"loco_con"`, `"loco_vec"`, `"fc"`, `"gen"`, `"edrv"`, `"res"`,
+`"cat_int"`. Omit `keep` to record every series. A child's interval must be a
+multiple of its parent's, and the step counter `i` is always recorded. Call
+before the walk; from `sim_manager`, use the `configure_sim` hook.
 """
 
 from __future__ import annotations
@@ -84,7 +55,7 @@ def _components(sim_dict: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
     Per-locomotive components contribute one dict per unit, all configured together.
 
     Args:
-        sim_dict: `SpeedLimitTrainSim` pydict, as returned by `to_pydict()`.
+        sim_dict: Train sim pydict, as returned by `to_pydict()`.
 
     Returns:
         Component name to the list of matching component dicts.
@@ -195,14 +166,15 @@ def _apply_mask(
 
 
 def configure(
-    sim: alt.SpeedLimitTrainSim, spec: Mapping[str, Mapping[str, Any]]
-) -> alt.SpeedLimitTrainSim:
+    sim: alt.SpeedLimitTrainSim | alt.SetSpeedTrainSim,
+    spec: Mapping[str, Mapping[str, Any]],
+) -> alt.SpeedLimitTrainSim | alt.SetSpeedTrainSim:
     """Return `sim` recording only what `spec` asks for.
 
     Components absent from `spec` record nothing; `"<root>"` must be present.
 
     Args:
-        sim: `SpeedLimitTrainSim`, before it is walked.
+        sim: `SpeedLimitTrainSim` or `SetSpeedTrainSim`, before it is walked.
         spec: Component name to `{"interval": int | None, "keep": [series, ...]}`.
             `interval` is in time steps (one second); omitting `keep` records
             every series. Names: `"<root>"` (the train), `"fric_brake"`,
@@ -210,7 +182,7 @@ def configure(
             parts `"fc"`, `"gen"`, `"edrv"`, `"res"` and `"cat_int"`.
 
     Returns:
-        A new `SpeedLimitTrainSim` with the intervals and masks applied.
+        A new sim of the same type with the intervals and masks applied.
 
     Raises:
         ValueError: When `spec` names an unknown component or omits `"<root>"`.

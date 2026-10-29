@@ -35,23 +35,26 @@ def convert_demand_to_sim_days(
 def load_freight_demand(
     demand_table: Union[pl.DataFrame, pl.LazyFrame, Path, str],
     config: planner_config.TrainPlannerConfig,
-) -> Tuple[pl.DataFrame, pl.Series, int]:
-    """
-    Load the user input csv file into a dataframe for later processing
-    Arguments:
-    ----------
-    user_input_file: path to the input csv file that user import to the module
-    Example Input:
-        Origin	Destination	Train_Type	Number_of_Cars	Number_of_Containers
-        Barstow	Stockton	Unit	    2394	        0
-        Barstow	Stockton	Manifest	2588	        0
-        Barstow	Stockton	Intermodal	2221	        2221
+) -> Tuple[pl.DataFrame, pl.Series]:
+    """Load the user input csv file into a dataframe for later processing.
 
-    Outputs:
-    ----------
-    df_annual_demand: dataframe with all pair information including:
-    origin, destination, train type, number of cars
-    node_list: List of origin or destination demand nodes
+    Args:
+        demand_table: Demand table or path to a CSV of one. Tables without an `Hour`
+            column pass through `convert_demand_to_sim_days`.
+        config: Train planner configuration; supplies `simulation_days`.
+
+    Returns:
+        df_annual_demand: dataframe with all pair information including: origin,
+            destination, train type, number of cars
+        node_list: List of origin or destination demand nodes
+
+    Example:
+        Input file contents:
+
+            Origin   Destination  Train_Type  Number_of_Cars  Number_of_Containers
+            Barstow  Stockton     Unit        2394            0
+            Barstow  Stockton     Manifest    2588            0
+            Barstow  Stockton     Intermodal  2221            2221
     """
     if isinstance(demand_table, (Path, str)):
         demand_table = pl.read_csv(demand_table).pipe(
@@ -299,19 +302,27 @@ def build_locopool(
     shares: Optional[List[float]] = None,
     locomotives_per_node: int | None = None,
 ) -> pl.DataFrame:
-    """
-    Generate default locomotive pool
-    Arguments:
-    ----------
-    demand_file: Path to a file with origin-destination demand
-    method: Method to determine each locomotive's type ("tile" or "shares_twoway" currently implemented)
-    shares: List of shares for each locomotive type in loco_info (implemented for two-way shares only).
-        If not provided and `config.loco_type_shares` is set, shares are derived from it (requires
-        exactly 2 locomotive types in `config.loco_info`, keyed by `Locomotive_Type`) and `method` is
-        forced to "shares_twoway".
-    Outputs:
-    ----------
-    loco_pool: Locomotive pool containing all locomotives' information that are within the system
+    """Generate default locomotive pool.
+
+    Args:
+        config: Train planner configuration; supplies `loco_info`, `loco_type_shares`,
+            `cars_per_locomotive`, `loco_pool_safety_factor` and `single_train_mode`.
+        demand_file: Path to a file with origin-destination demand
+        dispatch_schedule: Planned dispatches; when given, the pool also covers the day
+            with the largest horsepower requirement.
+        method: Method to determine each locomotive's type ("tile" or "shares_twoway"
+            currently implemented)
+        shares: List of shares for each locomotive type in loco_info (implemented for
+            two-way shares only). If not provided and `config.loco_type_shares` is set,
+            shares are derived from it (requires exactly 2 locomotive types in
+            `config.loco_info`, keyed by `Locomotive_Type`) and `method` is forced to
+            "shares_twoway".
+        locomotives_per_node: Pool size per node. When given, it replaces the size
+            estimated from demand and the dispatch schedule.
+
+    Returns:
+        loco_pool: Locomotive pool containing all locomotives' information that are
+            within the system
     """
     config.loco_info = append_loco_info(config.loco_info)
     loco_types = list(config.loco_info.loc[:, "Locomotive_Type"])
@@ -489,17 +500,17 @@ def build_refuelers(
     refueler_info: pd.DataFrame,
     refuelers_per_incoming_corridor: int,
 ) -> pl.DataFrame:
-    """
-    Build the default set of refueling facilities.
-    Arguments:
-    ----------
-    node_list: List of origin or destination demand nodes
-    loco_pool: Locomotive pool
-    refueler_info: DataFrame with information for each type of refueling infrastructure to use
-    refuelers_per_incoming_corridor: Queue size per corridor arriving at each node.
-    Outputs:
-    ----------
-    refuelers: Polars dataframe of facility county by node and type of fuel
+    """Build the default set of refueling facilities.
+
+    Args:
+        node_list: List of origin or destination demand nodes
+        loco_pool: Locomotive pool
+        refueler_info: DataFrame with information for each type of refueling
+            infrastructure to use
+        refuelers_per_incoming_corridor: Queue size per corridor arriving at each node.
+
+    Returns:
+        refuelers: Polars dataframe of facility count by node and type of fuel
     """
     ports_per_node = (
         loco_pool.group_by(pl.col("Locomotive_Type", "Fuel_Type").cast(pl.Utf8))

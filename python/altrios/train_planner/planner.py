@@ -77,41 +77,32 @@ def dispatch(
     total_cars: float,
     config: planner_config.TrainPlannerConfig,
 ) -> pl.Series:
-    """
-    Identify and select locomotives to dispatch for a train, based on origin, requirements, and availability.
+    """Identify and select locomotives to dispatch for a train, based on origin, requirements, and availability.
 
-    This function selects the optimal set of locomotives from the available pool at a specified
-    origin based on horsepower requirements, tonnage needs, and configuration parameters.
-    It implements locomotive selection logic including potential diesel requirements and
-    ensures sufficient power for the given train.
+    This function selects the optimal set of locomotives from the available pool at a
+    specified origin based on horsepower requirements, tonnage needs, and configuration
+    parameters. It implements locomotive selection logic including potential diesel
+    requirements and ensures sufficient power for the given train.
 
-    Parameters
-    ----------
-    dispatch_time : int
-        Time (in hours) when the train is scheduled to depart
-    origin : str
-        Origin node name where the train will depart from
-    loco_pool : pl.DataFrame
-        DataFrame containing all locomotives in the network with their statuses and properties
-    train_tonnage : float
-        Total tonnage of the train to be dispatched
-    hp_required : float
-        Horsepower required for this train type on this origin-destination corridor
-    total_cars : float
-        Total number of cars (loaded, empty, or otherwise) included on the train
-    config : planner_config.TrainPlannerConfig
-        Configuration object with dispatch settings and rules
+    Args:
+        dispatch_time: Time (in hours) when the train is scheduled to depart
+        origin: Origin node name where the train will depart from
+        loco_pool: DataFrame containing all locomotives in the network with their
+            statuses and properties
+        train_tonnage: Total tonnage of the train to be dispatched
+        hp_required: Horsepower required for this train type on this origin-destination
+            corridor
+        total_cars: Total number of cars (loaded, empty, or otherwise) included on the
+            train
+        config: Configuration object with dispatch settings and rules
 
-    Returns
-    -------
-    pl.Series
+    Returns:
         Boolean series with same length as loco_pool, with True values indicating
         selected locomotives
 
-    Raises
-    ------
-    ValueError
-        If no locomotives are available at the origin or if requirements cannot be met
+    Raises:
+        ValueError: If no locomotives are available at the origin or if requirements
+            cannot be met
     """
     # Calculate horsepower required per ton of train weight
     hp_per_ton = hp_required / train_tonnage
@@ -320,49 +311,38 @@ def run_train_planner(
     List[alt.SpeedLimitTrainSim],
     List[alt.EstTimeNet],
 ]:
-    """
-    Run the train planner to generate consist plans, refueling schedules, and simulations.
+    """Run the train planner to generate consist plans, refueling schedules, and simulations.
 
     This function is the main entry point for train planning. It processes demand data,
-    schedules trains, assigns locomotives, plans refueling, and generates train simulations
-    based on the provided configuration. It handles both single-train mode and multi-train
-    scheduling across a network.
+    schedules trains, assigns locomotives, plans refueling, and generates train
+    simulations based on the provided configuration. It handles both single-train mode
+    and multi-train scheduling across a network.
 
-    Parameters
-    ----------
-    rail_vehicles : List[alt.RailVehicle]
-        List of available rail vehicle types with their properties
-    location_map : Dict[str, List[alt.Location]]
-        Dictionary mapping location IDs to lists of Location objects
-    network : List[alt.Link]
-        List of links defining the rail network
-    loco_pool : Optional[pl.DataFrame]
-        DataFrame containing available locomotives with their properties.
-        If None, will be generated based on demand.
-    refuelers : Optional[pl.DataFrame]
-        DataFrame containing refueling facilities with their capacities.
-        If None, will be generated based on configuration.
-    scenario_year : int
-        The year for which to run the simulation (affects energy prices, etc.)
-    train_type : alt.TrainType
-        Type of train to simulate (default: Freight)
-    config : planner_config.TrainPlannerConfig
-        Configuration object with planning parameters
-    demand_file : Union[pl.DataFrame, Path, str]
-        Source of demand data, either as DataFrame or file path
-    network_charging_guidelines : Optional[pl.DataFrame]
-        Guidelines for charging infrastructure by location
-    consist_plan_in : Optional[pl.DataFrame]
-        Pre-determined train consist plan, if applicable.
+    Args:
+        rail_vehicles: List of available rail vehicle types with their properties
+        location_map: Dictionary mapping location IDs to lists of Location objects
+        network: List of links defining the rail network
+        loco_pool: DataFrame containing available locomotives with their properties. If
+            None, will be generated based on demand.
+        refuelers: DataFrame containing refueling facilities with their capacities. If
+            None, will be generated based on configuration.
+        scenario_year: The year for which to run the simulation (affects energy prices,
+            etc.)
+        train_type: Type of train to simulate (default: Freight)
+        config: Configuration object with planning parameters
+        demand_file: Source of demand data, either as DataFrame or file path
+        network_charging_guidelines: Guidelines for charging infrastructure by location
+        consist_plan_in: Pre-determined train consist plan, if applicable.
+        loco_map: Old name to new name for locomotive types in the pool and in
+            `consist_plan_in`.
 
-    Returns
-    -------
-    Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, List[alt.SpeedLimitTrainSim], List[alt.EstTimeNet]]
-        train_consist_plan : DataFrame with planned train consists and schedules
-        loco_pool : Updated DataFrame of all locomotives and their states
-        refuelers : DataFrame of all refueling facilities
-        speed_limit_train_sims : List of SpeedLimitTrainSim objects for each planned train
-        est_time_nets : List of EstTimeNet objects with estimated timings
+    Returns:
+        train_consist_plan: DataFrame with planned train consists and schedules
+        loco_pool: Updated DataFrame of all locomotives and their states
+        refuelers: DataFrame of all refueling facilities
+        speed_limit_train_sims: List of SpeedLimitTrainSim objects for each planned
+            train
+        est_time_nets: List of EstTimeNet objects with estimated timings
     """
     # Append additional locomotive info to configuration
     config.loco_info = data_prep.append_loco_info(config.loco_info)

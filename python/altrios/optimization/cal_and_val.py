@@ -39,15 +39,16 @@ from altrios import SetSpeedTrainSim, ConsistSimulation, LocomotiveSimulation
 import altrios as alt
 
 def get_delta_seconds(ds: pd.Series) -> pd.Series:
-    """
-    Arugments:
-    ---------- 
-    - ds: pandas.Series; data of the current segment previously passed to to_datetime_from_format
-    returns: 
-    - out: pandas.Series; a pandas.Series data that shows the datetime deltas between rows of the 
-    segment. Row i has time elasped between `i` and row `i-1`. Row 0 has value 0.
+    """Returns pd.Series of time delta [s].
 
-    Returns pd.Series of time delta [s]
+    Args:
+        ds: pandas.Series; data of the current segment previously passed to
+            to_datetime_from_format
+
+    Returns:
+        out: pandas.Series; a pandas.Series data that shows the datetime deltas between
+            rows of the segment. Row i has time elapsed between `i` and row `i-1`. Row 0
+            has value 0.
     """
     out = ((ds - ds.shift(1)) / np.timedelta64(1, 's'))
     out.iloc[0] = 0.0
@@ -62,36 +63,31 @@ def get_error(t: np.array, mod: np.array, exp: np.array):
 
 @dataclass
 class ModelError(object):
-    """
-    Dataclass class for calculating model error of various ALTRIOS objects w.r.t. test data.
+    """Dataclass class for calculating model error of various ALTRIOS objects w.r.t. test data.
 
     Attributes:
-    - `ser_model_dict`:  `dict` variable in which:
-
-    - key: a `str` representing trip keyword string
-
-    - value: a `str` converted from Rust locomotive models' serialization method
-
-    - `model_type`: `str` that can only be `'ConsistSimulation'`, `'SetSpeedTrainSim'` or `'LocomotiveSimulation'`;
-      indicates which model to instantiate during optimization process
-
-    - `dfs`: a `dict` variable in which:
-        - key: `str` representing trip keyword; will be the same keyword as in `models`
-        - value: `pandas.DataFrame` variable with trip detailed data to be compared against. each df should 
-                 have a `time [s]` column
-
-    - `objectives`: a list of 2-element tuples. For each tuple, element 0 is the name of the reference test 
-      data signal in `dfs`; element 1 is a tuple of strings representing a hierarchical path to the 
-      corresponding model signal. This field is used for error calculation.
-
-    - `params`: a tuple whose individual element is a `str` containing hierarchical paths to parameters
-      to manipulate starting from one of the 3 possible Rust model structs
-
-    - `verbose`: `bool`: if `True`, the verbose of error calculation will be printed 
-
-    - `debug`: `bool`: if `True`, prints more stuff
-
-    - `allow_partial`: whether to allow partial runs, if True, errors out whenever a run can't be completed
+        ser_model_dict: `dict` variable in which:
+            - key: a `str` representing trip keyword string
+            - value: a `str` converted from Rust locomotive models' serialization method
+        model_type: `str` that can only be `'ConsistSimulation'`,
+            `'SetSpeedTrainSim'` or `'LocomotiveSimulation'`; indicates which model to
+            instantiate during optimization process
+        dfs: a `dict` variable in which:
+            - key: `str` representing trip keyword; will be the same keyword as in
+              `models`
+            - value: `pandas.DataFrame` variable with trip detailed data to be compared
+              against. each df should have a `time [s]` column
+        objectives: a list of 2-element tuples. For each tuple, element 0 is the name of
+            the reference test data signal in `dfs`; element 1 is a tuple of strings
+            representing a hierarchical path to the corresponding model signal. This
+            field is used for error calculation.
+        params: a tuple whose individual element is a `str` containing hierarchical
+            paths to parameters to manipulate starting from one of the 3 possible Rust
+            model structs
+        verbose: `bool`: if `True`, the verbose of error calculation will be printed
+        debug: `bool`: if `True`, prints more stuff
+        allow_partial: whether to allow partial runs, if True, errors out whenever a run
+            can't be completed
     """
     # `ser_model_dict` and `dfs` should have the same keys
     ser_model_dict: Dict[str, str]
@@ -150,25 +146,26 @@ class ModelError(object):
                ]
     ]
     ]:
-        """
-        Calculate model errors w.r.t. test data for each element in dfs/models for each objective.
-        Arugments:
-        ----------
-            - mod_dict: the dict whose values are generated Rust ALTRIOS models 
-            - return_mods: `bool`; if true, also returns dict of solved models
-            - pyplot: if true, plots objectives with matplotlib.pyplot
-            - plotly: if true, plots with plotly.  `plot_save_dir` must be provided.
-            - show_pyplot: if true, shows pyplot plots
-            - plot_save_dir: Path for saving plots.  
-            - plot_perc_err: Whether to include axes for plotting % error
+        """Calculate model errors w.r.t. test data for each element in dfs/models for each objective.
+
+        Args:
+            mod_dict: the dict whose values are generated Rust ALTRIOS models
+            return_mods: `bool`; if true, also returns dict of solved models
+            pyplot: if true, plots objectives with matplotlib.pyplot
+            plotly: if true, plots with plotly.  `plot_save_dir` must be provided.
+            show_pyplot: if true, shows pyplot plots
+            plot_save_dir: Path for saving plots.
+            plot_perc_err: Whether to include axes for plotting % error
+            font_size: Font size for plot labels and legends.
+            perc_err_target_for_plot: Percent error drawn as reference lines at plus and
+                minus this value on each percent-error axis.
 
         Returns:
-        ----------
-            - errors: `dict` whose values are dicts containing the errors wrt each objective
-            - solved_mods Optional; `dict` whose values are the Rust locomotive models; 
-              only returned when `return_mods` is True
+            errors: `dict` whose values are dicts containing the errors wrt each
+                objective
+            solved_mods: Optional; `dict` whose values are the Rust locomotive models;
+                only returned when `return_mods` is True
         """
-
         errors: Dict[str, Optional[float]] = {}
         solved_mods = {}
 
@@ -353,12 +350,24 @@ class ModelError(object):
         plotly: bool = False,
         plot_save_dir: Optional[str] = None,
     ) -> Tuple[Optional[Figure], Optional[plt.Axes], Optional[go.Figure]]:
-        """
-        # Arguments:
+        """Create the pyplot and plotly figures for one trip.
 
-        * plot: ...
-        * plotly: make and save plotly plots
+        Args:
+            key: Trip keyword; also the figure title.
+            mod: Solved model for the trip, used to label the boundary condition.
+            time_seconds: Trip time, s.
+            bc: Boundary condition trace (speed or tractive power) plotted last.
+            plots_per_key: Axes per objective: 1, or 2 with a percent-error axis.
+            pyplot: If True, make the pyplot figure.
+            plotly: If True, make the plotly figure; `plot_save_dir` is then required.
+            plot_save_dir: Directory the plots are saved to.
 
+        Returns:
+            The pyplot figure and axes and the plotly figure; None for any not made.
+
+        Raises:
+            Exception: If `plotly` is set without `plot_save_dir`, or `mod` is of an
+                unsupported type.
         """
         # 1 or 2 axes per objective + 1 axis for boundary condition trace (e.g. PowerTrace)
         
@@ -489,6 +498,10 @@ class ModelError(object):
                     (time_seconds / 3_600)[:len(mod_sig)],
                     perc_err
                 )
+                for target in (perc_err_target_for_plot, -perc_err_target_for_plot):
+                    axes[i_obj * plots_per_key + 1].axhline(
+                        target, color="gray", linestyle=":", linewidth=1
+                    )
                 axes[i_obj * plots_per_key].set_ylabel(obj[0])
                 axes[i_obj * plots_per_key].legend(fontsize=font_size-2)
 
@@ -544,6 +557,14 @@ class ModelError(object):
                     row=i_obj * plots_per_key + 2, 
                     col=1
                 )
+                for target in (perc_err_target_for_plot, -perc_err_target_for_plot):
+                    pltly_fig.add_hline(
+                        y=target,
+                        line_dash="dot",
+                        line_color="gray",
+                        row=i_obj * plots_per_key + 2,
+                        col=1,
+                    )
 
         return fig, axes, pltly_fig
 
@@ -663,18 +684,18 @@ def min_error_selection(
     param_num: int,
     norm_num: int = 2
 ) -> np.ndarray:
-    """
-    Arguments:
-    ----------
-    result_df: pd.DataFrame containing pymoo res.X and res.F concatenated
-    param_num: number of parameters
-    norm_num: norm number -- e.g. 2 would result in RMS error
-    """
-    result_df['overall_error'] = (
-        result_df.iloc[:, param_num:] ** norm_num).sum(1).pow(float(1.0 / norm_num))
-    best_row = result_df['overall_error'].argmin()
-    best_df = result_df.iloc[best_row, :]
-    param_vals = result_df.iloc[0, :param_num].to_numpy()
-    error_vals = result_df.iloc[0, param_num:].to_numpy()
+    """Select the parameter set with the smallest overall error.
 
-    return param_vals
+    Args:
+        result_df: pd.DataFrame containing pymoo res.X and res.F concatenated
+        param_num: number of parameters
+        norm_num: norm number -- e.g. 2 would result in RMS error
+
+    Returns:
+        Parameter values of the selected row.
+    """
+    overall_error = (
+        (result_df.iloc[:, param_num:] ** norm_num).sum(axis=1) ** (1.0 / norm_num)
+    )
+    best_row = int(np.argmin(overall_error.to_numpy()))
+    return result_df.iloc[best_row, :param_num].to_numpy()

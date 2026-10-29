@@ -1,5 +1,4 @@
-"""
-Shared locomotive refueling/charging queue logic.
+"""Shared locomotive refueling/charging queue logic.
 
 This module provides a single implementation of the discrete-event refueling
 scheduler used in two places:
@@ -7,36 +6,38 @@ scheduler used in two places:
 1. The train planner (`altrios.train_planner.planner.run_train_planner`), which
    schedules charging during forward planning when future departures are not yet
    known.
-2. The post-simulation driver (`altrios.speed_limit_train_sim.run_speed_limit_train_sims`),
-   which regenerates charging sessions from *realized* train schedules and realized
-   energy consumption (which can differ from the plan because of meet-pass events).
+2. The post-simulation driver
+   (`altrios.speed_limit_train_sim.run_speed_limit_train_sims`), which
+   regenerates charging sessions from realized train schedules and realized
+   energy consumption (which can differ from the plan because of meet-pass
+   events).
 
 Both regimes share the same locomotive-pool schema and the same port-queue logic;
 they differ only in whether charging is capped at each locomotive's next scheduled
 departure (planner: no cap, because dispatch waits until a locomotive is `Ready`;
 driver: cap, because the realized departure schedule is fixed in advance).
 
-Canonical column names
------------------------
-Locomotive pool (``loco_pool``) columns consumed/updated here:
-
-- ``Locomotive_ID``, ``Locomotive_Type``, ``Node``, ``Fuel_Type``
-- ``Status`` in {``Ready``, ``Dispatched``, ``Refuel_Queue``, ``Servicing``}
-- ``Arrival_Time_Hr`` -- time the locomotive last arrived at ``Node``
-- ``Servicing_Done_Time_Hr`` -- time servicing completes (``Refuel_Queue`` -> ``Ready``/``Servicing``)
-- ``Refueling_Done_Time_Hr`` -- scheduled time charging completes (null if not scheduled)
-- ``Refuel_Start_Time_Hr`` -- scheduled time charging starts (null if not scheduled)
-- ``Refuel_Duration_Hr`` -- realized charging duration
-- ``Refuel_Energy_J`` -- grid-side energy delivered in the most recent session
-- ``Trip_Energy_J`` -- energy consumed on the trip that just arrived (driver only)
-- ``SOC_J``, ``SOC_Max_J``, ``SOC_Min_J``, ``SOC_Target_J``, ``Capacity_J``
-- ``Refueler_J_Per_Hr``, ``Refueler_Efficiency``, ``Port_Count``, ``Battery_Headroom_J``
-- ``Min_Servicing_Time_Hr``
-
 State-of-charge is updated at charging *start* (when a port is assigned), not at
 charging finish. This makes the departing SOC of a locomotive's next trip
 available as soon as its charging session is scheduled, independent of the order
 in which later events are processed.
+
+The canonical locomotive pool (`loco_pool`) columns consumed or updated here are:
+
+- `Locomotive_ID`, `Locomotive_Type`, `Node`, `Fuel_Type`
+- `Status` in {`Ready`, `Dispatched`, `Refuel_Queue`, `Servicing`}
+- `Arrival_Time_Hr`: time the locomotive last arrived at `Node`
+- `Servicing_Done_Time_Hr`: time servicing completes (`Refuel_Queue` to `Ready`
+  or `Servicing`)
+- `Refueling_Done_Time_Hr`: scheduled time charging completes (null if not
+  scheduled)
+- `Refuel_Start_Time_Hr`: scheduled time charging starts (null if not scheduled)
+- `Refuel_Duration_Hr`: realized charging duration
+- `Refuel_Energy_J`: grid-side energy delivered in the most recent session
+- `Trip_Energy_J`: energy consumed on the trip that just arrived (driver only)
+- `SOC_J`, `SOC_Max_J`, `SOC_Min_J`, `SOC_Target_J`, `Capacity_J`
+- `Refueler_J_Per_Hr`, `Refueler_Efficiency`, `Port_Count`, `Battery_Headroom_J`
+- `Min_Servicing_Time_Hr`
 """
 
 from __future__ import annotations

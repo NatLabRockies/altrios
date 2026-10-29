@@ -350,16 +350,18 @@ def main(
     ],
     calculate_multiyear_metrics: bool = True,
 ) -> pl.DataFrame:
-    """
-    Given a set of simulation results and the associated consist plans, computes economic and environmental metrics.
-    Arguments:
-    ----------
-    scenario_infos: List (with one entry per scenario year) of Scenario Info objects
-    metricsToCalc: List of metrics to calculate, each specified as a tuple consisting of a metric and the desired unit
-    calculate_multiyear_metrics: True if multi-year rollout costs (including levelized cost) are to be computed
-    Outputs:
-    ----------
-    values: DataFrame of output and intermediate metrics (metric name, units, value, and scenario year)
+    """Given a set of simulation results and the associated consist plans, computes economic and environmental metrics.
+
+    Args:
+        scenario_infos: List (with one entry per scenario year) of Scenario Info objects
+        annual_metrics: List of metrics to calculate, each specified as a tuple
+            consisting of a metric and the desired unit
+        calculate_multiyear_metrics: True if multi-year rollout costs (including
+            levelized cost) are to be computed
+
+    Returns:
+        values: DataFrame of output and intermediate metrics (metric name, units, value,
+            and scenario year)
     """
     if not isinstance(scenario_infos, list):
         scenario_infos = [scenario_infos]
@@ -405,17 +407,18 @@ def main(
 def calculate_annual_metric(
     metric_name: str, units: str, info: ScenarioInfo
 ) -> MetricType:
-    """
-    Given a years' worth of simulation results and the associated consist plan, computes the requested metric.
-    Arguments:
-    ----------
-    thisRow: DataFrame containing the requested metric and requested units
-    info: A scenario information object representing parameters and results for a single year
-    Outputs:
-    ----------
-    values: DataFrame of requested output metric + any intermediate metrics (metric name, units, value, and scenario year)
-    """
+    """Given a years' worth of simulation results and the associated consist plan, computes the requested metric.
 
+    Args:
+        metric_name: Name of the metric to calculate.
+        units: Requested units.
+        info: A scenario information object representing parameters and results for a
+            single year
+
+    Returns:
+        values: DataFrame of requested output metric + any intermediate metrics (metric
+            name, units, value, and scenario year)
+    """
     def return_metric_error(info, units) -> MetricType:
         print(f"Metric calculation not implemented: {metric_name}.")
         return value_from_metrics(metric(metric_name, units, None))
@@ -427,16 +430,16 @@ def calculate_annual_metric(
 
 
 def calculate_rollout_lcotkm(values: MetricType) -> MetricType:
-    """
-    Given a DataFrame of each year's costs and gross freight deliveries, computes the multi-year levelized cost of freight delivered, per gross tonne-km (LCOTKM) and per gross tonne-mile (LCOTMI).
-    Arguments:
-    ----------
-    values: DataFrame containing total costs and gross freight deliveries for each modeled scenario year
-    Outputs:
-    ----------
-    DataFrame of LCOTKM and LCOTMI results (metric name, units, value, and scenario year)
-    """
+    """Given a DataFrame of each year's costs and gross freight deliveries, computes the multi-year levelized cost of freight delivered, per gross tonne-km (LCOTKM) and per gross tonne-mile (LCOTMI).
 
+    Args:
+        values: DataFrame containing total costs and gross freight deliveries for each
+            modeled scenario year
+
+    Returns:
+        DataFrame of LCOTKM and LCOTMI results (metric name, units, value, and scenario
+        year)
+    """
     cost_timeseries = (values
         .filter(
             pl.col("Metric")==pl.lit("Cost_Total"),
@@ -566,15 +569,16 @@ def calculate_rollout_lcotkm(values: MetricType) -> MetricType:
 
 
 def calculate_energy_per_freight(info: ScenarioInfo, units: str) -> MetricType:
-    """
-    Given a years' worth of simulation results, computes a single year energy usage per unit of freight moved.
-    Arguments:
-    ----------
-    info: A scenario information object representing parameters and results for a single year
-    units: Requested units
-    Outputs:
-    ----------
-    DataFrame of energy usage per freight moved (metric name, units, value, and scenario year)
+    """Given a years' worth of simulation results, computes a single year energy usage per unit of freight moved.
+
+    Args:
+        info: A scenario information object representing parameters and results for a
+            single year
+        units: Requested units
+
+    Returns:
+        DataFrame of energy usage per freight moved (metric name, units, value, and
+        scenario year)
     """
     if "per car-mile" not in units and "per container-mile" not in units:
         print(f"Units of {units} not supported for energy-per-freight calculation.")
@@ -613,15 +617,16 @@ def calculate_energy_per_freight(info: ScenarioInfo, units: str) -> MetricType:
 
 
 def calculate_energy_cost(info: ScenarioInfo, units: str) -> MetricType:
-    """
-    Given a years' worth of simulation results, computes a single year energy costs.
-    Arguments:
-    ----------
-    info: A scenario information object representing parameters and results for a single year
-    units: Requested units
-    Outputs:
-    ----------
-    DataFrame of energy costs + intermediate metrics (metric name, units, value, and scenario year)
+    """Given a years' worth of simulation results, computes a single year energy costs.
+
+    Args:
+        info: A scenario information object representing parameters and results for a
+            single year
+        units: Requested units
+
+    Returns:
+        DataFrame of energy costs + intermediate metrics (metric name, units, value, and
+        scenario year)
     """
     if info.nodal_energy_prices is None:
         return metric("Cost_Energy", units, None)
@@ -675,15 +680,15 @@ def calculate_energy_cost(info: ScenarioInfo, units: str) -> MetricType:
 
 
 def calculate_diesel_use(info: ScenarioInfo, units: str):
-    """
-    Given a years' worth of simulation results, computes a single year diesel fuel use.
-    Arguments:
-    ----------
-    info: A scenario information object representing parameters and results for a single year
-    units: Requested units.
-    Outputs:
-    ----------
-    DataFrame of diesel use (metric name, units, value, and scenario year)
+    """Given a years' worth of simulation results, computes a single year diesel fuel use.
+
+    Args:
+        info: A scenario information object representing parameters and results for a
+            single year
+        units: Requested units.
+
+    Returns:
+        DataFrame of diesel use (metric name, units, value, and scenario year)
     """
     diesel_emissions_factors = emissions_factors_greet.filter(
         pl.col("Name") == pl.lit("ultra low sulfur diesel")
@@ -710,15 +715,15 @@ def calculate_diesel_use(info: ScenarioInfo, units: str):
 
 
 def calculate_electricity_use(info: ScenarioInfo, units: str) -> MetricType:
-    """
-    Given a years' worth of simulation results, computes a single year grid electricity use.
-    Arguments:
-    ----------
-    info: A scenario information object representing parameters and results for a single year
-    units: Requested units
-    Outputs:
-    ----------
-    DataFrame of grid electricity use (metric name, units, value, and scenario year)
+    """Given a years' worth of simulation results, computes a single year grid electricity use.
+
+    Args:
+        info: A scenario information object representing parameters and results for a
+            single year
+        units: Requested units
+
+    Returns:
+        DataFrame of grid electricity use (metric name, units, value, and scenario year)
     """
     conversion_from_joule = 0
     if units == "J":
@@ -781,15 +786,15 @@ def calculate_electricity_use(info: ScenarioInfo, units: str) -> MetricType:
 
 
 def calculate_freight_moved(info: ScenarioInfo, units: str) -> MetricType:
-    """
-    Given a years' worth of simulation results, computes a single year quantity of freight moved
-    Arguments:
-    ----------
-    info: A scenario information object representing parameters and results for a single year
-    units: Requested units
-    Outputs:
-    ----------
-    DataFrame of quantity of freight (metric name, units, value, and scenario year)
+    """Given a years' worth of simulation results, computes a single year quantity of freight moved.
+
+    Args:
+        info: A scenario information object representing parameters and results for a
+            single year
+        units: Requested units
+
+    Returns:
+        DataFrame of quantity of freight (metric name, units, value, and scenario year)
     """
     if "-mi" in units:
         conversion_from_km = utilities.MI_PER_KM
@@ -913,15 +918,16 @@ def calculate_freight_moved(info: ScenarioInfo, units: str) -> MetricType:
 
 
 def calculate_ghg(info: ScenarioInfo, units: str) -> MetricType:
-    """
-    Given a years' worth of simulation results, computes a single year GHG emissions from energy use
-    Arguments:
-    ----------
-    info: A scenario information object representing parameters and results for a single year
-    units: Requested units
-    Outputs:
-    ----------
-    DataFrame of GHG emissions from energy use (metric name, units, value, and scenario year)
+    """Given a years' worth of simulation results, computes a single year GHG emissions from energy use.
+
+    Args:
+        info: A scenario information object representing parameters and results for a
+            single year
+        units: Requested units
+
+    Returns:
+        DataFrame of GHG emissions from energy use (metric name, units, value, and
+        scenario year)
     """
     if units != "tonne CO2-eq":
         return metric("GHG_Energy", units, None)
@@ -1080,16 +1086,16 @@ def calculate_line_loss_ghg(
 
 
 def calculate_locomotive_counts(info: ScenarioInfo, _) -> MetricType:
-    """
-    Given a single scenario year's locomotive consist plan, computes the year's locomotive fleet composition
-    Arguments:
-    ----------
-    info: A scenario information object representing parameters and results for a single year
-    Outputs:
-    ----------
-    DataFrame of locomotive fleet composition metrics (metric name, units, value, and scenario year)
-    """
+    """Given a single scenario year's locomotive consist plan, computes the year's locomotive fleet composition.
 
+    Args:
+        info: A scenario information object representing parameters and results for a
+            single year
+
+    Returns:
+        DataFrame of locomotive fleet composition metrics (metric name, units, value,
+        and scenario year)
+    """
     def get_locomotive_counts(df: pl.DataFrame) -> pl.DataFrame:
         if (info.consist_plan is None) or (info.loco_pool is None):
             return metric("Count_Locomotives", "assets", None)
@@ -1142,14 +1148,14 @@ def calculate_locomotive_counts(info: ScenarioInfo, _) -> MetricType:
 
 
 def calculate_refueler_counts(info: ScenarioInfo, _) -> MetricType:
-    """
-    Given a single scenario year's results, counts how many refuelers were included in the simulation.
-    Arguments:
-    ----------
-    info: A scenario information object representing parameters and results for a single year
-    Outputs:
-    ----------
-    DataFrame of locomotive fleet composition metrics (metric name, units, value, and scenario year)
+    """Given a single scenario year's results, counts how many refuelers were included in the simulation.
+
+    Args:
+        info: A scenario information object representing parameters and results for a
+            single year
+
+    Returns:
+        DataFrame of refueler counts (metric name, units, value, and scenario year)
     """
     if info.refuel_facilities is None:
         return metric("Count_Refuelers", "assets", None)
@@ -1217,14 +1223,15 @@ def calculate_infrastructure_counts(info: ScenarioInfo, _: str) -> MetricType:
 
 
 def calculate_rollout_investments(values: MetricType) -> MetricType:
-    """
-    Given multiple scenario years' locomotive fleet compositions, computes additional across-year metrics
-    Arguments:
-    ----------
-    values: DataFrame with multiple scenario years' locomotive fleet composition metrics
-    Outputs:
-    ----------
-    DataFrame of across-year locomotive fleet composition metrics (metric name, units, value, and scenario year)
+    """Given multiple scenario years' locomotive fleet compositions, computes additional across-year metrics.
+
+    Args:
+        values: DataFrame with multiple scenario years' locomotive fleet composition
+            metrics
+
+    Returns:
+        DataFrame of across-year locomotive fleet composition metrics (metric name,
+        units, value, and scenario year)
     """
     item_id_cols = ["Subset"]
     loco_types = (
@@ -1574,16 +1581,14 @@ def calculate_rollout_investments(values: MetricType) -> MetricType:
 
 
 def calculate_rollout_total_costs(values: MetricType) -> MetricType:
-    """
-    Given multiple scenario years' locomotive fleet compositions, computes total per-year costs
-    Arguments:
-    ----------
-    values: DataFrame with annual cost metrics
-    Outputs:
-    ----------
-    DataFrame of across-year locomotive fleet composition metrics (metric name, units, value, and scenario year)
-    """
+    """Given multiple scenario years' locomotive fleet compositions, computes total per-year costs.
 
+    Args:
+        values: DataFrame with annual cost metrics
+
+    Returns:
+        DataFrame of total per-year costs (metric name, units, value, and scenario year)
+    """
     total_costs = (
         values.filter(
             (

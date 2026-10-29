@@ -63,12 +63,11 @@ def print_dt():
 
 
 def cumutrapz(x, y):
-    """
-    Returns cumulative trapezoidal integral array for:
-    Arguments:
-    ----------
-    x: array of monotonically increasing values to integrate over
-    y: array of values being integrated
+    """Returns cumulative trapezoidal integral array.
+
+    Args:
+        x: array of monotonically increasing values to integrate over
+        y: array of values being integrated
     """
     assert len(x) == len(y)
     z = np.zeros(len(x))
@@ -361,17 +360,15 @@ def convert_network(
     return dest
 
 def copy_demo_files(demo_path: Path = Path("demos")):
+    """Copies demo files from package directory into local directory.
+
+    Args:
+        demo_path: Destination directory, relative or absolute; created if missing.
+
+    Warning:
+        Running this function will overwrite existing files so make sure any files with
+        changes you'd like to keep are renamed.
     """
-    Copies demo files from package directory into local directory.
-
-    # Arguments
-    demo_path: path (relative or absolute in )
-
-    # Warning
-    Running this function will overwrite existing files so make sure any files with
-    changes you'd like to keep are renamed.
-    """
-
     v = f"v{__version__}"
     demo_path.mkdir(exist_ok=True)
 
@@ -398,9 +395,10 @@ def copy_demo_files(demo_path: Path = Path("demos")):
 
 
 def show_plots() -> bool:
-    """
-    Returns true if plots should be displayed based on `SHOW_PLOTS` environment variable.
-    `SHOW_PLOTS` defaults to true, and to set it false, run `SHOW_PLOTS=false python your_script.py`
+    """Returns true if plots should be displayed based on `SHOW_PLOTS` environment variable.
+
+    `SHOW_PLOTS` defaults to true, and to set it false, run
+    `SHOW_PLOTS=false python your_script.py`.
     """
     return (
         os.environ.get(

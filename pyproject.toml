@@ -137,3 +137,9 @@ fmt = "ruff"
 lint = "pylint"
 style = { depends-on = ["fmt", "lint"] }
 
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint.pydocstyle]
+# Python docstrings follow the Google style; see docs/src/developers.md.
+convention = "google"

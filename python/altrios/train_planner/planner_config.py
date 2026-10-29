@@ -1,50 +1,56 @@
 from __future__ import annotations
 import os
-import polars as pl
 import pandas as pd
 from typing import Dict, Callable, Optional, Union
 from dataclasses import dataclass, field
 import altrios as alt
 from altrios import defaults
 
-pl.enable_string_cache()
-
 @dataclass
 class TrainPlannerConfig:
-    """
-    Dataclass class for train planner configuration parameters.
+    """Dataclass class for train planner configuration parameters.
 
     Attributes:
-    ----------
-    - `single_train_mode`: `True` to only run one round-trip train and schedule its charging; `False` to plan train consists
-    - `min_cars_per_train`: `Dict` of the minimum length in number of cars to form a train for each train type
-    - `target_cars_per_train`: `Dict` of the standard train length in number of cars for each train type
-    - `manifest_empty_return_ratio`: Desired railcar reuse ratio to calculate the empty manifest car demand, (E_ij+E_ji)/(L_ij+L_ji)
-    - `cars_per_locomotive`: Heuristic scaling factor used to size number of locomotives needed based on demand.
-    - `cars_per_locomotive_fixed`: If `True`, `cars_per_locomotive` overrides `hp_per_ton` calculations used for dispatching decisions.
-    - `refuelers_per_incoming_corridor`: Heuristic scaling factor used to scale number of refuelers needed at each node based on number of incoming corridors.
-    - `containers_per_car`: Containers stacked on each car (applicable only for intermodal containers)
-    - `require_diesel`: `True` to require each consist to have at least one diesel locomotive.
-    - `manifest_empty_return_ratio`: `Dict`
-    - `drag_coeff_function`: `Dict`
-    - `hp_required_per_ton`: `Dict`
-    - `dispatch_scaling_dict`: `Dict`
-    - `loco_info`: `Dict`
-    - `refueler_info`: `Dict`
-    - `return_demand_generators`: `Dict`
-    - `reuse_locomotives`: With an imported consist plan (`consist_plan_in`), `False` (default)
-      dispatches each train with exactly the `Locomotive_ID`s the plan lists; `True` keeps only the
-      plan's locomotive COUNT and TYPE per train and draws the units from the pool: first units of
-      that type already in service and `Ready` at the origin (charged and serviced), then units in
-      service idle at another terminal (implicit repositioning: no move is simulated, no energy or
-      time is charged for it), and only then a unit never used before. The fleet is then the units
-      ever dispatched, not one unit per locomotive-trip.
-    - `loco_type_shares`: Optional `Dict` mapping each `Locomotive_Type` in `loco_info` to its target
-      share (e.g. `{"BEL": 0.5, "Diesel_Large": 0.5}`) of the auto-built locomotive pool. Requires
-      exactly 2 locomotive types in `loco_info`; consumed by `data_prep.build_locopool`.
-    - `dispatch_shuffle_seed`: Seed for the random ordering of trains within each origin-destination
-      pair in `schedulers.dispatch_uniform_demand_uniform_departure`. The default makes a run
-      reproducible; set `None` for a different order on every run.
+        single_train_mode: `True` to only run one round-trip train and schedule its
+            charging; `False` to plan train consists
+        min_cars_per_train: `Dict` of the minimum length in number of cars to form a
+            train for each train type
+        target_cars_per_train: `Dict` of the standard train length in number of cars for
+            each train type
+        manifest_empty_return_ratio: Desired railcar reuse ratio to calculate the empty
+            manifest car demand, (E_ij+E_ji)/(L_ij+L_ji)
+        cars_per_locomotive: Heuristic scaling factor used to size number of locomotives
+            needed based on demand.
+        cars_per_locomotive_fixed: If `True`, `cars_per_locomotive` overrides
+            `hp_per_ton` calculations used for dispatching decisions.
+        refuelers_per_incoming_corridor: Heuristic scaling factor used to scale number
+            of refuelers needed at each node based on number of incoming corridors.
+        containers_per_car: Containers stacked on each car (applicable only for
+            intermodal containers)
+        require_diesel: `True` to require each consist to have at least one diesel
+            locomotive.
+        drag_coeff_function: `Dict`
+        hp_required_per_ton: `Dict`
+        dispatch_scaling_dict: `Dict`
+        loco_info: `Dict`
+        refueler_info: `Dict`
+        return_demand_generators: `Dict`
+        reuse_locomotives: With an imported consist plan (`consist_plan_in`), `False`
+            (default) dispatches each train with exactly the `Locomotive_ID`s the plan
+            lists; `True` keeps only the plan's locomotive COUNT and TYPE per train and
+            draws the units from the pool: first units of that type already in service
+            and `Ready` at the origin (charged and serviced), then units in service idle
+            at another terminal (implicit repositioning: no move is simulated, no energy
+            or time is charged for it), and only then a unit never used before. The
+            fleet is then the units ever dispatched, not one unit per locomotive-trip.
+        loco_type_shares: Optional `Dict` mapping each `Locomotive_Type` in `loco_info`
+            to its target share (e.g. `{"BEL": 0.5, "Diesel_Large": 0.5}`) of the
+            auto-built locomotive pool. Requires exactly 2 locomotive types in
+            `loco_info`; consumed by `data_prep.build_locopool`.
+        dispatch_shuffle_seed: Seed for the random ordering of trains within each
+            origin-destination pair in
+            `schedulers.dispatch_uniform_demand_uniform_departure`. The default makes a
+            run reproducible; set `None` for a different order on every run.
     """
     simulation_days: int = 21
     dispatch_shuffle_seed: Optional[int] = 0
