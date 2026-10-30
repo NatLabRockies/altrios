@@ -165,8 +165,15 @@ impl ElectricDrivetrain {
                 &self.eta_interp,
                 false,
             )?;
+        // `pwr_max_regen_in` is the electrical sinks' limit; regen delivers
+        // `pwr_mech * eta` to them (`set_pwr_in_req`), so the shaft-side limit
+        // is `pwr_max_regen_in / eta`.
         self.state.pwr_mech_regen_max.update(
-            (pwr_max_regen_in * eta).min(self.pwr_out_max),
+            if eta > si::Ratio::ZERO {
+                (pwr_max_regen_in / eta).min(self.pwr_out_max)
+            } else {
+                si::Power::ZERO
+            },
             || format_dbg!(),
         )?;
         ensure!(*self.state.pwr_mech_regen_max.get_fresh(|| format_dbg!())? >= si::Power::ZERO);
