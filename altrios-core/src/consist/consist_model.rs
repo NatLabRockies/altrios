@@ -337,6 +337,35 @@ impl Consist {
         Ok(())
     }
 
+    /// Mass assigned to each locomotive such that the buffer calculations can
+    /// be based on mass weighted proportionally to the relative battery
+    /// capacity; `None` for every locomotive if none has a battery. Used for
+    /// both the power limits and the energy solve, so the two agree.
+    fn mass_for_each_loco(&self, train_mass: Option<si::Mass>) -> Vec<Option<si::Mass>> {
+        let res_total_usable_energy = self.loco_vec.iter().fold(si::Energy::ZERO, |m_tot, l| {
+            m_tot
+                + l.reversible_energy_storage()
+                    .map(|res| res.energy_capacity_usable())
+                    .unwrap_or(si::Energy::ZERO)
+        });
+        self.loco_vec
+            .iter()
+            .map(|loco| {
+                if res_total_usable_energy > si::Energy::ZERO {
+                    train_mass.map(|tm| {
+                        loco.reversible_energy_storage()
+                            .map(|res| res.energy_capacity_usable())
+                            .unwrap_or(si::Energy::ZERO)
+                            / res_total_usable_energy
+                            * tm
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     pub fn solve_energy_consumption(
         &mut self,
         pwr_out_req: si::Power,
@@ -449,8 +478,16 @@ impl Consist {
 
         // maybe put logic for toggling `engine_on` here
 
-        for (i, (loco, pwr_out)) in self.loco_vec.iter_mut().zip(pwr_out_vec.iter()).enumerate() {
-            loco.solve_energy_consumption(*pwr_out, dt, engine_on, train_mass, train_speed)
+        // the same locomotive-specific mass as in `set_curr_pwr_max_out`
+        let mass_for_each_loco = self.mass_for_each_loco(train_mass);
+        for (i, ((loco, pwr_out), mass)) in self
+            .loco_vec
+            .iter_mut()
+            .zip(pwr_out_vec.iter())
+            .zip(mass_for_each_loco)
+            .enumerate()
+        {
+            loco.solve_energy_consumption(*pwr_out, dt, engine_on, mass, train_speed)
                 .with_context(|| {
                     format!(
                         "{}\nloco idx: {}, loco type: {}",
@@ -650,28 +687,9 @@ impl LocoTrait for Consist {
         // method is called
         ensure!(pwr_aux.is_none(), format_dbg!(pwr_aux.is_none()));
 
-        // calculate mass assigned to each locomotive such that the buffer
-        // calculations can be based on mass weighted proportionally to the
-        // relative battery capacity
-        let res_total_usable_energy = self.loco_vec.iter().fold(si::Energy::ZERO, |m_tot, l| {
-            m_tot
-                + l.reversible_energy_storage()
-                    .map(|res| res.energy_capacity_usable())
-                    .unwrap_or(si::Energy::ZERO)
-        });
-        for (i, loco) in self.loco_vec.iter_mut().enumerate() {
-            // assign locomotive-specific mass for hybrid controls
-            let mass: Option<si::Mass> = if res_total_usable_energy > si::Energy::ZERO {
-                train_mass.map(|tm| {
-                    loco.reversible_energy_storage()
-                        .map(|res| res.energy_capacity_usable())
-                        .unwrap_or(si::Energy::ZERO)
-                        / res_total_usable_energy
-                        * tm
-                })
-            } else {
-                None
-            };
+        // assign locomotive-specific mass for hybrid controls
+        let mass_for_each_loco = self.mass_for_each_loco(train_mass);
+        for (i, (loco, mass)) in self.loco_vec.iter_mut().zip(mass_for_each_loco).enumerate() {
             loco.set_curr_pwr_max_out(None, elev_and_temp, mass, train_speed, dt)
                 .map_err(|err| {
                     err.context(format!(
