@@ -7,7 +7,7 @@ use crate::imports::*;
 
 #[serde_api]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct ConsistSimulation {
     pub loco_con: Consist,
     pub power_trace: PowerTrace,
@@ -79,14 +79,9 @@ impl ConsistSimulation {
     }
 
     pub fn solve_step(&mut self) -> anyhow::Result<()> {
-        self.loco_con
-            .state
-            .pwr_cat_lim
-            .mark_fresh(|| format_dbg!())?;
-        // self.loco_con.set_cat_power_limit(
-        //     &self.path_tpc,
-        //     *self.state.offset.get_fresh(|| format_dbg!())?,
-        // )?;
+        // This simulation drives the consist from a power trace with no track and
+        // no catenary, so mark the wire absent (zero available power) every step.
+        self.loco_con.set_cat_power_limit(None, None)?;
         self.loco_con
             .set_pwr_aux(Some(true))
             .with_context(|| format_dbg!())?;

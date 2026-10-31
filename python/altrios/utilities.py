@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 import numpy as np
-from typing import Tuple, Union, Optional, List, Dict
+from typing import Tuple, Union, Optional, List
 import pandas as pd
 import polars as pl
 import datetime
@@ -10,8 +10,10 @@ import numpy.typing as npt
 from pathlib import Path
 import os
 import shutil
+import copy
 
 # local imports
+import altrios as alt
 from altrios import __version__
 
 MPS_PER_MPH = 1.0 / 2.237
@@ -23,12 +25,21 @@ CM_PER_IN = 2.54
 CM_PER_FT = CM_PER_IN * 12.0
 M_PER_FT = CM_PER_FT / 100.0
 MI_PER_KM = 0.621371
+MI_PER_M = MI_PER_KM * 1.0e-3
 LITER_PER_M3 = 1.0e3
 G_PER_TONNE = 1.0e6
 GALLONS_PER_LITER = 1.0 / 3.79
 KWH_PER_MJ = 0.277778  # https://www.eia.gov/energyexplained/units-and-calculators/energy-conversion-calculators.php
 MWH_PER_J = 2.77778e-10
 MWH_PER_MJ = KWH_PER_MJ / 1.0e3
+
+# GDP chain-type price index deflator to restate 2022 USD in 2025 USD (the AEO2026
+# base year). = AEO2026 Table 20 GDP chain-price index 2025 (1.383637, 2012=1.000)
+# / 2022 actual (1.27224).
+USD_2022_TO_2025 = 1.088
+# CPI-U annual averages (BLS, 1982-84=100): 2025 321.943 / 2024 313.689. The NREL 2025
+# battery cost projections are in 2024 USD; NREL itself converts dollar years with CPI.
+USD_2024_TO_2025 = 1.026
 
 
 def package_root() -> Path:
@@ -52,12 +63,11 @@ def print_dt():
 
 
 def cumutrapz(x, y):
-    """
-    Returns cumulative trapezoidal integral array for:
-    Arguments:
-    ----------
-    x: array of monotonically increasing values to integrate over
-    y: array of values being integrated
+    """Returns cumulative trapezoidal integral array.
+
+    Args:
+        x: array of monotonically increasing values to integrate over
+        y: array of values being integrated
     """
     assert len(x) == len(y)
     z = np.zeros(len(x))
@@ -67,21 +77,13 @@ def cumutrapz(x, y):
     return z
 
 
-def range_minmax(self) -> pl.Expr:
-    return self.max() - self.min()  # type: ignore[no-any-return]
-
-
-pl.Expr.range = range_minmax  # type: ignore[attr-defined]
-del range_minmax
-
-
 def cumPctWithinGroup(
     df: Union[pl.DataFrame, pl.LazyFrame], grouping_vars: List[str]
 ) -> Union[pl.DataFrame, pl.LazyFrame]:
     return df.with_columns(
         (
             (pl.int_range(pl.len(), dtype=pl.UInt32).over(grouping_vars).add(1))
-            / pl.count().over(grouping_vars)
+            / pl.len().over(grouping_vars)
         ).alias("Percent_Within_Group_Cumulative")
     )
 
@@ -90,7 +92,10 @@ def allocateIntegerEvenly(
     df: Union[pl.DataFrame, pl.LazyFrame], target: str, grouping_vars: List[str]
 ) -> Union[pl.DataFrame, pl.LazyFrame]:
     return (
-        df.sort(grouping_vars)
+        # Stable sort: the rounding remainder below goes to whichever rows come
+        # first within a group, so tie order must be the input order, not the
+        # engine's.
+        df.sort(grouping_vars, maintain_order=True)
         .pipe(cumPctWithinGroup, grouping_vars=grouping_vars)
         .with_columns(
             pl.col(target)
@@ -114,7 +119,7 @@ def allocateItems(
     df: Union[pl.DataFrame, pl.LazyFrame], grouping_vars: list[str], count_target: str
 ) -> Union[pl.DataFrame, pl.LazyFrame]:
     return (
-        df.sort(grouping_vars + [count_target], descending=True)
+        df.sort(grouping_vars + [count_target], descending=True, maintain_order=True)
         .with_columns(
             pl.col(count_target)
             .sum()
@@ -214,24 +219,164 @@ def smoothen(signal: npt.ArrayLike, period: int = 9) -> npt.ArrayLike:
 def print_dt():
     print(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
+def set_network_max_speed(network_dict: list, max_speed_mph: float) -> list:
+    """Cap every link speed limit in a network pydict.
+
+    Args:
+        network_dict: Network pydict from `Network.to_pydict()`; element 1 holds
+            the links, each with `speed_set.speed_limits`.
+        max_speed_mph: Speed cap (mph).
+
+    Returns:
+        The same pydict, modified in place.
+    """
+    max_speed_meters_per_second = max_speed_mph * 1000 / 3600 / alt.utilities.MI_PER_KM
+    for link_idx in range(len(network_dict[1])):
+        if network_dict[1][link_idx]['speed_set'] is None: 
+            continue
+        if network_dict[1][link_idx]['speed_set']['speed_limits'] is None: 
+            continue
+        for speed_limit_idx in range(len(network_dict[1][link_idx]['speed_set']['speed_limits'])):
+            current_limit = network_dict[1][link_idx]['speed_set']['speed_limits'][speed_limit_idx]['speed_meters_per_second']
+            network_dict[1][link_idx]['speed_set']['speed_limits'][speed_limit_idx]['speed_meters_per_second'] = min(current_limit, max_speed_meters_per_second)
+
+    return network_dict
+
+def scale_network_speed_limits(network_dict: list, scaler: float) -> list:
+    """Multiply every link speed limit in a network pydict.
+
+    Args:
+        network_dict: Network pydict from `Network.to_pydict()`; element 1 holds
+            the links, each with `speed_set.speed_limits`.
+        scaler: Factor applied to each `speed_meters_per_second`.
+
+    Returns:
+        The same pydict, modified in place.
+    """
+    for link_idx in range(len(network_dict[1])):
+        if network_dict[1][link_idx]['speed_set'] is None: 
+            continue
+        if network_dict[1][link_idx]['speed_set']['speed_limits'] is None: 
+            continue
+        for speed_limit_idx in range(len(network_dict[1][link_idx]['speed_set']['speed_limits'])):
+            current_limit = network_dict[1][link_idx]['speed_set']['speed_limits'][speed_limit_idx]['speed_meters_per_second']
+            network_dict[1][link_idx]['speed_set']['speed_limits'][speed_limit_idx]['speed_meters_per_second'] = current_limit * scaler
+
+    return network_dict
+
+def increase_link_speed_limits(
+    network_dict: list,
+    link_indices: list[int],
+    new_speed_limit_meters_per_second: float,
+    alt_value: float,
+    overrides: dict[int, float] | None = None,
+) -> tuple[list, dict[int, float]]:
+    """Assign per-link speed limits in a network pydict.
+
+    Args:
+        network_dict: Network pydict from `Network.to_pydict()`; element 1 holds
+            the links, each with `speed_set.speed_limits`.
+        link_indices: `idx_curr` values of the links set to the new limit.
+        new_speed_limit_meters_per_second: Limit (m/s) for `link_indices`.
+        alt_value: Limit (m/s) for every other link without an override.
+        overrides: `idx_curr` to limit (m/s) for other specific links.
+
+    Returns:
+        A deep copy of the pydict with the limits applied, and `idx_curr` to
+        assigned limit for every link whose limit differs from `alt_value`.
+    """
+    updated_network_dict = copy.deepcopy(network_dict)
+    non_max_vals = {}
+    for link in updated_network_dict[1]:
+        idx_curr = link["idx_curr"]
+        if idx_curr in link_indices:
+            val_to_assign = new_speed_limit_meters_per_second
+        elif overrides is not None and idx_curr in overrides:
+            val_to_assign = overrides[idx_curr]
+        else:
+            val_to_assign = alt_value
+        if link["speed_set"] is None or link["speed_set"]["speed_limits"] is None:
+            continue
+        for speed_limit in link["speed_set"]["speed_limits"]:
+            if speed_limit["speed_meters_per_second"] is None:
+                continue
+            speed_limit["speed_meters_per_second"] = val_to_assign
+        if val_to_assign != alt_value:
+            non_max_vals[idx_curr] = val_to_assign
+    return updated_network_dict, non_max_vals
+
+def convert_network(
+    src: Union[str, Path],
+    dest: Optional[Union[str, Path]] = None,
+    dest_format: str = "msgpack",
+    overwrite: bool = False,
+    verify: bool = True,
+) -> Path:
+    """Convert a rail network file to another format, losslessly.
+
+    `msgpack` suits large generated networks; `yaml` suits small hand-edited ones.
+
+    Args:
+        src: Existing network file; the format is inferred from its extension.
+        dest: Path to write; defaults to `src` with the suffix of `dest_format`.
+        dest_format: Format `Network.to_file` accepts, e.g. "msgpack" or "yaml";
+            "json" perturbs floats by up to 1 ULP on reading.
+        overwrite: Whether to replace an existing `dest`.
+        verify: Whether to read `dest` back and check it matches `src`.
+
+    Returns:
+        The path written. `src` is left untouched.
+
+    Raises:
+        ValueError: When `dest` resolves to `src`.
+        FileExistsError: When `dest` exists and `overwrite` is False.
+        RuntimeError: When `verify` is True and the round trip differs.
+    """
+    src = Path(src)
+    if dest is None:
+        dest = src.with_suffix(f".{dest_format}")
+    dest = Path(dest)
+
+    if dest.resolve() == src.resolve():
+        raise ValueError(f"`dest` must differ from `src`: {src}")
+    if dest.exists() and not overwrite:
+        raise FileExistsError(f"{dest} already exists; pass `overwrite=True` to replace it")
+
+    # `skip_init=True` avoids re-running validation that the source network already passed;
+    # this is a format conversion, not an import of untrusted data.
+    network = alt.Network.from_file(str(src), skip_init=True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    network.to_file(str(dest))
+
+    if verify:
+        roundtripped = alt.Network.from_file(str(dest), skip_init=True)
+        # Lines are sorted before comparing because `speed_sets` is a hash map, whose serialized
+        # key order is not stable from one load to the next.
+        if sorted(roundtripped.to_yaml().splitlines()) != sorted(network.to_yaml().splitlines()):
+            raise RuntimeError(
+                f"round trip through {dest_format!r} did not preserve the network: {src} -> {dest}"
+            )
+
+    return dest
 
 def copy_demo_files(demo_path: Path = Path("demos")):
+    """Copies demo files from package directory into local directory.
+
+    Args:
+        demo_path: Destination directory, relative or absolute; created if missing.
+
+    Warning:
+        Running this function will overwrite existing files so make sure any files with
+        changes you'd like to keep are renamed.
     """
-    Copies demo files from package directory into local directory.
-
-    # Arguments
-    demo_path: path (relative or absolute in )
-
-    # Warning
-    Running this function will overwrite existing files so make sure any files with
-    changes you'd like to keep are renamed.
-    """
-
     v = f"v{__version__}"
     demo_path.mkdir(exist_ok=True)
 
-    for src_file in (package_root() / "demos").iterdir():
-        if src_file.suffix != ".py":
+    copied = 0
+    for src_file in sorted((package_root() / "demos").iterdir()):
+        # Skip the package marker and the pytest harness; keep plot_util.py, which
+        # several demos import.
+        if src_file.suffix != ".py" or src_file.name == "__init__.py" or src_file.name.startswith("test_"):
             continue
         src_file: Path
         dest_file = demo_path / src_file.name
@@ -244,14 +389,16 @@ def copy_demo_files(demo_path: Path = Path("demos")):
             file_content = prepend + file_content
             file.seek(0)
             file.writelines(file_content)
+        copied += 1
 
-    print(f"Saved {dest_file.name} to {dest_file}")
+    print(f"Copied {copied} demo scripts to {demo_path.resolve()}")
 
 
 def show_plots() -> bool:
-    """
-    Returns true if plots should be displayed based on `SHOW_PLOTS` environment variable.
-    `SHOW_PLOTS` defaults to true, and to set it false, run `SHOW_PLOTS=false python your_script.py`
+    """Returns true if plots should be displayed based on `SHOW_PLOTS` environment variable.
+
+    `SHOW_PLOTS` defaults to true, and to set it false, run
+    `SHOW_PLOTS=false python your_script.py`.
     """
     return (
         os.environ.get(
@@ -262,4 +409,24 @@ def show_plots() -> bool:
             # only true if provided input is exactly "true", case insensitive
         ).lower()
         == "true"
+    )
+
+def network_to_latlon(network: alt.Network) -> pl.LazyFrame:
+    """Explode a network's link headings into lat/lon rows.
+
+    Args:
+        network: Network whose link `headings` carry `lat` and `lon`.
+
+    Returns:
+        LazyFrame with one row per heading point: the link's `idx_*` columns,
+        `osm_id`, `lat` and `lon`.
+    """
+    return(
+        pl.DataFrame(network.to_pydict()[1]).lazy()
+            .explode("headings")
+            .with_columns(
+                pl.col("headings").struct.field("lat").alias("lat"), 
+                pl.col("headings").struct.field("lon").alias("lon")
+            )
+            .drop("cat_power_limits", "link_idxs_lockout", "speed_set", "speed_sets", "elevs", "length_meters", "headings")
     )

@@ -2,7 +2,7 @@ use super::train_imports::*;
 
 #[serde_api]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Container
 pub struct TemperatureTraceBuilder {
     /// simulation elapsed time
@@ -103,9 +103,9 @@ pub struct TemperatureTraceElement {
 
 #[serde_api]
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Container for an interpolator of temperature at sea level (to be corrected for altitude)
-pub struct TemperatureTrace(pub(crate) Interp1DOwned<f64, strategy::Linear>);
+pub struct TemperatureTrace(pub(crate) Interp1D<f64, strategy::Linear>);
 
 #[pyo3_api]
 impl TemperatureTrace {}

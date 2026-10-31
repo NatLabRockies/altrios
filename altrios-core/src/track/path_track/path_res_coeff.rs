@@ -2,7 +2,7 @@ use crate::imports::*;
 
 #[serde_api]
 #[derive(Clone, Copy, Default, Debug, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Struct containing linear resistance coefficients for a particular offset with respect to start
 /// of `PathTpc`
 pub struct PathResCoeff {

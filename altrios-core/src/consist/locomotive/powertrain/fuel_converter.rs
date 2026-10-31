@@ -6,7 +6,7 @@ const TOL: f64 = 1e-3;
 
 #[serde_api]
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, StateMethods, SetCumulative)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Struct for modeling Fuel Converter (e.g. engine, fuel cell.)
 pub struct FuelConverter {
     #[serde(default)]
@@ -40,7 +40,7 @@ pub struct FuelConverter {
     /// and temperature. When interpolating, this returns fraction of normal
     /// peak power, e.g. a value of 1 means no derating and a value of 0 means
     /// the engine is completely disabled.
-    pub elev_and_temp_derate: Option<Interp2DOwned<f64, strategy::Linear>>,
+    pub elev_and_temp_derate: Option<Interp2D<f64, strategy::Linear>>,
     /// time step interval between saves. 1 is a good option. If None, no saving occurs.
     pub save_interval: Option<usize>,
     /// Custom vector of [Self::state]
@@ -328,7 +328,8 @@ impl FuelConverter {
             )
         );
         self.state.pwr_fuel.update(
-            pwr_out_req / *self.state.eta.get_fresh(|| format_dbg!())? + self.pwr_idle_fuel,
+            pwr_out_req / *self.state.eta.get_fresh(|| format_dbg!())?
+                + *self.state.pwr_idle_fuel.get_fresh(|| format_dbg!())?,
             || format_dbg!(),
         )?;
         self.state.pwr_loss.update(
@@ -382,7 +383,7 @@ impl FuelConverter {
 #[derive(
     Clone, Debug, Deserialize, Serialize, PartialEq, HistoryVec, StateMethods, SetCumulative,
 )]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct FuelConverterState {
     /// iteration counter
     pub i: TrackedState<usize>,

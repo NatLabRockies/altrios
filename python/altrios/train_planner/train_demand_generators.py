@@ -14,15 +14,13 @@ def get_default_return_demand_generators() -> Dict[str, Callable]:
     }
 
 def initialize_reverse_empties(demand: Union[pl.LazyFrame, pl.DataFrame]) -> Union[pl.LazyFrame, pl.DataFrame]:
-    """
-    Swap `Origin` and `Destination` and append `_Empty` to `Train_Type`.
-    Arguments:
-    ----------
-    demand: `DataFrame` or `LazyFrame` representing origin-destination demand.
+    """Swap `Origin` and `Destination` and append `_Empty` to `Train_Type`.
 
-    Outputs:
-    ----------
-    Updated demand `DataFrame` or `LazyFrame`.
+    Args:
+        demand: `DataFrame` or `LazyFrame` representing origin-destination demand.
+
+    Returns:
+        Updated demand `DataFrame` or `LazyFrame`.
     """
     return (demand
         .rename({"Origin": "Destination", "Destination": "Origin"})
@@ -30,30 +28,32 @@ def initialize_reverse_empties(demand: Union[pl.LazyFrame, pl.DataFrame]) -> Uni
     )    
 
 def generate_return_demand_unit(demand_subset: Union[pl.LazyFrame, pl.DataFrame], config: planner_config.TrainPlannerConfig) -> Union[pl.LazyFrame, pl.DataFrame]:
-    """
-    Given a set of Unit train demand for one or more origin-destination pairs, generate demand in the reverse direction(s).
-    Arguments:
-    ----------
-    demand: `DataFrame` or `LazyFrame` representing origin-destination demand for Unit trains.
+    """Given a set of Unit train demand for one or more origin-destination pairs, generate demand in the reverse direction(s).
 
-    Outputs:
-    ----------
-    Updated demand `DataFrame` or `LazyFrame` representing demand in the reverse direction(s) for each origin-destination pair.
+    Args:
+        demand_subset: `DataFrame` or `LazyFrame` representing origin-destination demand
+            for Unit trains.
+        config: Train planner configuration (unused).
+
+    Returns:
+        Updated demand `DataFrame` or `LazyFrame` representing demand in the reverse
+        direction(s) for each origin-destination pair.
     """
     return (demand_subset
         .pipe(initialize_reverse_empties)
     )
 
 def generate_return_demand_manifest(demand_subset: Union[pl.LazyFrame, pl.DataFrame], config: planner_config.TrainPlannerConfig) -> Union[pl.LazyFrame, pl.DataFrame]:
-    """
-    Given a set of Manifest train demand for one or more origin-destination pairs, generate demand in the reverse direction(s).
-    Arguments:
-    ----------
-    demand: `DataFrame` or `LazyFrame` representing origin-destination demand for Unit trains.
+    """Given a set of Manifest train demand for one or more origin-destination pairs, generate demand in the reverse direction(s).
 
-    Outputs:
-    ----------
-    Updated demand `DataFrame` or `LazyFrame` representing demand in the reverse direction(s) for each origin-destination pair.
+    Args:
+        demand_subset: `DataFrame` or `LazyFrame` representing origin-destination demand
+            for Manifest trains.
+        config: Train planner configuration; supplies `manifest_empty_return_ratio`.
+
+    Returns:
+        Updated demand `DataFrame` or `LazyFrame` representing demand in the reverse
+        direction(s) for each origin-destination pair.
     """
     return(demand_subset
         .pipe(initialize_reverse_empties)
@@ -61,15 +61,16 @@ def generate_return_demand_manifest(demand_subset: Union[pl.LazyFrame, pl.DataFr
     )
 
 def generate_return_demand_intermodal(demand_subset: Union[pl.LazyFrame, pl.DataFrame], config: planner_config.TrainPlannerConfig) -> Union[pl.LazyFrame, pl.DataFrame]:
-    """
-    Given a set of Intermodal train demand for one or more origin-destination pairs, generate demand in the reverse direction(s).
-    Arguments:
-    ----------
-    demand: `DataFrame` or `LazyFrame` representing origin-destination demand for Unit trains.
+    """Given a set of Intermodal train demand for one or more origin-destination pairs, generate demand in the reverse direction(s).
 
-    Outputs:
-    ----------
-    Updated demand `DataFrame` or `LazyFrame` representing demand in the reverse direction(s) for each origin-destination pair.
+    Args:
+        demand_subset: `DataFrame` or `LazyFrame` representing origin-destination demand
+            for Intermodal trains.
+        config: Train planner configuration (unused).
+
+    Returns:
+        Updated demand `DataFrame` or `LazyFrame` representing demand in the reverse
+        direction(s) for each origin-destination pair.
     """
     demand_subset = (demand_subset
         .pipe(initialize_reverse_empties)
@@ -77,7 +78,7 @@ def generate_return_demand_intermodal(demand_subset: Union[pl.LazyFrame, pl.Data
             pl.concat_str(pl.min_horizontal("Origin", "Destination"), pl.lit("_"), pl.max_horizontal("Origin", "Destination")).alias("OD")
         )
         .with_columns(
-            pl.selectors.starts_with("Number_of").range().over("OD").name.suffix("_Return")
+            (pl.selectors.starts_with("Number_of").max() - pl.selectors.starts_with("Number_of").min()).over("OD").name.suffix("_Return")
         )
         .sort([pl.col("OD"), pl.selectors.starts_with("Number_of")], descending=True)
         .group_by("OD").first() # Max demand direction per corridor
@@ -94,17 +95,16 @@ def generate_return_demand(
     demand: pl.DataFrame,
     config: planner_config.TrainPlannerConfig
 ) -> pl.DataFrame:
-    """
-    Create a dataframe for additional demand needed for empty cars of the return trains
-    Arguments:
-    ----------
-    df_annual_demand: The user_input file loaded by previous functions
-    that contains loaded demand for each demand pair.
-    config: Object storing train planner configuration paramaters
-    Outputs:
-    ----------
-    df_return_demand: The demand generated by the need
-    of returning the empty cars to their original nodes
+    """Create a dataframe for additional demand needed for empty cars of the return trains.
+
+    Args:
+        demand: The user_input file loaded by previous functions that contains loaded
+            demand for each demand pair.
+        config: Object storing train planner configuration parameters
+
+    Returns:
+        df_return_demand: The demand generated by the need of returning the empty cars
+            to their original nodes
     """
     demand_subsets = demand.partition_by("Train_Type", as_dict = True)
     return_demands = []
@@ -127,39 +127,30 @@ def generate_manifest_rebalancing_demand(
     node_list: List[str],
     config: planner_config.TrainPlannerConfig
 ) -> pl.DataFrame:
-    """
-    Create a dataframe for summarized view of all origins' manifest demand
-    in number of cars and received cars, both with loaded and empty counts
-    Arguments:
-    ----------
-    demand: The user_input file loaded by previous functions
-    that contains laoded demand for each demand pair.
-    node_list: A list containing all the names of nodes in the system    
-    config: Object storing train planner configuration paramaters
+    """Create a dataframe for summarized view of all origins' manifest demand in number of cars and received cars, both with loaded and empty counts.
 
-    Outputs:
-    ----------
-    origin_manifest_demand: The dataframe that summarized all the manifest demand
-    originated from each node by number of loaded and empty cars
-    with additional columns for checking the unbalance quantity and serve as check columns
-    for the manifest empty car rebalancing function
+    Args:
+        demand: The user_input file loaded by previous functions that contains loaded
+            demand for each demand pair.
+        node_list: A list containing all the names of nodes in the system
+        config: Object storing train planner configuration parameters
+
+    Returns:
+        Documented additional manifest demand pairs and corresponding quantity for
+        rebalancing process
     """
     def balance_trains(
     demand_origin_manifest: pl.DataFrame
     ) -> pl.DataFrame:
-        """
-        Update the manifest demand, especially the empty car demand to maintain equilibrium of number of
-        cars dispatched and received at each node for manifest
-        Arguments:
-        ----------
-        demand_origin_manifest: Dataframe that summarizes empty and loaded 
-        manifest demand dispatched and received for each node by number cars
-        Outputs:
-        ----------
-        demand_origin_manifest: Updated demand_origin_manifest with additional
-        manifest empty car demand added to each node
-        df_balance_storage: Documented additional manifest demand pairs and corresponding quantity for
-        rebalancing process
+        """Update the manifest demand, especially the empty car demand to maintain equilibrium of number of cars dispatched and received at each node for manifest.
+
+        Args:
+            demand_origin_manifest: Dataframe that summarizes empty and loaded manifest
+                demand dispatched and received for each node by number cars
+
+        Returns:
+            df_balance_storage: Documented additional manifest demand pairs and
+                corresponding quantity for rebalancing process
         """
         df_balance_storage = pd.DataFrame(np.zeros(shape=(0, 4)))
         df_balance_storage = df_balance_storage.rename(
@@ -210,8 +201,8 @@ def generate_manifest_rebalancing_demand(
     origin_volume = manifest_demand.group_by("Origin").agg(pl.col("Manifest").sum())
     destination_volume = manifest_demand.group_by("Destination").agg(pl.col("Manifest").sum().alias("Manifest_Reverse"))
     origin_manifest_demand = (pl.DataFrame({"Origin": node_list})
-        .join(origin_volume, left_on="Origin", right_on="Origin", how="left")
-        .join(destination_volume, left_on="Origin", right_on="Destination", how="left")
+        .join(origin_volume, left_on="Origin", right_on="Origin", how="left", maintain_order="left")
+        .join(destination_volume, left_on="Origin", right_on="Destination", how="left", maintain_order="left")
         .with_columns(
             (pl.col("Manifest_Reverse") * config.manifest_empty_return_ratio).floor().cast(pl.UInt32).alias("Manifest_Empty"))
         .with_columns(
@@ -231,34 +222,32 @@ def generate_demand_trains(
     freight_type_to_car_type: Dict[str, str],
     config: planner_config.TrainPlannerConfig
 ) -> pl.DataFrame:
-    """
-    Generate a tabulated demand pair to indicate the final demand
-    for each demand pair for each train type in number of trains
-    Arguments:
-    ----------
-    demand: Tabulated demand for each demand pair for each train type in number of cars
+    """Generate a tabulated demand pair to indicate the final demand for each demand pair for each train type in number of trains.
 
-    demand: The user_input file loaded and prepared by previous functions
-    that contains loaded car demand for each demand pair.
-    demand_returns: The demand generated by the need 
-    of returning the empty cars to their original nodes
-    demand_rebalancing: Documented additional manifest demand pairs and corresponding quantity for
-    rebalancing process
+    Args:
+        demand: The user_input file loaded and prepared by previous functions that
+            contains loaded car demand for each demand pair.
+        demand_returns: The demand generated by the need of returning the empty cars to
+            their original nodes
+        demand_rebalancing: Documented additional manifest demand pairs and
+            corresponding quantity for rebalancing process
+        rail_vehicles: List of `altrios.RailVehicle` objects.
+        freight_type_to_car_type: Mapping from freight type to car type.
+        config: Object storing train planner configuration parameters
 
-    config: Object storing train planner configuration paramaters
-    Outputs:
-    ----------
-    demand: Tabulated demand for each demand pair in terms of number of cars and number of trains
+    Returns:
+        demand: Tabulated demand for each demand pair in terms of number of cars and
+            number of trains
     """
     cars_per_train_min = (pl.from_dict(config.min_cars_per_train)
-        .melt(variable_name="Train_Type", value_name="Cars_Per_Train_Min")
+        .unpivot(variable_name="Train_Type", value_name="Cars_Per_Train_Min")
     )
     cars_per_train_min_default = (cars_per_train_min
         .filter(pl.col("Train_Type") == pl.lit("Default"))
         .select("Cars_Per_Train_Min").item()
     )
     cars_per_train_target = (pl.from_dict(config.target_cars_per_train)
-        .melt(variable_name="Train_Type", value_name="Cars_Per_Train_Target")
+        .unpivot(variable_name="Train_Type", value_name="Cars_Per_Train_Target")
     )
     cars_per_train_target_default = (cars_per_train_target
         .filter(pl.col("Train_Type") == pl.lit("Default"))
@@ -352,5 +341,7 @@ def generate_demand_trains(
             pl.lit(config.simulation_days).alias("Number_of_Days")
         )
         .drop("Cars_Per_Train_Target_Loaded", "Cars_Per_Train_Target_Empty", "Cars_Per_Train_Min_Empty", "Cars_Per_Train_Min_Loaded")
+        # group_by order is undefined; single_train_mode assigns dispatch hours by row
+        .sort("Origin", "Destination", "Train_Type")
     )
     return demand

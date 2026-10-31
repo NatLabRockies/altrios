@@ -101,7 +101,15 @@ pub trait SerdeAPI: Serialize + for<'a> Deserialize<'a> + Init {
             .extension()
             .and_then(OsStr::to_str)
             .with_context(|| format!("File extension could not be parsed: {filepath:?}"))?;
-        self.to_writer(File::create(filepath)?, extension)
+        // Buffer the writes. The serializers emit many small chunks, and an
+        // unbuffered `File` turns each one into its own syscall -- minutes
+        // rather than seconds for a network of any size.
+        let mut wtr = std::io::BufWriter::new(File::create(filepath)?);
+        self.to_writer(&mut wtr, extension)?;
+        // `BufWriter` flushes when dropped but throws away any error it hits
+        // doing so, which would silently truncate the file.
+        std::io::Write::flush(&mut wtr)?;
+        Ok(())
     }
 
     /// Read (deserialize) an object from a file.
@@ -119,7 +127,7 @@ pub trait SerdeAPI: Serialize + for<'a> Deserialize<'a> + Init {
             .ok_or_else(|| {
                 Error::SerdeError(format!("File extension could not be parsed: {filepath:?}"))
             })?;
-        let mut file = File::open(filepath).map_err(|err| {
+        let file = File::open(filepath).map_err(|err| {
             Error::SerdeError(format!(
                 "{err}\n{}",
                 if !filepath.exists() {
@@ -129,7 +137,9 @@ pub trait SerdeAPI: Serialize + for<'a> Deserialize<'a> + Init {
                 }
             ))
         })?;
-        Self::from_reader(&mut file, extension, skip_init)
+        // Buffer the reads for the same reason as `to_file` buffers writes.
+        let mut rdr = std::io::BufReader::new(file);
+        Self::from_reader(&mut rdr, extension, skip_init)
     }
 
     /// Write (serialize) an object into anything that implements [`std::io::Write`]

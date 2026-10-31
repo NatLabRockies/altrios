@@ -10,11 +10,14 @@ pub use si::available_energy::{joule_per_kilogram, kilojoule_per_kilogram};
 pub use si::curvature::{degree_per_meter, radian_per_meter};
 pub use si::energy::{joule, watt_hour};
 pub use si::f64::{
-    Acceleration, Angle, Area, AvailableEnergy as SpecificEnergy, Curvature, Energy, Force,
-    Frequency, InverseVelocity, Length, Mass, MassDensity, Power, PowerRate, Pressure, Ratio,
-    SpecificHeatCapacity, SpecificPower, TemperatureInterval, ThermodynamicTemperature, Time,
-    Velocity, Volume,
+    Acceleration, Angle, Area, AvailableEnergy as SpecificEnergy, Curvature, ElectricCurrent,
+    ElectricPotential, ElectricalResistance, Energy, Force, Frequency, InverseVelocity, Length,
+    Mass, MassDensity, Power, PowerRate, Pressure, Ratio, SpecificHeatCapacity, SpecificPower,
+    TemperatureInterval, ThermodynamicTemperature, Time, Velocity, Volume,
 };
+pub use si::electric_current::ampere;
+pub use si::electric_potential::{kilovolt, volt};
+pub use si::electrical_resistance::ohm;
 pub use si::force::{newton, pound_force};
 pub use si::length::{foot, kilometer, meter};
 pub use si::mass::{kilogram, megagram};

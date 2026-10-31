@@ -215,6 +215,7 @@ def find_minimum_waiting_time(
             new_accumulated_carloads,
             how="left",
             on=["Origin", "Destination", "Train_Type", "Hour"],
+            maintain_order="left",
         )
         .with_columns(pl.col("Number_of_Cars").fill_null(0.0))
         .drop(cs.ends_with("_right") | cs.by_name("Number_of_Containers"))
@@ -322,9 +323,9 @@ def find_minimum_waiting_time(
                 )
 
             # Find the row with the minimum "Total_Waiting"
-            min_waiting_row = total_waiting_time_demand_list.sort("Total_Waiting").head(
-                1
-            )
+            min_waiting_row = total_waiting_time_demand_list.sort(
+                "Total_Waiting", "Dispatch_Hour"
+            ).head(1)
             min_waiting_time_hour = min_waiting_row[0, "Dispatch_Hour"]
             min_waiting_time_before_dispatch = min_waiting_row[
                 0, "Waiting_Before_Dispatch"
@@ -450,7 +451,7 @@ def formatScheduleColumns(
                 "Number_of_Cars_Empty": "Cars_Empty",
             }
         )
-        .sort(["Hour", "Origin", "Destination", "Train_Type"])
+        .sort(["Hour", "Origin", "Destination", "Train_Type"], maintain_order=True)
     )
 
 
@@ -616,6 +617,8 @@ def generate_trains_deterministic_hourly(
             )
             .alias("Max_Min_Trains")
         )
+        # group_by order is undefined; the loop below treats the first pair specially
+        .sort("Origin", "Destination")
     )
 
     # Prepare a list to collect the results for all OD pairs
@@ -651,16 +654,19 @@ def dispatch_hourly_demand_optimized_departure(
     freight_type_to_car_type: Dict[str, str],
     config: planner_config.TrainPlannerConfig,
 ) -> pl.DataFrame:
-    """
-    Converts a table of demand into a dispatch plan where trains depart from each origin in uniformly spaced intervals.
-    Arguments:
-    ----------
-    demand: `DataFrame` or `LazyFrame` representing origin-destination demands (number of trains).
-    rail_vehicles: List of `altrios.RailVehicle` objects.
-    config: `TrainPlannerConfig` object.
-    Outputs:
-    ----------
-    Updated demand `DataFrame` or `LazyFrame` representing dispatches, each defined with an origin, destination, train type, number of (loaded and empty) cars, tonnage, and HP per ton requirement.
+    """Converts a table of demand into a dispatch plan where trains depart from each origin in uniformly spaced intervals.
+
+    Args:
+        demand_hourly: `DataFrame` or `LazyFrame` representing origin-destination
+            demands (number of trains).
+        rail_vehicles: List of `altrios.RailVehicle` objects.
+        freight_type_to_car_type: Mapping from freight type to car type.
+        config: `TrainPlannerConfig` object.
+
+    Returns:
+        Updated demand `DataFrame` or `LazyFrame` representing dispatches, each defined
+        with an origin, destination, train type, number of (loaded and empty) cars,
+        tonnage, and HP per ton requirement.
     """
     min_num_cars_per_train = config.min_cars_per_train[
         "Intermodal_Loaded"
@@ -737,7 +743,7 @@ def dispatch_hourly_demand_optimized_departure(
             "Tons_Per_Train",
             "HP_Required",
         )
-        .sort(["Hour", "Origin", "Destination", "Train_Type"])
+        .sort(["Hour", "Origin", "Destination", "Train_Type"], maintain_order=True)
     )
 
 
@@ -747,19 +753,18 @@ def dispatch_uniform_demand_uniform_departure(
     freight_type_to_car_type: Dict[str, str],
     config: planner_config.TrainPlannerConfig,
 ) -> pl.DataFrame:
-    """
-    Generate a tabulated demand pair to indicate the expected dispatching interval
-    and actual dispatching timesteps after rounding, with departures from each terminal
-    spaced as evenly as possible
-    Arguments:
-    ----------
-    demand: `DataFrame` or `LazyFrame` representing origin-destination demands (number of trains).
-    rail_vehicles: List of `altrios.RailVehicle` objects.
-    config: `TrainPlannerConfig` object.
-    Outputs:
-    ----------
-    schedule: Tabulated dispatching time for each demand pair for each train type
-    in hours
+    """Generate a tabulated demand pair to indicate the expected dispatching interval and actual dispatching timesteps after rounding, with departures from each terminal spaced as evenly as possible.
+
+    Args:
+        demand: `DataFrame` or `LazyFrame` representing origin-destination demands
+            (number of trains).
+        rail_vehicles: List of `altrios.RailVehicle` objects.
+        freight_type_to_car_type: Mapping from freight type to car type.
+        config: `TrainPlannerConfig` object.
+
+    Returns:
+        schedule: Tabulated dispatching time for each demand pair for each train type in
+            hours
     """
     hours = config.simulation_days * 24
     grouping_vars = ["Origin", "Destination", "Train_Type"]
@@ -791,8 +796,13 @@ def dispatch_uniform_demand_uniform_departure(
                 "Number_of_Cars"
             )
         )
+        # Rows arrive in group_by order, which is undefined; put them in a defined
+        # order before the seeded shuffle assigns positions.
+        .sort("Origin", "Destination", "Train_Type", maintain_order=True)
         # TODO: space out trains with slightly more vs less demand, instead of ordering randomly
-        .with_columns(pl.int_range(pl.len()).shuffle().alias("random_int"))
+        .with_columns(
+            pl.int_range(pl.len()).shuffle(seed=config.dispatch_shuffle_seed).alias("random_int")
+        )
         .sort("Origin", "Destination", "Train_Type", "random_int")
         .drop("random_int")
         .with_columns(
@@ -992,6 +1002,6 @@ def dispatch_hourly_demand_uniform_departure(
             "Tons_Per_Train",
             "HP_Required",
         )
-        .sort(["Hour", "Origin", "Destination", "Train_Type"])
+        .sort(["Hour", "Origin", "Destination", "Train_Type"], maintain_order=True)
     )
     return departure_schedule

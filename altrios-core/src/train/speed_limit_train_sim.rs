@@ -6,7 +6,7 @@ use crate::track::{LinkPoint, Location};
 
 #[serde_api]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct LinkIdxTime {
     pub link_idx: LinkIdx,
     pub time: si::Time,
@@ -31,7 +31,7 @@ impl LinkIdxTime {
 
 #[serde_api]
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Struct that contains a `Vec<LinkIdxTime>` for the purpose of providing `SerdeAPI` for
 /// `Vec<LinkIdxTime>` in Python
 pub struct TimedLinkPath(pub Vec<LinkIdxTime>);
@@ -63,7 +63,7 @@ impl From<&Vec<LinkIdxTime>> for TimedLinkPath {
 
 #[serde_api]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Train simulation in which speed is allowed to vary according to train capabilities and speed
 /// limit.  Note that this is not guaranteed to produce identical results to [super::SetSpeedTrainSim]
 /// because of differences in braking controls but should generally be very close (i.e. error in cumulative
@@ -488,15 +488,12 @@ impl SpeedLimitTrainSim {
     }
 
     pub fn solve_step(&mut self) -> anyhow::Result<()> {
-        self.loco_con
-            .state
-            .pwr_cat_lim
-            .mark_fresh(|| format_dbg!())?;
         // set catenary power limit
-        // self.loco_con.set_cat_power_limit(
-        //     &self.path_tpc,
-        //     *self.state.offset.get_fresh(|| format_dbg!())?,
-        // )?;
+        self.loco_con
+            .set_cat_power_limit_from_path(
+                &self.path_tpc,
+                *self.state.offset.get_stale(|| format_dbg!())?,
+            )?;
         // set aux power for the consist
         timer!(self
             .loco_con
@@ -745,10 +742,35 @@ impl SpeedLimitTrainSim {
 
         // Final v_max value should also be bounded by speed_target
         // maximum achievable positive tractive force
-        let f_pos_max = self
-            .loco_con
-            .force_max()?
-            .min(pwr_pos_max / speed_target.min(v_max));
+        // The speed at which the power limit is evaluated. Two degenerate
+        // cases hide here, and collapsing them into one division produced a
+        // NaN that Rust then threw away:
+        //
+        //   `pwr_pos_max / speed_target.min(v_max)` is 0.0/0.0 = NaN when the
+        //   consist has no power available AND the reference speed is zero,
+        //   and `f64::min` returns its NON-NaN operand rather than
+        //   propagating -- so `f_pos_max` silently became the full MECHANICAL
+        //   force limit exactly when the consist could deliver nothing. The
+        //   solver then applied that force, and the check further down fired
+        //   with `pwr_whl_out` positive against `pwr_pos_max` of zero.
+        //
+        // `v_max` reaches zero only when `pwr_pos_max` is zero: with any
+        // positive power the square root above exceeds |x| strictly. So this
+        // path is always loud -- it cannot have quietly inflated force in a
+        // run that completed.
+        let v_pwr_lim = speed_target.min(v_max);
+        let f_pos_max = if pwr_pos_max == si::Power::ZERO {
+            // No power available, so no tractive force, at any speed. This
+            // happens for one step when a consist that was dynamic braking
+            // cannot ramp back to positive power within `dt`.
+            si::Force::ZERO
+        } else if v_pwr_lim == si::Velocity::ZERO {
+            // Power available but the reference speed is zero: force at zero
+            // speed costs no power, so only the mechanical limit binds.
+            self.loco_con.force_max()?
+        } else {
+            self.loco_con.force_max()?.min(pwr_pos_max / v_pwr_lim)
+        };
         // Verify that train has sufficient power to move
         if *self.state.speed.get_stale(|| format_dbg!())? < uc::MPH * 0.1 && f_pos_max <= res_net {
             let mut soc_vec: Vec<String> = vec![];
@@ -760,7 +782,8 @@ impl SpeedLimitTrainSim {
                         soc_vec.push(
                             res.state
                                 .soc
-                                .get_fresh(|| format_dbg!())?
+                                // diagnostic only: soc is updated later in the step
+                                .get_unchecked(|| format_dbg!())?
                                 .get::<si::ratio>()
                                 .format_eng(Some(5)),
                         );
@@ -811,7 +834,8 @@ impl SpeedLimitTrainSim {
                     "grade_front: {}",
                     self.state
                         .grade_front
-                        .get_fresh(|| format_dbg!())?
+                        // diagnostic only: freshness depends on resistance method
+                        .get_unchecked(|| format_dbg!())?
                         .get::<si::ratio>()
                         .format_eng(Some(5))
                 ),
@@ -820,7 +844,8 @@ impl SpeedLimitTrainSim {
                     "grade_back: {}",
                     self.state
                         .grade_back
-                        .get_fresh(|| format_dbg!())?
+                        // diagnostic only: not updated by the point resistance method
+                        .get_unchecked(|| format_dbg!())?
                         .get::<si::ratio>()
                         .format_eng(Some(5))
                 ),
@@ -952,37 +977,33 @@ impl SpeedLimitTrainSim {
             || format_dbg!(),
         )?;
 
+        // Split the applied force between the consist and the friction brakes.
+        // Braking priority is electric first, friction last: the consist takes
+        // as much of the retarding force as its regen plus dynamic braking can
+        // deliver at this speed (`f_max_consist_regen_dyn`; within the consist,
+        // battery regen is filled before the dynamic-brake grids), and the
+        // friction brakes supply only the remainder -- recomputed every step, so
+        // they release as soon as the consist can carry the demand on its own.
+        //
+        // The previous split carried the friction force forward from the prior
+        // step whenever the consist COULD have covered the demand. Once the
+        // brakes were applied at a stop, that stale value persisted through every
+        // following coast and descent until traction resumed, and the consist
+        // was recorded as doing nothing -- so a battery-equipped consist was
+        // denied the regen the physics had room for (a third to a half of the
+        // braking energy on the corridors this was found on), and the friction
+        // history read as an impossible multiple of the potential energy.
+        // `f_applied` is already clamped to what friction plus consist can
+        // supply, so the remainder here never exceeds `force_max_curr`.
         let (f_consist, fric_brake_force): (si::Force, si::Force) = if f_applied >= si::Force::ZERO
         {
             // net positive traction is being exerted on train
             (f_applied, si::Force::ZERO)
         } else {
-            // net negative traction is being exerted on train
-            let f_consist = f_applied + *self.fric_brake.state.force.get_stale(|| format_dbg!())?;
-            // If the friction brakes should be released, don't add power -- as
-            // of 2025-06-10, trying to figure out what this means
-            if f_consist >= si::Force::ZERO {
-                (
-                    si::Force::ZERO,
-                    *self.fric_brake.state.force.get_stale(|| format_dbg!())?,
-                )
-            }
-            // If the current friction brakes and consist regen + dyn can handle
-            // things, don't add friction braking
-            else if f_consist + f_max_consist_regen_dyn >= si::Force::ZERO {
-                // TODO: this needs careful scrutiny
-                (
-                    f_consist,
-                    *self.fric_brake.state.force.get_stale(|| format_dbg!())?,
-                )
-            }
-            // If the friction braking must increase, max out the regen dyn first
-            else {
-                (
-                    -f_max_consist_regen_dyn,
-                    -(f_applied + f_max_consist_regen_dyn),
-                )
-            }
+            // net negative traction: friction covers only what regen + dynamic
+            // braking cannot
+            let fric_brake_force = (-f_applied - f_max_consist_regen_dyn).max(si::Force::ZERO);
+            (f_applied + fric_brake_force, fric_brake_force)
         };
 
         self.fric_brake
@@ -1007,22 +1028,52 @@ impl SpeedLimitTrainSim {
         let pwr_whl_out_unclipped = f_consist * *self.state.speed.get_fresh(|| format_dbg!())?;
 
         // this allows for float rounding error overshoot
+        // The operands of these two messages must NOT assert freshness.
+        // `self.state.pwr_whl_out` is written AFTER these checks (the `update`
+        // just below), and `self.fric_brake.state.force` is read with
+        // `get_stale` earlier in this same function -- so both are stale here by
+        // construction. Calling `get_fresh` on them while BUILDING the failure
+        // message raised "State variable has not been updated", and THAT error
+        // replaced the real one: every violation of these two limits surfaced as
+        // an unrelated internal-invariant bug, with no indication of which limit
+        // was exceeded or by how much. Report the local `pwr_whl_out_unclipped`
+        // (the quantity actually being checked); read anything else unchecked.
         ensure!(
             utils::almost_le_uom(&pwr_whl_out_unclipped, &pwr_pos_max, Some(1.0e-7)),
-            format!("{}\nPower wheel out is larger than max positive power! pwr_whl_out={:?}, pwr_pos_max={:?}",
-            format_dbg!(utils::almost_le_uom(self.state.pwr_whl_out.get_fresh(|| format_dbg!())?, &pwr_pos_max, Some(1.0e-7))),
-            self.state.pwr_whl_out.get_fresh(|| format_dbg!())?,
-            pwr_pos_max)
+            format!("{}\nPower wheel out is larger than max positive power! pwr_whl_out={:?}, pwr_pos_max={:?}
+            speed (fresh, post-update): {:?}
+            f_consist: {:?}
+            f_applied: {:?}
+            f_pos_max: {:?}
+            vel_change: {:?}
+            res_net: {:?}
+            dt: {:?}
+            loco_con.pwr_out_max: {:?}
+            loco_con.pwr_rate_out_max: {:?}
+            pwr_whl_out (previous step): {:?}",
+            format_dbg!(utils::almost_le_uom(&pwr_whl_out_unclipped, &pwr_pos_max, Some(1.0e-7))),
+            pwr_whl_out_unclipped,
+            pwr_pos_max,
+            self.state.speed.get_unchecked(|| format_dbg!())?,
+            f_consist,
+            f_applied,
+            f_pos_max,
+            vel_change,
+            res_net,
+            self.state.dt.get_unchecked(|| format_dbg!())?,
+            self.loco_con.state.pwr_out_max.get_unchecked(|| format_dbg!())?,
+            self.loco_con.state.pwr_rate_out_max.get_unchecked(|| format_dbg!())?,
+            self.state.pwr_whl_out.get_unchecked(|| format_dbg!())?)
         );
         ensure!(
             utils::almost_le_uom(&-pwr_whl_out_unclipped, &pwr_neg_max, Some(1.0e-7)),
             format!("{}\nPower wheel out is larger than max negative power! pwr_whl_out={:?}, pwr_neg_max={:?}
             {:?}\n{:?}\n{:?}\n{:?}",
-            format_dbg!(utils::almost_le_uom(&-*self.state.pwr_whl_out.get_fresh(|| format_dbg!())?, &pwr_neg_max, Some(1.0e-7))),
-            -*self.state.pwr_whl_out.get_fresh(|| format_dbg!())?,
+            format_dbg!(utils::almost_le_uom(&-pwr_whl_out_unclipped, &pwr_neg_max, Some(1.0e-7))),
+            -pwr_whl_out_unclipped,
             pwr_neg_max,
-            self.state.speed.get_fresh(|| format_dbg!())?,
-            *self.fric_brake.state.force .get_fresh(|| format_dbg!())?* *self.state.speed.get_fresh(|| format_dbg!())?,
+            self.state.speed.get_unchecked(|| format_dbg!())?,
+            *self.fric_brake.state.force.get_unchecked(|| format_dbg!())? * *self.state.speed.get_unchecked(|| format_dbg!())?,
             vel_change,
         res_net)
         );

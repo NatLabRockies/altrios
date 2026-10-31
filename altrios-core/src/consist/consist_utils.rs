@@ -21,11 +21,21 @@ pub trait LocoTrait {
     ) -> anyhow::Result<()>;
     /// Get energy loss in components
     fn get_energy_loss(&self) -> anyhow::Result<si::Energy>;
+
+    /// Set catenary power limit for locomotives that can use catenary power
+    /// Default implementation does nothing (for non-catenary locomotives)
+    fn set_cat_power_limit(
+        &mut self,
+        _pwr_cat_lim: Option<si::Power>,
+        _loss_factor: Option<f64>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 #[serde_api]
 #[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Wrapper struct for `Vec<Locomotive>` to expose various methods to Python.
 pub struct Pyo3VecLocoWrapper(pub Vec<Locomotive>);
 
@@ -93,6 +103,7 @@ impl SolvePower for RESGreedy {
             for loco in loco_vec {
                 loco_pwr_out_vec.push(match &loco.loco_type {
                     PowertrainType::ConventionalLoco(_) => si::Power::ZERO,
+                    PowertrainType::DualModeLoco(_) => si::Power::ZERO,
                     PowertrainType::HybridLoco(_) => {
                         *loco.state.pwr_out_max.get_fresh(|| format_dbg!())?
                             / *state.pwr_out_max_reves.get_fresh(|| format_dbg!())?
@@ -117,6 +128,10 @@ impl SolvePower for RESGreedy {
             for loco in loco_vec {
                 loco_pwr_out_vec.push( match &loco.loco_type {
                     PowertrainType::ConventionalLoco(_) => {
+*                        loco.state.pwr_out_max.get_fresh(|| format_dbg!())? / *state.pwr_out_max_non_reves.get_fresh(|| format_dbg!())?
+                            * *state.pwr_out_deficit.get_fresh(|| format_dbg!())?
+                    }
+                    PowertrainType::DualModeLoco(_) => {
 *                        loco.state.pwr_out_max.get_fresh(|| format_dbg!())? / *state.pwr_out_max_non_reves.get_fresh(|| format_dbg!())?
                             * *state.pwr_out_deficit.get_fresh(|| format_dbg!())?
                     }
@@ -168,6 +183,11 @@ fn get_pwr_regen_vec(
         pwr_regen_vec.push(match &loco.loco_type {
             // no braking power from conventional locos if there is capacity to regen all power
             PowertrainType::ConventionalLoco(_) => si::Power::ZERO,
+            // A dual-mode unit regenerates only into a receptive wire; its
+            // `pwr_regen_max` is zero otherwise, so this is exact either way.
+            PowertrainType::DualModeLoco(_) => {
+                *loco.state.pwr_regen_max.get_fresh(|| format_dbg!())? * regen_frac
+            }
             PowertrainType::HybridLoco(_) => {
                 *loco.state.pwr_regen_max.get_fresh(|| format_dbg!())? * regen_frac
             }

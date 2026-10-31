@@ -84,7 +84,7 @@ tsb = alt.TrainSimBuilder(
 
 # Load the network and construct the timed link path through the network.
 network = alt.Network.from_file(
-    alt.resources_root() / "networks/simple_corridor_network.yaml"
+    alt.resources_root() / "networks/simple_corridor_network.msgpack"
 )
 
 location_map = alt.import_locations(

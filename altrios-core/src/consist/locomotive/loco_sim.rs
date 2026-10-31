@@ -11,7 +11,7 @@ use super::locomotive::HybridLoco;
 
 #[serde_api]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Container
 pub struct PowerTrace {
     /// simulation time
@@ -153,7 +153,7 @@ pub struct PowerTraceElement {
 
 #[serde_api]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Struct for simulating operation of a standalone locomotive.
 pub struct LocomotiveSimulation {
     pub loco_unit: Locomotive,
@@ -239,6 +239,10 @@ impl LocomotiveSimulation {
     }
 
     pub fn solve_step(&mut self) -> anyhow::Result<()> {
+        // A standalone locomotive has no network, so nothing energizes the
+        // catenary. De-energize it explicitly each step: an unset pantograph
+        // limit must mean zero available power, not an unresolved state.
+        self.loco_unit.set_cat_power_limit(None, None)?;
         // linear aux model
         let i = *self.loco_unit.state.i.get_fresh(|| format_dbg!())?;
         let engine_on: Option<bool> = self
@@ -378,7 +382,7 @@ impl Default for LocomotiveSimulation {
 
 #[serde_api]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct LocomotiveSimulationVec(pub Vec<LocomotiveSimulation>);
 impl LocomotiveSimulationVec {
     pub fn new(value: Vec<LocomotiveSimulation>) -> Self {
@@ -481,6 +485,14 @@ mod tests {
         let cl = Locomotive::default();
         let pt = PowerTrace::default();
         let mut loco_sim = LocomotiveSimulation::new(cl, pt, None);
+        loco_sim.walk().unwrap();
+    }
+
+    #[test]
+    fn test_dual_mode_locomotive_sim() {
+        let dml = Locomotive::default_dual_mode_loco();
+        let pt = PowerTrace::default();
+        let mut loco_sim = LocomotiveSimulation::new(dml, pt, None);
         loco_sim.walk().unwrap();
     }
 

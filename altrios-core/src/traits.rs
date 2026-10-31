@@ -7,8 +7,13 @@ pub trait Idx {
     fn idx(self) -> usize;
 }
 
-#[duplicate_item(Self; [u8]; [u16])]
-impl Idx for Self {
+impl Idx for u8 {
+    fn idx(self) -> usize {
+        self.into()
+    }
+}
+
+impl Idx for u16 {
     fn idx(self) -> usize {
         self.into()
     }
@@ -205,6 +210,39 @@ pub trait Step {
     /// - `loc`: closure that returns file and line number where called
     fn step<F: Fn() -> String>(&mut self, loc: F) -> anyhow::Result<()>;
 }
+
+// Blanket implementations for `Option<T>` so that optional state-bearing fields
+// (e.g. an optional `CatenaryInterface`) can carry the `#[has_state]` attribute:
+// the `StateMethods` derive macro calls these methods directly on the field.
+// When `None`, each is a no-op.
+impl<T: SetCumulative> SetCumulative for Option<T> {
+    fn set_cumulative<F: Fn() -> String>(&mut self, dt: si::Time, loc: F) -> anyhow::Result<()> {
+        if let Some(inner) = self {
+            inner.set_cumulative(dt, loc)?;
+        }
+        Ok(())
+    }
+}
+
+impl<T: SaveState> SaveState for Option<T> {
+    fn save_state<F: Fn() -> String>(&mut self, loc: F) -> anyhow::Result<()> {
+        if let Some(inner) = self {
+            inner.save_state(loc)?;
+        }
+        Ok(())
+    }
+}
+
+impl<T: Step> Step for Option<T> {
+    fn step<F: Fn() -> String>(&mut self, loc: F) -> anyhow::Result<()> {
+        if let Some(inner) = self {
+            inner.step(loc)?;
+        }
+        Ok(())
+    }
+}
+
+impl<T: StateMethods> StateMethods for Option<T> {}
 
 /// Provides methods for getting and setting the save interval
 pub trait HistoryMethods: SaveState {

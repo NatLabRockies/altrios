@@ -194,13 +194,15 @@ def get_results(
     params, 
     plotly: bool, 
     pyplot: bool,
-    plot_save_dir: Path
+    plot_save_dir: Path,
+    show_pyplot: bool = False,
 ) -> Tuple[dict, dict]:
     mod_dict = mod_err.update_params(params)
     errs = mod_err.get_errors(
-        mod_dict, 
+        mod_dict,
         pyplot=pyplot,
         plotly=plotly,
+        show_pyplot=show_pyplot,
         plot_save_dir=plot_save_dir,
     )
 

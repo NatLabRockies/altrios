@@ -95,7 +95,7 @@ tsb_with_derating = alt.TrainSimBuilder(
 
 # Load the network and construct the timed link path through the network.
 network = alt.Network.from_file(
-    alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
+    alt.resources_root() / "networks/Taconite-NoBalloon.msgpack"
 )
 
 location_map = alt.import_locations(

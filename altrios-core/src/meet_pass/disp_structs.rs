@@ -54,8 +54,6 @@ pub type DispAuthIdx = TrainIdx;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct DispAuth {
-    /// Arrive Entry Time
-    pub arrive_entry: si::Time,
     /// Arrive Exit Time
     pub arrive_exit: si::Time,
     /// Clear Entry Time,
@@ -73,6 +71,28 @@ pub struct DispAuth {
 }
 
 impl DispAuth {
+    /// A link with no train on it: the base entry at the bottom of every link's authority
+    /// stack.
+    ///
+    /// Times are negative infinity, meaning "cleared infinitely long ago", so no following
+    /// train is held back by it. Offsets are positive infinity, meaning "no train present",
+    /// which is what [DispAuth::train_idx_curr] keys off.
+    ///
+    /// This is the deliberate inverse of [DispAuth::default], which describes a train that
+    /// has just entered a link and has not yet exited or cleared it. The two must not be
+    /// substituted for one another: defaulting a base entry would make an empty link look
+    /// both fully occupied and impossible to follow through.
+    pub fn unoccupied() -> Self {
+        Self {
+            arrive_exit: f64::NEG_INFINITY * uc::S,
+            clear_entry: f64::NEG_INFINITY * uc::S,
+            clear_exit: f64::NEG_INFINITY * uc::S,
+            offset_front: f64::INFINITY * uc::M,
+            offset_back: f64::INFINITY * uc::M,
+            train_idx: None,
+        }
+    }
+
     pub fn train_idx_curr(&self) -> TrainIdx {
         if self.offset_back == f64::INFINITY * uc::M {
             None
@@ -82,10 +102,13 @@ impl DispAuth {
     }
 }
 
+/// A train that has just entered a link: maximally constraining until its own events
+/// fill the times in. Positive infinity means "has not happened yet", and a zero back
+/// offset means the train occupies the whole link. See [DispAuth::unoccupied] for the
+/// opposite sentinel.
 impl Default for DispAuth {
     fn default() -> Self {
         Self {
-            arrive_entry: f64::INFINITY * uc::S,
             arrive_exit: f64::INFINITY * uc::S,
             clear_entry: f64::INFINITY * uc::S,
             clear_exit: f64::INFINITY * uc::S,

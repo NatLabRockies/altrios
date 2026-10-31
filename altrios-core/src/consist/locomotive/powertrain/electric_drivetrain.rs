@@ -6,7 +6,7 @@ use crate::pyo3::*;
 
 #[serde_api]
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, StateMethods, SetCumulative)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Struct for modeling electric drivetrain.  This includes power electronics, motor, axle ...
 /// everything involved in converting high voltage electrical power to force exerted by the wheel on the track.  
 pub struct ElectricDrivetrain {
@@ -165,8 +165,15 @@ impl ElectricDrivetrain {
                 &self.eta_interp,
                 false,
             )?;
+        // `pwr_max_regen_in` is the electrical sinks' limit; regen delivers
+        // `pwr_mech * eta` to them (`set_pwr_in_req`), so the shaft-side limit
+        // is `pwr_max_regen_in / eta`.
         self.state.pwr_mech_regen_max.update(
-            (pwr_max_regen_in * eta).min(self.pwr_out_max),
+            if eta > si::Ratio::ZERO {
+                (pwr_max_regen_in / eta).min(self.pwr_out_max)
+            } else {
+                si::Power::ZERO
+            },
             || format_dbg!(),
         )?;
         ensure!(*self.state.pwr_mech_regen_max.get_fresh(|| format_dbg!())? >= si::Power::ZERO);
@@ -363,7 +370,7 @@ impl ElectricMachine for ElectricDrivetrain {
     StateMethods,
     SetCumulative,
 )]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct ElectricDrivetrainState {
     /// index
     pub i: TrackedState<usize>,

@@ -1,3 +1,3 @@
 """
-Module containing demo files.  Be sure to check out https://natlabrockies.github.io/altrios/#how-to-run-altrios.
+Demo scripts; see https://natlabrockies.github.io/altrios/#running-altrios for how to copy and run them.
 """

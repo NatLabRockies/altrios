@@ -10,7 +10,7 @@ const TOL: f64 = 1e-3;
 #[serde_api]
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, StateMethods, SetCumulative)]
 /// Struct for modeling technology-naive Reversible Energy Storage (e.g. battery, flywheel).
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct ReversibleEnergyStorage {
     /// struct for tracking current state
     #[serde(default)]
@@ -35,6 +35,12 @@ pub struct ReversibleEnergyStorage {
     pub eta_interp_values: Vec<Vec<Vec<f64>>>,
     /// Max output (and input) power battery can produce (accept)
     pub pwr_out_max: si::Power,
+
+    /// Max charge power when it differs from [Self::pwr_out_max].
+    /// `None`, the default, shares the discharge rating. Set it when charge
+    /// acceptance (a cell property) is below the traction rating.
+    #[serde(default)]
+    pub pwr_in_max: Option<si::Power>,
 
     /// Total energy capacity of battery of full discharge SOC of 0.0 and 1.0
     pub energy_capacity: si::Energy,
@@ -262,7 +268,7 @@ impl SerdeAPI for ReversibleEnergyStorage {
             .ok_or_else(|| {
                 Error::SerdeError(format!("File extension could not be parsed: {filepath:?}"))
             })?;
-        let mut file = File::open(filepath)
+        let file = File::open(filepath)
             .with_context(|| {
                 if !filepath.exists() {
                     format!("File not found: {filepath:?}")
@@ -271,7 +277,9 @@ impl SerdeAPI for ReversibleEnergyStorage {
                 }
             })
             .map_err(|err| Error::SerdeError(format!("{err}")))?;
-        let mut network = match Self::from_reader(&mut file, extension, skip_init) {
+        // Buffer the reads for the same reason as `to_file` buffers writes.
+        let mut rdr = std::io::BufReader::new(file);
+        let mut network = match Self::from_reader(&mut rdr, extension, skip_init) {
             Ok(network) => network,
             Err(err) => res_legacy::ReversibleEnergyStorageLegacy::from_file(filepath, false)
                 .map_err(|old_err| {
@@ -296,6 +304,8 @@ impl From<res_legacy::ReversibleEnergyStorageLegacy> for ReversibleEnergyStorage
             eta_interp_grid: value.eta_interp_grid,
             eta_interp_values: value.eta_interp_values,
             pwr_out_max: value.pwr_out_max,
+            // Legacy files predate the split, so charge stays symmetric.
+            pwr_in_max: None,
             energy_capacity: value.energy_capacity,
             min_soc: value.min_soc,
             max_soc: value.max_soc,
@@ -454,6 +464,12 @@ impl ReversibleEnergyStorage {
         Ok(())
     }
 
+    /// Rating that bounds CHARGE power: [Self::pwr_in_max] when given,
+    /// otherwise [Self::pwr_out_max] (symmetric, the original behaviour).
+    pub fn pwr_charge_rating(&self) -> si::Power {
+        self.pwr_in_max.unwrap_or(self.pwr_out_max)
+    }
+
     /// # Arguments
     /// - `dt`: simulation time step size
     /// - `buffer`: buffer below static maximum SOC above which charging is disabled
@@ -463,6 +479,43 @@ impl ReversibleEnergyStorage {
         dt: si::Time,
         chrg_buffer: si::Energy,
     ) -> anyhow::Result<()> {
+        self.set_pwr_charge_max_split(pwr_aux, dt, chrg_buffer, true)
+            .map(|_| ())
+    }
+
+    /// Like [Self::set_curr_pwr_out_max], but when `derate_charge` is false the
+    /// charge buffer does NOT derate [ReversibleEnergyStorageState::pwr_charge_max]
+    /// (which then bounds regen at the full rating up to `max_soc`); the
+    /// buffer-derated limit is instead returned, for the caller to apply to
+    /// discretionary charging only (engine charging in a hybrid, wire charging in a
+    /// battery-electric). [ReversibleEnergyStorageState::soc_chrg_buffer] records the
+    /// buffer ceiling either way.
+    pub fn set_curr_pwr_out_max_split(
+        &mut self,
+        dt: si::Time,
+        pwr_aux: si::Power,
+        disch_buffer: si::Energy,
+        chrg_buffer: si::Energy,
+        derate_charge: bool,
+    ) -> anyhow::Result<si::Power> {
+        let pwr_charge_max_buffered = self
+            .set_pwr_charge_max_split(pwr_aux, dt, chrg_buffer, derate_charge)
+            .with_context(|| format_dbg!())?;
+        self.set_pwr_disch_max(pwr_aux, dt, disch_buffer)
+            .with_context(|| format_dbg!())?;
+        Ok(pwr_charge_max_buffered)
+    }
+
+    /// Sets the charge limits and returns the buffer-derated charge limit. With
+    /// `derate_charge` the derated value is also what is stored (the original
+    /// behaviour); without it the stored limit ignores the buffer.
+    fn set_pwr_charge_max_split(
+        &mut self,
+        pwr_aux: si::Power,
+        dt: si::Time,
+        chrg_buffer: si::Energy,
+        derate_charge: bool,
+    ) -> anyhow::Result<si::Power> {
         // to protect against excessive topping off of the battery
         let soc_buffer_delta = (chrg_buffer
             / (self.energy_capacity * (self.max_soc - self.min_soc)))
@@ -471,25 +524,31 @@ impl ReversibleEnergyStorage {
         self.state
             .soc_chrg_buffer
             .update(self.max_soc - soc_buffer_delta, || format_dbg!())?;
-        let pwr_max_for_dt = ((self.max_soc - *self.state.soc.get_stale(|| format_dbg!())?)
-            * self.energy_capacity
-            / dt)
+        let soc = *self.state.soc.get_stale(|| format_dbg!())?;
+        let pwr_max_for_dt = ((self.max_soc - soc) * self.energy_capacity / dt)
             .max(si::Power::ZERO);
+        let pwr_charge_max_buffered = if soc
+            <= *self.state.soc_chrg_buffer.get_fresh(|| format_dbg!())?
+        {
+            self.pwr_charge_rating()
+        } else if soc < self.max_soc && soc_buffer_delta > si::Ratio::ZERO {
+            self.pwr_charge_rating() * (self.max_soc - soc) / soc_buffer_delta
+        } else {
+            // current SOC is less than both
+            si::Power::ZERO
+        }
+        .min(pwr_max_for_dt);
+        let pwr_charge_max_unbuffered = if soc < self.max_soc {
+            self.pwr_charge_rating().min(pwr_max_for_dt)
+        } else {
+            si::Power::ZERO
+        };
         self.state.pwr_charge_max.update(
-            if *self.state.soc.get_stale(|| format_dbg!())?
-                <= *self.state.soc_chrg_buffer.get_fresh(|| format_dbg!())?
-            {
-                self.pwr_out_max
-            } else if *self.state.soc.get_stale(|| format_dbg!())? < self.max_soc
-                && soc_buffer_delta > si::Ratio::ZERO
-            {
-                self.pwr_out_max * (self.max_soc - *self.state.soc.get_stale(|| format_dbg!())?)
-                    / soc_buffer_delta
+            if derate_charge {
+                pwr_charge_max_buffered
             } else {
-                // current SOC is less than both
-                si::Power::ZERO
-            }
-            .min(pwr_max_for_dt),
+                pwr_charge_max_unbuffered
+            },
             || format_dbg!(),
         )?;
 
@@ -510,7 +569,7 @@ impl ReversibleEnergyStorage {
             *self.state.pwr_charge_max.get_fresh(|| format_dbg!())? + pwr_aux,
             || format_dbg!(),
         )?;
-        Ok(())
+        Ok(pwr_charge_max_buffered)
     }
 
     /// # Arguments
@@ -580,6 +639,8 @@ impl ReversibleEnergyStorage {
         pwr_aux_req: si::Power,
         dt: si::Time,
     ) -> anyhow::Result<()> {
+        // Read before `state` takes a mutable borrow of `self`.
+        let pwr_charge_rating = self.pwr_charge_rating();
         let state = &mut self.state;
 
         ensure!(
@@ -639,13 +700,15 @@ impl ReversibleEnergyStorage {
                 state.soc.get_fresh(||format_dbg!())?.get::<si::ratio>()
             );
         } else {
+            // CHARGING branch: bound by the charge rating, which may differ
+            // from `pwr_out_max`. The discharge branch above is untouched.
             ensure!(
-                utils::almost_ge_uom(&(pwr_prop_req + pwr_aux_req), &-self.pwr_out_max, Some(TOL)),
+                utils::almost_ge_uom(&(pwr_prop_req + pwr_aux_req), &-pwr_charge_rating, Some(TOL)),
                 format!(
-                    "{}\nres required power ({:.6} MW) exceeds static max power ({:.6} MW)",
+                    "{}\nres required power ({:.6} MW) exceeds static max charge power ({:.6} MW)",
                     format_dbg!(utils::almost_ge_uom(
                         &(pwr_prop_req + pwr_aux_req),
-                        &-self.pwr_out_max,
+                        &-pwr_charge_rating,
                         Some(TOL)
                     )),
                     (pwr_prop_req + pwr_aux_req).get::<si::megawatt>(),
@@ -920,7 +983,7 @@ impl ReversibleEnergyStorage {
 #[derive(
     Clone, Deserialize, Serialize, Debug, PartialEq, HistoryVec, StateMethods, SetCumulative,
 )]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 // component limits
 /// ReversibleEnergyStorage state variables
 pub struct ReversibleEnergyStorageState {

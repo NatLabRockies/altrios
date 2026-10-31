@@ -9,7 +9,7 @@ use crate::imports::*;
 /// curve, ... information is known, not including the final point in the link.
 #[serde_api]
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct LinkPoint {
     /// Distance where `link_idx` starts, or the final path offset for the endpoint
     pub offset: si::Length,

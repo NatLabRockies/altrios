@@ -24,17 +24,23 @@ authors = [
 description = "Tool for modeling and optimization of advanced locomotive powertrains for freight rail decarbonization."
 readme = "README.md"
 license = { file = "LICENSE.md" }
-requires-python = ">=3.10, <3.12"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "License :: OSI Approved :: BSD License",
     "Operating System :: POSIX",
     "Operating System :: MacOS :: MacOS X",
     "Operating System :: Microsoft :: Windows",
 ]
 dependencies = [
-    "pandas>=2",
-    "numpy~=1.24",
+    "pandas>=2,<3",
+    "numpy>=2.1",
+    "numba>=0.59",
     "pymoo==0.6",
     "openpyxl",
     "xlrd",
@@ -42,15 +48,20 @@ dependencies = [
     "matplotlib~=3.3",
     "plotly~=6.0",
     "typing_extensions",
-    "pyarrow >= 16.0, < 20",
-    "polars==1.20.0",
-    "requests",
+    "pyarrow >= 16.0",
+    # The library uses only APIs common to polars 1.x and 2.x; the resolver picks
+    # the newest the interpreter supports (2.x needs Python 3.11 or newer).
+    "polars>=1.44.2,<3",
     "PyYAML==6.0.2",
     "simpy",
-    "msgpack==1.1.0",
+    "progressbar2",
+    "msgpack>=1.1.0",
     "ipykernel~=6.29",
     "executing~=2.0",
     "pip",
+    "pyomo>=6.9",
+    "highspy>=1.11",
+    "scipy>=1.11",
 ]
 
 [project.urls]
@@ -58,6 +69,21 @@ homepage = "https://www.nlr.gov/transportation/altrios"
 source = "https://github.com/NatLabRockies/altrios"
 
 [project.optional-dependencies]
+# Deps for applications/network_builder (OSM -> ALTRIOS network pipeline)
+networkbuilder = [
+    "shapely>=2.0",
+    "networkx>=3.0",
+    "requests",
+]
+# Deps for publication-quality projected maps of electrified corridors (used by the
+# corridor applications). Cartopy provides a proper projected CRS (e.g. Lambert
+# Conformal Conic) so long corridors are not distorted like Web Mercator, plus
+# Natural Earth basemap features.
+mapping = [
+    "cartopy>=0.24",
+    "geopandas>=1.0",
+    "pyproj>=3.6",
+]
 dev = [
     "pytest~=8.3",
     "maturin~=1.8",
@@ -66,6 +92,10 @@ dev = [
     "pylsp-mypy~=0.7.0",
     "memory_profiler~=0.61.0",
     "mypy>=1.15.0",
+    # Network builder workflow deps
+    "altrios[networkbuilder]",
+    # Projected mapping workflow deps
+    "altrios[mapping]",
 ]
 [dependency-groups]
 dev = [
@@ -107,3 +137,9 @@ fmt = "ruff"
 lint = "pylint"
 style = { depends-on = ["fmt", "lint"] }
 
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint.pydocstyle]
+# Python docstrings follow the Google style; see docs/src/developers.md.
+convention = "google"

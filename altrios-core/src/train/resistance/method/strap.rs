@@ -6,7 +6,7 @@ use crate::train::TrainState;
 
 #[serde_api]
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct Strap {
     bearing: bearing::Basic,
     rolling: rolling::Basic,

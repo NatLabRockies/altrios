@@ -4,7 +4,7 @@ use crate::train::TrainState;
 // TODO implement method for elevation-dependent air density
 #[serde_api]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct Basic {
     cd_area: si::Area,
 }

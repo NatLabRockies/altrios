@@ -83,7 +83,7 @@ tsb = alt.TrainSimBuilder(
 
 # Load the network and link path through the network.
 network = alt.Network.from_file(
-    alt.resources_root() / "networks/Taconite-NoBalloon.yaml"
+    alt.resources_root() / "networks/Taconite-NoBalloon.msgpack"
 )
 link_path = alt.LinkPath.from_csv_file(alt.resources_root() / "demo_data/link_path.csv")
 
