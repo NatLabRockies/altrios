@@ -6,11 +6,14 @@ use crate::imports::*;
 /// Struct representing local train-level power limits for catenary charging
 pub struct CatPowerLimit {
     /// start of current power limit
+    #[serde(alias = "offset_start")]
     pub offset_start: si::Length,
     /// end of current power limit
+    #[serde(alias = "offset_end")]
     pub offset_end: si::Length,
     /// maximum possible catenary charging rate  
     /// assumed to be identical for charging and discharging
+    #[serde(alias = "power_limit")]
     pub power_limit: si::Power,
     /// Optional user-defined catenary district
     pub district_id: Option<String>,

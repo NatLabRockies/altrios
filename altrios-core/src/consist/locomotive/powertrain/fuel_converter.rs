@@ -195,10 +195,12 @@ impl FuelConverter {
 
         let pwr_max_derated = match (&mut self.elev_and_temp_derate, elev_and_temp) {
             (Some(elev_and_temp_derate), Some(elev_and_temp)) => {
-                elev_and_temp_derate.interpolate(&[
+                let derate_factor = elev_and_temp_derate.interpolate(&[
                     elev_and_temp.0.get::<si::meter>(),
                     elev_and_temp.1.get::<si::degree_celsius>(),
-                ])? * self.pwr_out_max
+                ])?;
+                ensure!((0.0..=1.0).contains(&derate_factor), format_dbg!());
+                derate_factor * self.pwr_out_max
             }
             (None, Some(_)) => bail!(
                 "{}\nExpected (self.elev_and_temp_derate, elev_and_temp) to both be Some or None",
@@ -212,6 +214,7 @@ impl FuelConverter {
         };
 
         self.pwr_out_max_init = self.pwr_out_max_init.max(self.pwr_out_max / 10.);
+
         self.state.pwr_out_max.update(
             (*self.state.pwr_shaft.get_stale(|| format_dbg!())?
                 + self.pwr_out_max / self.pwr_ramp_lag * dt)
@@ -363,8 +366,9 @@ impl FuelConverter {
     fn set_default_elev_and_temp_derate(&mut self) {
         self.elev_and_temp_derate = Some(
             Interp2D::new(
-                array![0.0, 3_000.0, 6_000.0],
-                array![0.0, 35.0, 45.0, 50.0],
+                array![0.0, 1_000.0, 2_000.0], // elevation in meters
+                array![0.0, 35.0, 45.0, 50.0], // temperature in degrees Celsius
+                // Fraction of static peak power
                 array![
                     [1.0, 1.0, 0.95, 0.8],
                     [0.95, 0.95, 0.9025, 0.76],

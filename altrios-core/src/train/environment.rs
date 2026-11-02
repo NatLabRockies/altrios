@@ -154,7 +154,7 @@ impl Serialize for TemperatureTrace {
         S: serde::Serializer,
     {
         let builder: TemperatureTraceBuilder = TemperatureTraceBuilder::try_from(self.clone())
-            .map_err(|e| serde::ser::Error::custom(format!("{:?}", e)))?;
+            .map_err(|e| serde::ser::Error::custom(format!("{e:?}")))?;
         builder.serialize(serializer)
     }
 }
@@ -166,7 +166,7 @@ impl<'de> Deserialize<'de> for TemperatureTrace {
     {
         let value: TemperatureTraceBuilder = TemperatureTraceBuilder::deserialize(deserializer)?;
         let tt: Self =
-            Self::try_from(value).map_err(|e| serde::de::Error::custom(format!("{:?}", e)))?;
+            Self::try_from(value).map_err(|e| serde::de::Error::custom(format!("{e:?}")))?;
         Ok(tt)
     }
 }

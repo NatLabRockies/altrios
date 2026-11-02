@@ -591,7 +591,55 @@ impl SpeedLimitTrainSim {
             bail!("Timed path cannot be empty!");
         }
 
+        // Get train length to check if we need additional previous links
+        let train_length = *self.state.length.get_fresh(|| format_dbg!())?;
+        let first_link_idx = timed_path[0].link_idx;
+        let first_link = &network[first_link_idx.idx()];
+
+        // Collect previous links if the train is longer than the first link
+        let mut initial_link_path = Vec::with_capacity(16);
+        if first_link.length < train_length {
+            let mut total_length = first_link.length;
+            let mut current_link_idx = first_link_idx;
+
+            // Keep adding previous links until we have enough length for the train
+            while total_length < train_length {
+                let current_link = &network[current_link_idx.idx()];
+
+                // Get the previous link (prefer idx_prev over idx_prev_alt)
+                let prev_link_idx = if current_link.idx_prev.is_real() {
+                    current_link.idx_prev
+                } else if current_link.idx_prev_alt.is_real() {
+                    current_link.idx_prev_alt
+                } else {
+                    // No more previous links available
+                    bail!(
+                        "Train too long for initial route in walk_timed_path: train length ({:.2} m) exceeds available \
+                        track length ({:.2} m). The first link and its previous links do not \
+                        provide enough length to place the train. Consider reducing train length.",
+                        train_length.get::<si::meter>(),
+                        total_length.get::<si::meter>(),
+                    );
+                };
+
+                let prev_link = &network[prev_link_idx.idx()];
+                total_length += prev_link.length;
+                initial_link_path.push(prev_link_idx);
+                current_link_idx = prev_link_idx;
+            }
+
+            // Reverse the path so it goes from previous links to origin
+            initial_link_path.reverse();
+        }
+
         self.save_state(|| format_dbg!())?;
+
+        // If we have previous links to add, extend the path with them first
+        if !initial_link_path.is_empty() {
+            self.extend_path_tpc(network, &initial_link_path)
+                .with_context(|| format!("{}\nExtending with previous links for train length", format_dbg!()))?;
+        }
+
         let mut idx_prev = 0;
         while idx_prev != timed_path.len() - 1 {
             let mut idx_next = idx_prev + 1;
@@ -673,11 +721,14 @@ impl SpeedLimitTrainSim {
         // this figures out when to start braking in advance of a speed limit
         // drop.  Takes into account air brake dynamics. I have not reviewed
         // this code, but that is my understanding.
-        let (speed_limit, speed_target) = self.braking_points.calc_speeds(
-            *self.state.offset.get_stale(|| format_dbg!())?,
-            *self.state.speed.get_stale(|| format_dbg!())?,
-            self.fric_brake.ramp_up_time * self.fric_brake.ramp_up_coeff,
-        );
+        let (speed_limit, speed_target) = self
+            .braking_points
+            .calc_speeds(
+                *self.state.offset.get_stale(|| format_dbg!())?,
+                *self.state.speed.get_stale(|| format_dbg!())?,
+                self.fric_brake.ramp_up_time * self.fric_brake.ramp_up_coeff,
+            )
+            .with_context(|| format_dbg!())?;
         self.state
             .speed_limit
             .update(speed_limit, || format_dbg!())?;
@@ -1055,12 +1106,14 @@ impl SpeedLimitTrainSim {
     }
 
     fn recalc_braking_points(&mut self) -> anyhow::Result<()> {
-        self.braking_points.recalc(
-            &self.state,
-            &self.fric_brake,
-            &self.train_res,
-            &self.path_tpc,
-        )
+        self.braking_points
+            .recalc(
+                &self.state,
+                &self.fric_brake,
+                &self.train_res,
+                &self.path_tpc,
+            )
+            .with_context(|| format_dbg!())
     }
 }
 

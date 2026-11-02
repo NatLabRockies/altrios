@@ -241,7 +241,7 @@ ax[0].plot(
     label="with derate",
 )
 ax[0].legend()
-ax[0].set_ylabel("Cumulative Fuel [GJ]")
+ax[0].set_ylabel("Cumu. Fuel [GJ]")
 
 ax[1].plot(
     df_no_derate["history.time_seconds"],
@@ -254,7 +254,7 @@ ax[1].plot(
     label="with derate pwr max",
 )
 ax[1].legend()
-ax[1].set_ylabel("Engine Power [MW]")
+ax[1].set_ylabel("Eng. Pwr. [MW]")
 
 ax[2].plot(
     df_no_derate["history.time_seconds"],

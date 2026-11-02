@@ -12,9 +12,12 @@ pub fn min_speed(speed_old: si::Velocity, speed_new: si::Velocity) -> si::Veloci
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, PartialOrd)]
 #[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
 pub struct SpeedLimit {
+    #[serde(alias = "offset_start")]
     pub offset_start: si::Length,
+    #[serde(alias = "offset_end")]
     pub offset_end: si::Length,
     /// Speed limit value  
+    #[serde(alias = "speed")]
     pub speed: si::Velocity,
 }
 

@@ -426,7 +426,7 @@ impl LocomotiveSimulationVec {
                 .try_for_each(|(i, loco_sim)| {
                     loco_sim
                         .walk()
-                        .map_err(|err| err.context(format!("loco_sim idx:{}", i)))
+                        .map_err(|err| err.context(format!("loco_sim idx:{i}")))
                 })?;
         } else {
             self.0
@@ -435,7 +435,7 @@ impl LocomotiveSimulationVec {
                 .try_for_each(|(i, loco_sim)| {
                     loco_sim
                         .walk()
-                        .map_err(|err| err.context(format!("loco_sim idx:{}", i)))
+                        .map_err(|err| err.context(format!("loco_sim idx:{i}")))
                 })?;
         }
         Ok(())

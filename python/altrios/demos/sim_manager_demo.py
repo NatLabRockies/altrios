@@ -133,14 +133,13 @@ print(f"Total elapsed time: {time.perf_counter() - t0_total} s")
 # %%
 
 for idx, sim_dict in enumerate(sims_list[:10]):
-
     loco0 = next(iter(sim_dict["loco_con"]["loco_vec"]))
     loco0_type = next(iter(loco0["loco_type"].values()))
 
     if len(sim_dict["loco_con"]["loco_vec"]) > 1:
         loco1 = next(iter(sim_dict["loco_con"]["loco_vec"]))
         loco1_type = next(iter(loco1["loco_type"].values()))
-        #plt.suptitle(f"sim #: {idx}")
+        # plt.suptitle(f"sim #: {idx}")
     number_of_plots = 1
     if "fc" in loco0_type:
         number_of_plots += 1

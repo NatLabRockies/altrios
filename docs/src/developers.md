@@ -41,7 +41,7 @@ runtime computational performance penalty.
 
 Whenever updating code, always run `cargo test --release` inside `ALTRIOS/` to ensure that all
 tests pass. Also, be sure to rebuild the Python API regularly to ensure that it is up to date.
-Python unit tests run with `python -m unittest discover` in the root folder of the git repository.
+Python unit tests run with `pytest -v` in the root folder of the git repository.
 
 ### With GitHub Actions
 
