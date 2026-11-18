@@ -90,16 +90,24 @@ impl ConsistSimulation {
         self.loco_con
             .set_pwr_aux(Some(true))
             .with_context(|| format_dbg!())?;
-        let train_mass = self.power_trace.train_mass;
+        let train_mass = self.power_trace.train_mass.unwrap_or_default();
         let i = *self.loco_con.state.i.get_fresh(|| format_dbg!())?;
         let train_speed = if !self.power_trace.train_speed.is_empty() {
-            Some(self.power_trace.train_speed[i])
+            self.power_trace.train_speed[i]
         } else {
-            None
+            Default::default()
         };
         let dt = self.power_trace.dt_at_i(i).with_context(|| format_dbg!())?;
         self.loco_con
-            .set_curr_pwr_max_out(None, None, train_mass, train_speed, dt)
+            .set_curr_pwr_max_out(
+                Default::default(),
+                Default::default(),
+                train_mass,
+                train_speed,
+                Default::default(), // TODO: make arrays so that this value can be piped in
+                Default::default(), // TODO: make arrays so that this value can be piped in
+                dt,
+            )
             .with_context(|| format_dbg!())?;
         self.solve_energy_consumption(
             self.power_trace.pwr[*self.loco_con.state.i.get_fresh(|| format_dbg!())?],
@@ -132,8 +140,8 @@ impl ConsistSimulation {
     pub fn solve_energy_consumption(
         &mut self,
         pwr_out_req: si::Power,
-        train_mass: Option<si::Mass>,
-        train_speed: Option<si::Velocity>,
+        train_mass: si::Mass,
+        train_speed: si::Velocity,
         dt: si::Time,
     ) -> anyhow::Result<()> {
         self.loco_con.solve_energy_consumption(

@@ -248,15 +248,43 @@ impl LocomotiveSimulation {
             .cloned()
             .with_context(|| format_dbg!())?;
         self.loco_unit.set_pwr_aux(engine_on)?;
-        let train_mass = self.power_trace.train_mass;
+        let train_mass = match self.power_trace.train_mass {
+            Some(tm) => tm,
+            None => {
+                ensure!(
+                    self.loco_unit.reversible_energy_storage().is_none(),
+                    format!(
+                        "{}\nMust provide mass with battery-equipped locomotive",
+                        format_dbg!()
+                    )
+                );
+
+                si::Mass::ZERO
+            }
+        };
         let train_speed = if !self.power_trace.train_speed.is_empty() {
-            Some(self.power_trace.train_speed[i])
+            self.power_trace.train_speed[i]
         } else {
-            None
+            ensure!(
+                self.loco_unit.reversible_energy_storage().is_none(),
+                format!(
+                    "{}\nMust provide speed trace with battery-equipped locomotive",
+                    format_dbg!()
+                )
+            );
+            si::Velocity::ZERO
         };
         let dt = self.power_trace.dt_at_i(i).with_context(|| format_dbg!())?;
-        self.loco_unit
-            .set_curr_pwr_max_out(None, None, train_mass, train_speed, dt)?;
+        self.loco_unit.set_curr_pwr_max_out(
+            si::Power::ZERO,
+            None,
+            train_mass,
+            train_speed,
+            // TODO: come up with a way to pipe real values in for these
+            (si::Velocity::ZERO, si::Velocity::ZERO),
+            (si::Length::ZERO, si::Length::ZERO),
+            dt,
+        )?;
         let pwr_out_req = self
             .power_trace
             .pwr
@@ -306,8 +334,8 @@ impl LocomotiveSimulation {
         pwr_out_req: si::Power,
         dt: si::Time,
         engine_on: Option<bool>,
-        train_mass: Option<si::Mass>,
-        train_speed: Option<si::Velocity>,
+        train_mass: si::Mass,
+        train_speed: si::Velocity,
     ) -> anyhow::Result<()> {
         self.loco_unit.solve_energy_consumption(
             pwr_out_req,

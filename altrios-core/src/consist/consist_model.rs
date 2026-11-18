@@ -331,8 +331,8 @@ impl Consist {
     pub fn solve_energy_consumption(
         &mut self,
         pwr_out_req: si::Power,
-        train_mass: Option<si::Mass>,
-        train_speed: Option<si::Velocity>,
+        train_mass: si::Mass,
+        train_speed: si::Velocity,
         dt: si::Time,
         engine_on: Option<bool>,
     ) -> anyhow::Result<()> {
@@ -567,10 +567,12 @@ impl Default for Consist {
 impl LocoTrait for Consist {
     fn set_curr_pwr_max_out(
         &mut self,
-        pwr_aux: Option<si::Power>,
+        pwr_aux: si::Power,
         elev_and_temp: Option<(si::Length, si::ThermodynamicTemperature)>,
-        train_mass: Option<si::Mass>,
-        train_speed: Option<si::Velocity>,
+        train_mass: si::Mass,
+        train_speed: si::Velocity,
+        speed_limit_lookahead: (si::Velocity, si::Velocity),
+        elev_lookahead: (si::Length, si::Length),
         dt: si::Time,
     ) -> anyhow::Result<()> {
         // TODO: this will need to account for catenary power
@@ -578,7 +580,11 @@ impl LocoTrait for Consist {
         // TODO: make sure that self.state includes catenary effects so that `solve_energy_consumption`
         // is operating with the same catenary power availability at the train position for which this
         // method is called
-        ensure!(pwr_aux.is_none(), format_dbg!(pwr_aux.is_none()));
+        ensure!(
+            pwr_aux == si::Power::ZERO,
+            "{} should be zero",
+            format_dbg!(pwr_aux)
+        );
 
         // calculate mass assigned to each locomotive such that the buffer
         // calculations can be based on mass weighted proportionally to the
@@ -591,25 +597,27 @@ impl LocoTrait for Consist {
         });
         for (i, loco) in self.loco_vec.iter_mut().enumerate() {
             // assign locomotive-specific mass for hybrid controls
-            let mass: Option<si::Mass> = if res_total_usable_energy > si::Energy::ZERO {
-                train_mass.map(|tm| {
-                    loco.reversible_energy_storage()
-                        .map(|res| res.energy_capacity_usable())
-                        .unwrap_or(si::Energy::ZERO)
-                        / res_total_usable_energy
-                        * tm
-                })
+            let mass: si::Mass = if res_total_usable_energy > si::Energy::ZERO {
+                loco.reversible_energy_storage()
+                    .map(|res| res.energy_capacity_usable())
+                    .unwrap_or(si::Energy::ZERO)
+                    / res_total_usable_energy
+                    * train_mass
             } else {
-                None
+                si::Mass::ZERO
             };
-            loco.set_curr_pwr_max_out(None, elev_and_temp, mass, train_speed, dt)
-                .map_err(|err| {
-                    err.context(format!(
-                        "loco idx: {} loco type: {}",
-                        i,
-                        loco.loco_type.to_string()
-                    ))
-                })?;
+            loco.set_curr_pwr_max_out(
+                Default::default(),
+                elev_and_temp,
+                mass,
+                train_speed,
+                speed_limit_lookahead,
+                elev_lookahead,
+                dt,
+            )
+            .with_context(|| {
+                format!("loco idx: {} loco type: {}", i, loco.loco_type.to_string())
+            })?;
         }
         self.state.pwr_out_max.update(
             {

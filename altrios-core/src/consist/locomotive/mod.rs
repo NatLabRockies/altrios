@@ -12,7 +12,7 @@ pub use loco_utils::*;
 
 use super::*;
 pub use crate::consist::locomotive::battery_electric_loco::{
-    BatteryElectricLoco, BatteryPowertrainControls, RESGreedyWithDynamicBuffersBEL, RGWDBStateBEL,
+    BatteryElectricLoco, RESGreedyWithDynamicBuffersBEL, RESPowertrainControls, RGWDBStateBEL,
     RGWDBStateBELHistoryVec,
 };
 pub use crate::consist::locomotive::conventional_loco::ConventionalLoco;

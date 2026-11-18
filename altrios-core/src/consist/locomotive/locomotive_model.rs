@@ -25,10 +25,12 @@ impl SerdeAPI for PowertrainType {}
 impl LocoTrait for PowertrainType {
     fn set_curr_pwr_max_out(
         &mut self,
-        pwr_aux: Option<si::Power>,
+        pwr_aux: si::Power,
         elev_and_temp: Option<(si::Length, si::ThermodynamicTemperature)>,
-        train_mass_for_loco: Option<si::Mass>,
-        train_speed: Option<si::Velocity>,
+        train_mass_for_loco: si::Mass,
+        train_speed: si::Velocity,
+        speed_limit_lookahead: (si::Velocity, si::Velocity),
+        elev_lookahead: (si::Length, si::Length),
         dt: si::Time,
     ) -> anyhow::Result<()> {
         match self {
@@ -37,6 +39,8 @@ impl LocoTrait for PowertrainType {
                 elev_and_temp,
                 train_mass_for_loco,
                 train_speed,
+                speed_limit_lookahead,
+                elev_lookahead,
                 dt,
             ),
             PowertrainType::HybridLoco(hel) => hel.set_curr_pwr_max_out(
@@ -44,6 +48,8 @@ impl LocoTrait for PowertrainType {
                 elev_and_temp,
                 train_mass_for_loco,
                 train_speed,
+                speed_limit_lookahead,
+                elev_lookahead,
                 dt,
             ),
             PowertrainType::BatteryElectricLoco(bel) => bel.set_curr_pwr_max_out(
@@ -51,6 +57,8 @@ impl LocoTrait for PowertrainType {
                 elev_and_temp,
                 train_mass_for_loco,
                 train_speed,
+                speed_limit_lookahead,
+                elev_lookahead,
                 dt,
             ),
             PowertrainType::DummyLoco(dummy) => dummy.set_curr_pwr_max_out(
@@ -58,6 +66,8 @@ impl LocoTrait for PowertrainType {
                 elev_and_temp,
                 train_mass_for_loco,
                 train_speed,
+                speed_limit_lookahead,
+                elev_lookahead,
                 dt,
             ),
         }
@@ -341,10 +351,12 @@ impl Init for DummyLoco {}
 impl LocoTrait for DummyLoco {
     fn set_curr_pwr_max_out(
         &mut self,
-        _pwr_aux: Option<si::Power>,
+        _pwr_aux: si::Power,
         _elev_and_temp: Option<(si::Length, si::ThermodynamicTemperature)>,
-        _train_mass: Option<si::Mass>,
-        _train_speed: Option<si::Velocity>,
+        _train_mass: si::Mass,
+        _train_speed: si::Velocity,
+        _speed_limit_lookahead: (si::Velocity, si::Velocity),
+        _elev_lookahead: (si::Length, si::Length),
         _dt: si::Time,
     ) -> anyhow::Result<()> {
         Ok(())
@@ -1126,8 +1138,8 @@ impl Locomotive {
         pwr_out_req: si::Power,
         dt: si::Time,
         engine_on: Option<bool>,
-        train_mass: Option<si::Mass>,
-        train_speed: Option<si::Velocity>,
+        train_mass: si::Mass,
+        train_speed: si::Velocity,
     ) -> anyhow::Result<()> {
         // maybe put logic for toggling `engine_on` here
 
@@ -1159,18 +1171,13 @@ impl Locomotive {
             PowertrainType::HybridLoco(loco) => {
                 loco.solve_energy_consumption(
                     pwr_out_req,
-                    train_mass.with_context(|| format!(
-                        "{}\n`train_mass` must be provided in `SpeedTrace` or `PowerTrace` if simulating at the consist level or below"
-                        , format_dbg!()
-                    ))?,
-                    train_speed.with_context(|| format!(
-                        "{}\n`train_speed` must be provided in `SpeedTrace` or `PowerTrace` if simulating at the consist level or below"
-                        , format_dbg!()
-                    ))?,
+                    train_mass,
+                    train_speed,
                     dt,
                     *self.state.pwr_aux.get_fresh(|| format_dbg!())?,
                     self.assert_limits,
-                ).with_context(|| format_dbg!("HybridLoco"))?;
+                )
+                .with_context(|| format_dbg!("HybridLoco"))?;
                 // TODO: add `engine_on` and `pwr_aux` here as inputs
                 // self.state.pwr_out.update(
                 //     *loco
@@ -1284,26 +1291,30 @@ impl LocoTrait for Locomotive {
 
     fn set_curr_pwr_max_out(
         &mut self,
-        pwr_aux: Option<si::Power>,
+        pwr_aux: si::Power,
         elev_and_temp: Option<(si::Length, si::ThermodynamicTemperature)>,
-        train_mass_for_loco: Option<si::Mass>,
-        train_speed: Option<si::Velocity>,
+        train_mass_for_loco: si::Mass,
+        train_speed: si::Velocity,
+        speed_limit_lookahead: (si::Velocity, si::Velocity),
+        elev_lookahead: (si::Length, si::Length),
         dt: si::Time,
     ) -> anyhow::Result<()> {
         ensure!(
-            pwr_aux.is_none(),
+            pwr_aux == si::Power::ZERO,
             format!(
-                "{}\ntime step: {}",
-                format_dbg!(pwr_aux.is_none()),
+                "{} should be zero\ntime step: {}",
+                format_dbg!(pwr_aux),
                 self.state.i.get_fresh(|| format_dbg!())?
             )
         );
 
         self.loco_type.set_curr_pwr_max_out(
-            Some(*self.state.pwr_aux.get_fresh(|| format_dbg!())?),
+            *self.state.pwr_aux.get_fresh(|| format_dbg!())?,
             elev_and_temp,
             train_mass_for_loco,
             train_speed,
+            speed_limit_lookahead,
+            elev_lookahead,
             dt,
         )?;
         match &self.loco_type {
