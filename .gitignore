@@ -1224,3 +1224,8 @@ vehicle_average_times.txt
 avg_time_per_train.txt
 crane_work_log.txt
 hostler_work_log.txt
+Network Builder Test
+.pixi
+python/altrios/network_builder_cache/1c/d7/*.val
+network_builder_cache/*.db
+*.val
