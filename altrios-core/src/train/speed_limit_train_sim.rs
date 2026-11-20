@@ -843,7 +843,7 @@ impl SpeedLimitTrainSim {
                 })?;
             bail!(
                 "{}\nTrain does not have sufficient power to move!
-\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}", // ,\nlink={:?}
+\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}", // ,\nlink={:?}
                 format_dbg!(),
                 // force_max
                 format!(
@@ -859,6 +859,11 @@ impl SpeedLimitTrainSim {
                     (pwr_pos_max / speed_target.min(v_max))
                         .get::<si::newton>()
                         .format_eng(Some(5))
+                ),
+                // force based on speed target
+                format!(
+                    "v_max:: {:?}",
+                    v_max
                 ),
                 // pwr_pos_max
                 format!(

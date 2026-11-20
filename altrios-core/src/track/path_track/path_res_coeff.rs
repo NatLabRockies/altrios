@@ -43,8 +43,10 @@ impl LinSearchHint for &[PathResCoeff] {
         if dir != &Dir::Bwd {
             ensure!(
                 offset <= self.last().unwrap().get_offset(),
-                "{}\nOffset in forward direction larger than last slice offset at idx: {}!",
+                "{}\nOffset in forward direction ({:.2} m) is larger than last slice offset ({:.2} m) at idx: {}!",
                 format_dbg!(),
+                offset.get::<si::meter>(),
+                self.last().unwrap().get_offset().get::<si::meter>(),
                 idx
             );
             while self[idx + 1].get_offset() < offset {
