@@ -43,6 +43,13 @@ class TrainPlannerConfig:
             at another terminal (implicit repositioning: no move is simulated, no energy
             or time is charged for it), and only then a unit never used before. The
             fleet is then the units ever dispatched, not one unit per locomotive-trip.
+        consist_plan_weight_includes_locos: With an imported consist plan that gives
+            `Train_Weight_tons`, `True` (default) treats it as the weight of the whole
+            train, locomotives included; `False` treats it as trailing weight (cars only).
+        consist_plan_length_includes_locos: With an imported consist plan that gives
+            `Train_Length_meters`, `True` (default) treats it as the length of the whole
+            train and allows 75 ft per locomotive; `False` treats it as trailing length
+            (cars only).
         loco_type_shares: Optional `Dict` mapping each `Locomotive_Type` in `loco_info`
             to its target share (e.g. `{"BEL": 0.5, "Diesel_Large": 0.5}`) of the
             auto-built locomotive pool. Requires exactly 2 locomotive types in
@@ -119,6 +126,8 @@ class TrainPlannerConfig:
         }
     }).transpose().reset_index(names='Refueler_Type'))
     reuse_locomotives: bool = False
+    consist_plan_weight_includes_locos: bool = True
+    consist_plan_length_includes_locos: bool = True
     loco_type_shares: Optional[Dict] = None
     drag_coeff_function: Optional[Callable]= None
     dispatch_scheduler: Optional[Callable] = None

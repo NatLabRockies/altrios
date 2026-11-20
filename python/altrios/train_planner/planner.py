@@ -736,6 +736,12 @@ def run_train_planner(
                             train_weight_tons * alt.utilities.KG_PER_TON
                             if train_weight_tons is not None else None,
                             train_length_meters,
+                            train_num_axles=this_train.get("Axles"),
+                            include_loco_weight=config.consist_plan_weight_includes_locos,
+                            assumed_loco_length_meters=(
+                                75.0 * alt.utilities.M_PER_FT
+                                if config.consist_plan_length_includes_locos else None
+                            ),
                         )
 
                     # An observed per-train speed ceiling, where the consist plan
