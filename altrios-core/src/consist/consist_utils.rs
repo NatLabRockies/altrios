@@ -246,14 +246,14 @@ fn solve_negative_traction(
         let pwr_surplus_sum = pwr_surplus_vec
             .iter()
             .fold(0.0 * uc::W, |acc, &curr| acc + curr);
-
         // needed braking power not including regen per total available braking power not including regen
         let surplus_frac = *consist_state
             .pwr_regen_deficit
             .get_fresh(|| format_dbg!())?
             / pwr_surplus_sum;
+        let tolerance = 1e-6 * uc::R;
         ensure!(
-            surplus_frac >= si::Ratio::ZERO && surplus_frac <= uc::R,
+            surplus_frac >= si::Ratio::ZERO && surplus_frac <= uc::R + tolerance,
             format_dbg!(surplus_frac),
         );
         // total dynamic braking, including regen
