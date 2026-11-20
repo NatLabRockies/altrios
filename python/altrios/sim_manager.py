@@ -21,6 +21,7 @@ def main(
     warm_start_days: int = defaults.WARM_START_DAYS,
     scenario_year: int = defaults.BASE_ANALYSIS_YEAR,
     walk_timed_paths = False,
+    resolve_meet_pass_conflicts: bool = True,
     debug: bool = False,
     loco_pool: Optional[pl.DataFrame] = None,
     refuelers: Optional[pl.DataFrame] = None,
@@ -121,15 +122,29 @@ def main(
         origins.append(slts.to_pydict()['origs'][0]['Location ID'])
     
     t0_disp = time.perf_counter()
-    # All trains go into a single `run_dispatch` call so meet-pass conflict resolution
-    # actually runs. Dispatching one train per call bypasses meet-pass entirely.
-    timed_paths = alt.run_dispatch(
-        network,
-        alt.SpeedLimitTrainSimVec(speed_limit_train_sims),
-        est_time_nets,
-        False,
-        False,
-    )
+    if resolve_meet_pass_conflicts:
+        # All trains go into a single `run_dispatch` call so meet-pass conflict resolution
+        # actually runs. Dispatching one train per call bypasses meet-pass entirely.
+        timed_paths = alt.run_dispatch(
+            network,
+            alt.SpeedLimitTrainSimVec(speed_limit_train_sims),
+            est_time_nets,
+            False,
+            False,
+        )
+    else:
+        # Dispatch each train on its own, so trains don't interact. Use this when the
+        # consist plan already reflects observed movements, e.g. Trip Optimizer data.
+        timed_paths = [
+            alt.run_dispatch(
+                network,
+                alt.SpeedLimitTrainSimVec([speed_limit_train_sims[i]]),
+                [est_time_nets[i]],
+                False,
+                False,
+            )[0]
+            for i in range(len(speed_limit_train_sims))
+        ]
     if walk_timed_paths:
         # `save_interval` and `configure_sim` exist because saved history is the
         # dominant memory cost of a walked plan, and how much of it a study needs
