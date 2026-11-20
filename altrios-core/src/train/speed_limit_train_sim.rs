@@ -670,11 +670,14 @@ impl SpeedLimitTrainSim {
         // this figures out when to start braking in advance of a speed limit
         // drop.  Takes into account air brake dynamics. I have not reviewed
         // this code, but that is my understanding.
-        let (speed_limit, speed_target) = self.braking_points.calc_speeds(
-            *self.state.offset.get_stale(|| format_dbg!())?,
-            *self.state.speed.get_stale(|| format_dbg!())?,
-            self.fric_brake.ramp_up_time * self.fric_brake.ramp_up_coeff,
-        );
+        let (speed_limit, speed_target) = self
+            .braking_points
+            .calc_speeds(
+                *self.state.offset.get_stale(|| format_dbg!())?,
+                *self.state.speed.get_stale(|| format_dbg!())?,
+                self.fric_brake.ramp_up_time * self.fric_brake.ramp_up_coeff,
+            )
+            .with_context(|| format_dbg!())?;
         self.state
             .speed_limit
             .update(speed_limit, || format_dbg!())?;

@@ -45,13 +45,13 @@ impl BrakingPoints {
     /// - offset: location along the current TPC path since train started moving
     /// - speed: current train speed
     /// - adj_ramp_up_time: corrected ramp up time to account for approximately
-    ///     linear brake build up
+    ///   linear brake build up
     pub fn calc_speeds(
         &mut self,
         offset: si::Length,
         speed: si::Velocity,
         adj_ramp_up_time: si::Time,
-    ) -> (si::Velocity, si::Velocity) {
+    ) -> anyhow::Result<(si::Velocity, si::Velocity)> {
         if self.points.first().unwrap().offset <= offset {
             self.idx_curr = 0;
         } else {
@@ -59,7 +59,7 @@ impl BrakingPoints {
                 self.idx_curr -= 1;
             }
         }
-        assert!(
+        ensure!(
             speed <= self.points[self.idx_curr].speed_limit,
             "Speed limit violated! idx_curr={:?}, offset={:?}, speed={speed:?}, speed_limit={:?}, speed_target={:?}",
             self.idx_curr,
@@ -78,7 +78,7 @@ impl BrakingPoints {
             idx -= 1;
         }
 
-        (self.points[self.idx_curr].speed_limit, speed_target)
+        Ok((self.points[self.idx_curr].speed_limit, speed_target))
     }
 
     /// Any time [PathTpc] is updated, everything is recalculated
