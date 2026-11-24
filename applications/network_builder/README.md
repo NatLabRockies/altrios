@@ -71,6 +71,8 @@ Any subset of fields may be given; the rest keep their defaults
   the ALTRIOS schema: ignored by the simulation, round-tripped by serde, and
   give downstream tools `(offset_meters, lat, lon)` per link straight from the
   YAML.
+- `osm_speed_limits` (default on) — take each link's speed limit from its OSM
+  `maxspeed:freight` or `maxspeed` tag where present. Untagged links get default values that differ for mainline versus sidings.
 - `mapzen_fallback` (default on) — see elevation sources below.
 
 ## How the build works

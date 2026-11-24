@@ -623,6 +623,7 @@ def export_path_with_sidings(
     max_grade: float = MAX_GRADE,
     include_lat_lons: bool = True,
     mapzen_fallback: bool = True,
+    osm_speed_limits: bool = True,
     endpoint_buffer_meters: float = 3000.0,
     origin_name: str = "Spokane",
     destination_name: str = "Lethbridge",
@@ -644,6 +645,7 @@ def export_path_with_sidings(
         max_grade: Grade cap used when smoothing elevations, decimal.
         include_lat_lons: Add lat/lon to each heading entry.
         mapzen_fallback: See fetch_elevations_3dep_bulk.
+        osm_speed_limits: Take speed limits from OSM maxspeed tags where present.
         endpoint_buffer_meters: Length of the start and end buffer links; must exceed
             train length plus braking distance.
         origin_name: Origin label in the locations CSV.
@@ -1004,10 +1006,9 @@ def export_path_with_sidings(
                     tags={"service": "siding"},
                 )
 
-            tags = edge_data.get("tags", {})
-            # Make sure tags mark this as siding (for speed limit)
-            if "service" not in tags:
-                tags["service"] = "siding"
+            # Mark this link a siding (for speed limit) without editing the way's
+            # tags, which other links of the way share
+            tags = {"service": "siding", **edge_data.get("tags", {})}
 
             fwd_link, rev_link = make_link_pair(u, v, tags, fwd_idx, rev_idx)
 
@@ -1196,8 +1197,17 @@ def export_path_with_sidings(
     logger.info(f"Siding wiring OK ({n_junctions} links carry alt-junction indices)")
 
     # ── Speed limits ──
-    logger.info("Setting speed limits (mainline=26.8 m/s, siding=6.7 m/s)…")
-    set_speed_limits(links, default_speed_mps=26.8, siding_speed_mps=6.7)
+    logger.info(
+        "Setting speed limits ("
+        + ("OSM maxspeed where tagged, else " if osm_speed_limits else "")
+        + "mainline=26.8 m/s, siding=6.7 m/s)…"
+    )
+    set_speed_limits(
+        links,
+        default_speed_mps=26.8,
+        siding_speed_mps=6.7,
+        osm_speed_limits=osm_speed_limits,
+    )
 
     # Remove temp osm_tags
     for l in links:
@@ -1270,6 +1280,7 @@ def build_network(
     max_grade: float = MAX_GRADE,
     include_lat_lons: bool = True,
     mapzen_fallback: bool = True,
+    osm_speed_limits: bool = True,
     endpoint_buffer_meters: float = 3000.0,
     origin_name: str = "Spokane",
     destination_name: str = "Lethbridge",
@@ -1292,6 +1303,7 @@ def build_network(
         max_grade: Grade cap used when smoothing elevations, decimal.
         include_lat_lons: Add lat/lon to each heading entry.
         mapzen_fallback: See fetch_elevations_3dep_bulk.
+        osm_speed_limits: Take speed limits from OSM maxspeed tags where present.
         endpoint_buffer_meters: Length of the start and end buffer links.
         origin_name: Origin label in the locations CSV.
         destination_name: Destination label in the locations CSV.
@@ -1352,6 +1364,7 @@ def build_network(
         max_grade=max_grade,
         include_lat_lons=include_lat_lons,
         mapzen_fallback=mapzen_fallback,
+        osm_speed_limits=osm_speed_limits,
         endpoint_buffer_meters=endpoint_buffer_meters,
         origin_name=origin_name,
         destination_name=destination_name,

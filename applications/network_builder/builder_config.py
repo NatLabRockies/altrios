@@ -48,6 +48,10 @@ class BuilderConfig:
     - `mapzen_fallback`: Allow falling back to Mapzen (via OpenTopoData) for points outside
       USGS 3DEP coverage. Set False to force USGS-only elevations; points 3DEP cannot
       resolve are then interpolated along the path instead.
+    - `osm_speed_limits`: Take each link's speed limit from its OSM `maxspeed:freight` or
+      `maxspeed` tag where present (km/h unless marked mph). Untagged links get 26.8 m/s
+      on the mainline and 6.7 m/s on sidings, and the endpoint buffers take the limit of
+      the link they join. Set False for those two fixed limits everywhere.
     - `regions`: List of `{"name", "url"}` Geofabrik regional PBF entries covering the route (used only when downloading the OSM extract).
     - `waypoints`: Route waypoints `(name, lat, lon)`, ordered start -> end. Defines both the OSM clip area and the mainline route through the network. The first/last waypoint names label the corridor endpoints in the exported locations CSV.
     - `origin_regions` / `destination_regions`: (grid emissions, electricity price, liquid fuel price) region codes for the locations CSV rows of the first/last waypoint.
@@ -59,6 +63,7 @@ class BuilderConfig:
     endpoint_buffer_meters: float = 3000.0
     include_lat_lons: bool = True
     mapzen_fallback: bool = True
+    osm_speed_limits: bool = True
     origin_regions: Tuple[str, str, str] = ("WECC", "WA", "WA")
     destination_regions: Tuple[str, str, str] = ("WECC", "ab", "ab")
     regions: List[Dict[str, str]] = field(default_factory=lambda: [

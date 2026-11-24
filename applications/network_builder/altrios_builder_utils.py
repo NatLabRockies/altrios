@@ -3,10 +3,16 @@ import pandas as pd
 import json
 import yaml
 import logging
+import re
 from typing import List, Optional, Union, Dict, Tuple, Any
 from pathlib import Path
 
+from altrios.utilities import MPS_PER_MPH
+
 logger = logging.getLogger(__name__)
+
+# An OSM maxspeed value: a number, in km/h unless marked mph
+MAXSPEED_PATTERN = re.compile(r"\s*(\d+(?:\.\d+)?)\s*(mph|km/h)?\s*", re.IGNORECASE)
 
 
 def smooth_elevation(elevations: List[float], window_size: int = 5) -> List[float]:
@@ -82,17 +88,44 @@ def extract_sidings(
     return sidings
 
 
+def osm_speed_mps(tags: Dict[str, str]) -> Optional[float]:
+    """
+    Read a way's freight speed limit from its OSM tags.
+
+    Takes maxspeed:freight, else maxspeed. A list such as "40;25" gives its lowest value.
+
+    Args:
+        tags: OSM tags of the way.
+
+    Returns:
+        The limit in m/s, or None when neither tag holds a number.
+    """
+    for key in ("maxspeed:freight", "maxspeed"):
+        speeds = []
+        for part in tags.get(key, "").split(";"):
+            m = MAXSPEED_PATTERN.fullmatch(part)
+            if m:
+                mph = (m[2] or "").lower() == "mph"
+                speeds.append(float(m[1]) * (MPS_PER_MPH if mph else 1 / 3.6))
+        if speeds:
+            return min(speeds)
+    return None
+
+
 def set_speed_limits(
     links: List[Dict[str, Any]],
     default_speed_mps: float = 26.8,  # ~60 mph
     siding_speed_mps: float = 6.7,  # ~15 mph
     limit_by_grade: bool = False,
     max_grade: float = 0.02,
+    osm_speed_limits: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Give each link one speed limit over its full length.
 
-    Sidings get siding_speed_mps, other links default_speed_mps; dummy link 0 gets None.
+    With osm_speed_limits, a link takes its way's OSM freight speed where tagged, and
+    buffer links take the limit of the link they join. Other links get siding_speed_mps
+    for sidings and default_speed_mps otherwise. Dummy link 0 gets None.
 
     Args:
         links: Link dictionaries in ALTRIOS format.
@@ -100,22 +133,30 @@ def set_speed_limits(
         siding_speed_mps: Siding speed limit, m/s.
         limit_by_grade: Unused.
         max_grade: Unused.
+        osm_speed_limits: Use the OSM maxspeed tags (see osm_speed_mps).
 
     Returns:
         The same list with 'speed_set' populated.
     """
+
+    def limit(link: Dict[str, Any]) -> float:
+        """The speed limit for one link, m/s."""
+        tags = link.get("osm_tags", {})
+        if osm_speed_limits and tags.get("note", "").endswith("_buffer"):
+            return limit(by_idx[link["idx_next"] or link["idx_prev"]])
+        osm_speed = osm_speed_mps(tags) if osm_speed_limits else None
+        if osm_speed:
+            return osm_speed
+        return siding_speed_mps if is_siding(tags) else default_speed_mps
+
+    by_idx = {link["idx_curr"]: link for link in links}
     for link in links:
         if link.get("idx_curr", -1) == 0:
             # Dummy link 0 must have speed_set = None for ALTRIOS to parse
             link["speed_set"] = None
             continue
 
-        # Determine if link is a siding based on temporary metadata if available
-        tags = link.get("osm_tags", {})
-        if is_siding(tags):
-            current_limit = siding_speed_mps
-        else:
-            current_limit = default_speed_mps
+        current_limit = limit(link)
 
         # SpeedSet schema must include speed_params (empty list) for ALTRIOS compatibility
         # speed_set: { speed_limits: [...], speed_params: [], is_head_end: bool }
