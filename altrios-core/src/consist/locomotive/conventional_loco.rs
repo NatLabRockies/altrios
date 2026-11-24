@@ -8,7 +8,7 @@ use crate::imports::*;
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize, StateMethods, SetCumulative)]
 #[serde_api]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Conventional locomotive
 pub struct ConventionalLoco {
     // The fields in this struct are all locally defined structs and are therefore not documented in

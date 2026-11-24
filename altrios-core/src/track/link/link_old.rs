@@ -14,7 +14,7 @@ use crate::imports::*;
 /// This struct is to be deprecated and superseded by [super::link_impl::Link],
 /// which includes either a train-type-independent `speed_set` or a
 /// train-type-dependent `speed_sets` HashMap, superseding [LinkOld]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct LinkOld {
     pub elevs: Vec<Elev>,
     #[serde(default)]

@@ -14,7 +14,7 @@ struct OldSpeedSets(Vec<OldSpeedSet>);
 
 #[serde_api]
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// An arbitrary unit of single track that does not include turnouts
 pub struct Link {
     /// Index of current link
@@ -367,7 +367,7 @@ impl ObjState for Link {
 
 #[serde_api]
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Struct that contains a `Vec<Link>`, and optional parameters for setting
 /// error tolerances in checks performed by [Init::init]
 pub struct Network(pub NetworkErrTol, pub Vec<Link>);
@@ -386,7 +386,7 @@ impl Network {
 
 #[serde_api]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Network error tolerances used in [Network::init]
 pub struct NetworkErrTol {
     /// Maximum absolute grade allowed at any point in the network
@@ -401,6 +401,11 @@ pub struct NetworkErrTol {
     /// Maximum allowed step change in elevation for coincident nodes in
     /// adjacent links, should be very small
     pub max_elev_step: Option<si::Length>,
+
+    /// Global nominal catenary system voltage used together with each
+    /// [CatPowerLimit::resistance_to_source] to compute resistive line loss.
+    /// Defaults to 25 kV.
+    pub system_voltage: Option<si::ElectricPotential>,
 }
 
 #[pyo3_api]
@@ -413,6 +418,7 @@ impl Init for NetworkErrTol {
         self.max_curv = self.max_curv.or(def.max_curv);
         self.max_heading_step = self.max_heading_step.or(def.max_heading_step);
         self.max_elev_step = self.max_elev_step.or(def.max_elev_step);
+        self.system_voltage = self.system_voltage.or(def.system_voltage);
         Ok(())
     }
 }
@@ -424,6 +430,7 @@ impl Default for NetworkErrTol {
             max_curv: Some((15.0 * uc::DEG / (100.0 * uc::FT)).into()),
             max_heading_step: Some(7.0 * uc::DEG),
             max_elev_step: Some(0.0 * uc::M),
+            system_voltage: Some(25.0 * uc::KV),
         }
     }
 }
@@ -466,7 +473,7 @@ impl SerdeAPI for Network {
             .ok_or_else(|| {
                 Error::SerdeError(format!("File extension could not be parsed: {filepath:?}"))
             })?;
-        let mut file = File::open(filepath).map_err(|err| {
+        let file = File::open(filepath).map_err(|err| {
             Error::SerdeError(format!(
                 "{err}\n{}",
                 if !filepath.exists() {
@@ -476,7 +483,9 @@ impl SerdeAPI for Network {
                 }
             ))
         })?;
-        match Self::from_reader(&mut file, extension, skip_init) {
+        // Buffer the reads for the same reason as `to_file` buffers writes.
+        let mut rdr = std::io::BufReader::new(file);
+        match Self::from_reader(&mut rdr, extension, skip_init) {
             Ok(network) => {
                 // init already happened in `from_reader`
                 Ok(network)
@@ -582,7 +591,7 @@ impl From<NetworkUnchecked> for Network {
 
 #[serde_api]
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Deprecated Struct that contains a `Vec<Link>` for the purpose of providing
 /// `SerdeAPI` for `Vec<Link>` in Python.  This is used solely to enable
 /// backwards compatibility.
@@ -596,7 +605,7 @@ impl SerdeAPI for NetworkUnchecked {}
 
 #[serde_api]
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Struct that contains a `Vec<LinkOld>` for the purpose of providing `SerdeAPI` for `Vec<Link>` in
 /// Python
 ///
@@ -929,11 +938,43 @@ mod tests {
         tempdir.close().unwrap();
     }
 
+    /// Round-trips a real network through the lossless byte formats via `to_file`/`from_file`.
+    ///
+    /// Guards the buffered-IO path in [`SerdeAPI::to_file`]/[`SerdeAPI::from_file`] and the
+    /// [`Network::from_file`] override. `Network` is compared directly rather than via `to_yaml`
+    /// because `Link::speed_sets` is a [`HashMap`], whose serialized key order is not stable.
+    ///
+    /// `json` is deliberately excluded: it is written at full precision but parsed back up to
+    /// 1 ULP off, so roughly 10% of the float fields in `Taconite` do not survive the round trip.
+    #[test]
+    fn test_to_and_from_file_for_network() {
+        let network_file_path = project_root::get_project_root()
+            .unwrap()
+            .join("python/altrios/resources/networks/Taconite.msgpack");
+        let network = Network::from_file(network_file_path, false).unwrap();
+        let tempdir = tempfile::tempdir().unwrap();
+
+        for extension in ["yaml", "msgpack"] {
+            let temp_file_path = tempdir.path().join(format!("network.{extension}"));
+            network
+                .to_file(&temp_file_path)
+                .unwrap_or_else(|err| panic!("failed writing `{extension}`: {err}"));
+            let roundtripped = Network::from_file(&temp_file_path, false)
+                .unwrap_or_else(|err| panic!("failed reading `{extension}`: {err}"));
+            assert_eq!(
+                roundtripped, network,
+                "round trip through `{extension}` did not preserve the network"
+            );
+        }
+
+        tempdir.close().unwrap();
+    }
+
     #[test]
     fn test_set_speed_set_from_train_type() {
         let network_file_path = project_root::get_project_root()
             .unwrap()
-            .join("python/altrios/resources/networks/Taconite.yaml");
+            .join("python/altrios/resources/networks/Taconite.msgpack");
         let network_speed_sets = {
             let network = Network::from_file(network_file_path, false);
             if let Err(err) = &network {

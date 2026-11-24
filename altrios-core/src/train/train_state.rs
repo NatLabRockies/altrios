@@ -3,7 +3,7 @@ use crate::track::PathTpc;
 
 #[serde_api]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, HistoryVec)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// For `SetSpeedTrainSim`, it is typically best to use the default for this.
 pub struct InitTrainState {
     pub time: TrackedState<si::Time>,
@@ -70,7 +70,7 @@ impl InitTrainState {
 #[derive(
     Debug, Clone, Serialize, Deserialize, HistoryVec, PartialEq, StateMethods, SetCumulative,
 )]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct TrainState {
     /// time since user-defined datum
     pub time: TrackedState<si::Time>,

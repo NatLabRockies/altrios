@@ -2,7 +2,7 @@ use crate::imports::*;
 
 #[serde_api]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, StateMethods, SetCumulative)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 // brake propagation rate is ~800 ft/s (about speed of sound)
 // ramp up duration is ~30 s
 pub struct FricBrake {
@@ -123,7 +123,7 @@ impl FricBrake {
     StateMethods,
     SetCumulative,
 )]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct FricBrakeState {
     /// index counter
     pub i: TrackedState<usize>,

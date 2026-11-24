@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[repr(u8)]
-#[cfg_attr(feature = "pyo3", pyclass(eq))]
+#[cfg_attr(feature = "pyo3", pyclass(eq, from_py_object))]
 /// Enum with variants representing train types
 pub enum TrainType {
     #[default]
@@ -32,7 +32,7 @@ impl ObjState for TrainType {
 
 #[serde_api]
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct SpeedSet {
     pub speed_limits: Vec<SpeedLimit>,
 
@@ -49,7 +49,7 @@ impl SerdeAPI for SpeedSet {}
 
 #[serde_api]
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Helper struct to create [SpeedSet] from deprecated data format
 pub struct OldSpeedSet {
     pub speed_limits: Vec<SpeedLimit>,

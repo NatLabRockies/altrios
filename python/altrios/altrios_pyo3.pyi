@@ -169,6 +169,54 @@ class ElectricDrivetrainStateHistoryVec(SerdeAPI):
     def __copy__(self) -> Self: ...
     def __len__(self) -> int: ...
 
+
+class CatenaryInterface(SerdeAPI):
+    history: CatenaryInterfaceStateHistoryVec
+    pwr_out_max_watts: float
+    save_interval: Optional[int]
+    state: CatenaryInterfaceState
+    @classmethod
+    def __init__(cls) -> None: ...
+    def clone(self) -> Self: ...
+    @classmethod
+    def default(cls) -> Self: ...
+    def __copy__(self) -> Self: ...
+
+class CatenaryInterfaceState(SerdeAPI):
+    energy_elec_in_joules: float
+    energy_loss_joules: float
+    energy_line_loss_joules: float
+    i: int
+    pwr_elec_in_watts: float
+    pwr_elec_in_max_watts: float
+    pwr_loss_watts: float
+    pwr_line_loss_watts: float
+    pwr_elec_out_max_watts: float
+    @classmethod
+    def __init__(cls) -> None: ...
+    def clone(self) -> Self: ...
+    @classmethod
+    def default(cls) -> Self: ...
+    def __copy__(self) -> Self: ...
+
+class CatenaryInterfaceStateHistoryVec(SerdeAPI):
+    energy_elec_in_joules: list[float]
+    energy_loss_joules: list[float]
+    energy_line_loss_joules: list[float]
+    i: list[int]
+    pwr_elec_in_watts: list[float]
+    pwr_elec_in_max_watts: list[float]
+    pwr_loss_watts: list[float]
+    pwr_line_loss_watts: list[float]
+    pwr_elec_out_max_watts: list[float]
+    @classmethod
+    def __init__(cls) -> None: ...
+    def clone(self) -> Self: ...
+    @classmethod
+    def default(cls) -> Self: ...
+    def __copy__(self) -> Self: ...
+    def __len__(self) -> int: ...
+
 class FuelConverter(SerdeAPI):
     eta_interp: list[float]
     eta_max: float
@@ -305,6 +353,13 @@ class ConventionalLoco(SerdeAPI):
     edrv: ElectricDrivetrain
 
 @dataclass
+class DualModeLoco(SerdeAPI):
+    fc: FuelConverter
+    gen: Generator
+    edrv: ElectricDrivetrain
+    cat_int: CatenaryInterface
+
+@dataclass
 class HybridLoco(SerdeAPI):
     fuel_converter: FuelConverter
     generator: Generator
@@ -315,6 +370,7 @@ class HybridLoco(SerdeAPI):
 class BatteryElectricLoco(SerdeAPI):
     res: ReversibleEnergyStorage
     edrv: ElectricDrivetrain
+    cat_int: Optional[CatenaryInterface]
 
 @dataclass
 class DummyLoco(SerdeAPI): ...
@@ -335,11 +391,15 @@ class Locomotive(SerdeAPI):
     @classmethod
     def __new__(
         cls,
-        loco_type: Union[ConventionalLoco, HybridLoco, BatteryElectricLoco, DummyLoco],
+        loco_type: Union[ConventionalLoco, DualModeLoco, HybridLoco, BatteryElectricLoco, DummyLoco],
         loco_params: LocoParams,
     ): ...
     @classmethod
     def default_battery_electric_loco(cls) -> Locomotive: ...
+    @classmethod
+    def default_battery_electric_loco_with_cat(
+        cls, pwr_out_max_watts: float
+    ) -> Locomotive: ...
     @classmethod
     def build_conventional_loco(
         cls,
@@ -656,7 +716,12 @@ class CatPowerLimit(SerdeAPI):
     offset_start: float
     offset_end: float
     power_limit: float
+    resistance_to_source: float
+    reactance_to_source: float
+    voltage: float
     district_id: Optional[str]
+    district_id_secondary: Optional[str]
+    feed_fraction: Optional[float]
 
 class TrainParams(SerdeAPI):
     length: float
@@ -747,6 +812,12 @@ class SpeedLimitTrainSimVec(SerdeAPI):
     @classmethod
     def default(cls) -> Self: ...
     def tolist(self) -> List[SpeedLimitTrainSim]: ...
+    def walk_timed_paths(
+        self,
+        network: Network,
+        timed_paths: List["TimedLinkPath"],
+        parallelize: bool = True,
+    ): ...
     def set_save_interval(self, save_interval: int): ...
 
 @dataclass
@@ -879,14 +950,6 @@ def build_speed_limit_train_sims(
     simulation_days: Optional[int],
     scenario_year: Optional[int],
 ) -> SpeedLimitTrainSimVec: ...
-def run_speed_limit_train_sims(
-    speed_limit_train_sim_vec: SpeedLimitTrainSimVec,
-    network: List[Link],
-    train_consist_plan: pl.DataFrame,
-    loco_pool: pl.DataFrame,
-    refuel_facilities: pl.DataFrame,
-    timed_paths: List[List[LinkIdxTime]],
-) -> Tuple[SpeedLimitTrainSimVec, pl.DataFrame]: ...
 def run_dispatch(
     network: List[Link],
     speed_limit_train_sims: SpeedLimitTrainSimVec,

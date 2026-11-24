@@ -1,0 +1,5 @@
+Location ID,Link Index,Offset (m),Is Front End,Grid Emissions Region,Electricity Price Region,Liquid Fuel Price Region
+West_Terminal,507,0,FALSE,SRSO,GA,GA
+West_Terminal,241,0,FALSE,SRSO,GA,GA
+East_Terminal,444,0,FALSE,SRSO,GA,GA
+East_Terminal,178,0,FALSE,SRSO,GA,GA

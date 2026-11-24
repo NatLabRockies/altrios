@@ -3,7 +3,7 @@ use crate::imports::*;
 /// Struct containing elevation for a particular offset w.r.t. `Link`
 #[serde_api]
 #[derive(Clone, Copy, Default, Debug, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct Elev {
     #[serde(alias = "offset")]
     pub offset: si::Length,

@@ -1,5 +1,5 @@
 Location ID,Link Index,Offset (m),Is Front End,Grid Emissions Region,Electricity Price Region,Liquid Fuel Price Region
-A,1,0,FALSE,MROWc,MN,MN
-A,8,0,FALSE,MROWc,MN,MN
-B,5,0,FALSE,MROWc,MN,MN
-B,4,0,FALSE,MROWc,MN,MN
+A,1,0,FALSE,MISO_North,MN,MN
+A,8,0,FALSE,MISO_North,MN,MN
+B,5,0,FALSE,MISO_North,MN,MN
+B,4,0,FALSE,MISO_North,MN,MN

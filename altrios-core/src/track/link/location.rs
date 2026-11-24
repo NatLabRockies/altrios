@@ -5,7 +5,7 @@ use super::link_idx::*;
 
 #[serde_api]
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct Location {
     /// User-defined name of the location/terminal
     #[serde(rename = "Location ID")]
@@ -36,7 +36,7 @@ pub type LocationMap = HashMap<String, Vec<Location>>;
 #[cfg(feature = "pyo3")]
 #[cfg_attr(feature = "pyo3", pyfunction(name = "import_locations"))]
 pub fn import_locations_py(filepath: &Bound<PyAny>) -> anyhow::Result<LocationMap> {
-    import_locations(PathBuf::extract_bound(filepath)?)
+    import_locations(filepath.extract::<PathBuf>()?)
 }
 
 pub fn import_locations<P: AsRef<Path>>(filepath: P) -> anyhow::Result<LocationMap> {

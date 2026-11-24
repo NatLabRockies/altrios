@@ -2,7 +2,7 @@ use super::{friction_brakes::FricBrake, train_imports::*};
 
 #[serde_api]
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct BrakingPoint {
     pub offset: si::Length,
     pub speed_limit: si::Velocity,
@@ -27,11 +27,20 @@ impl ObjState for BrakingPoint {
 
 #[serde_api]
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct BrakingPoints {
     points: Vec<BrakingPoint>,
     /// index within [Self::points]
     idx_curr: usize,
+    /// tolerance above speed limit for speed limit violations -- i.e. if the
+    /// speed limit is 30 mph and `speed_limit_tol` is 10 mph (the default),
+    /// then the allowed speed limit when checking is 40 mph
+    #[serde(default = "def_speed_lim_tol")]
+    speed_limit_tol: si::Velocity,
+}
+
+fn def_speed_lim_tol() -> si::Velocity {
+    10.0 * uc::MPH
 }
 
 impl Init for BrakingPoints {}
@@ -45,13 +54,13 @@ impl BrakingPoints {
     /// - offset: location along the current TPC path since train started moving
     /// - speed: current train speed
     /// - adj_ramp_up_time: corrected ramp up time to account for approximately
-    ///     linear brake build up
+    ///   linear brake build up
     pub fn calc_speeds(
         &mut self,
         offset: si::Length,
         speed: si::Velocity,
         adj_ramp_up_time: si::Time,
-    ) -> (si::Velocity, si::Velocity) {
+    ) -> anyhow::Result<(si::Velocity, si::Velocity)> {
         if self.points.first().unwrap().offset <= offset {
             self.idx_curr = 0;
         } else {
@@ -59,8 +68,8 @@ impl BrakingPoints {
                 self.idx_curr -= 1;
             }
         }
-        assert!(
-            speed <= self.points[self.idx_curr].speed_limit,
+        ensure!(
+            speed <= self.points[self.idx_curr].speed_limit + self.speed_limit_tol,
             "Speed limit violated! idx_curr={:?}, offset={:?}, speed={speed:?}, speed_limit={:?}, speed_target={:?}",
             self.idx_curr,
             self.points[self.idx_curr].offset,
@@ -78,7 +87,7 @@ impl BrakingPoints {
             idx -= 1;
         }
 
-        (self.points[self.idx_curr].speed_limit, speed_target)
+        Ok((self.points[self.idx_curr].speed_limit, speed_target))
     }
 
     /// Any time [PathTpc] is updated, everything is recalculated

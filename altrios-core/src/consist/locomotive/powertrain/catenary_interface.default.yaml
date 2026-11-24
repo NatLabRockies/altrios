@@ -1,0 +1,2 @@
+pwr_out_max_watts: 5e6 # rated power output of catenary interface (likely limited by transformer capacity)
+save_interval: # if left blank defaults to no saving; if provided saves every nth time step

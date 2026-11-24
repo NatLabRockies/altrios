@@ -1224,3 +1224,14 @@ vehicle_average_times.txt
 avg_time_per_train.txt
 crane_work_log.txt
 hostler_work_log.txt
+
+# The bundled RES data under resources/powertrains is tracked deliberately.
+# Un-ignore it so packaging tools that honor .gitignore (maturin) ship it in wheels.
+!python/altrios/resources/powertrains/**/*.xlsx
+
+# Network builder: regenerated results and OSM download cache
+applications/network_builder/results/
+applications/network_builder/networks/
+/osmium_cache
+/networks/*
+!/networks/spokane_lethbridge_local.osm.xml

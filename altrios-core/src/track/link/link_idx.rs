@@ -5,7 +5,7 @@ use std::io::prelude::*;
 
 #[serde_api]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// See [supplementary documentation.](https://natlabrockies.github.io/altrios/doc/rail-network.html)
 pub struct LinkIdx {
     /// index of link within network
@@ -106,7 +106,7 @@ impl ObjState for LinkIdx {
 
 #[serde_api]
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Struct that contains a `Vec<LinkIdx>` for the purpose of providing `SerdeAPI` for
 /// `Vec<LinkIdx>` in Python
 pub struct LinkPath(pub Vec<LinkIdx>);
@@ -116,12 +116,12 @@ impl LinkPath {
     #[staticmethod]
     #[pyo3(name = "from_csv_file")]
     fn from_csv_file_py(filepath: &Bound<PyAny>) -> anyhow::Result<Self> {
-        Self::from_csv_file(PathBuf::extract_bound(filepath)?)
+        Self::from_csv_file(filepath.extract::<PathBuf>()?)
     }
 
     #[pyo3(name = "to_csv_file")]
     fn to_csv_file_py(&self, filepath: &Bound<PyAny>) -> anyhow::Result<()> {
-        self.to_csv_file(PathBuf::extract_bound(filepath)?)
+        self.to_csv_file(filepath.extract::<PathBuf>()?)
     }
 }
 

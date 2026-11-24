@@ -46,7 +46,7 @@ conv_cal_mod_dict, conv_cal_errs = utils.get_results(
     plotly=plotly,
     pyplot=pyplot,
     show_pyplot=show_pyplot,
-    cal_plot_save_path,
+    plot_save_dir=cal_plot_save_path,
 )
 # conv_cal_mod_dict, conv_cal_errs = get_conv_cal_results(conv_default_params, True)
 
@@ -57,7 +57,7 @@ conv_val_mod_dict, conv_val_errs = utils.get_results(
     plotly=plotly,
     pyplot=pyplot,
     show_pyplot=show_pyplot,
-    val_plot_save_path,
+    plot_save_dir=val_plot_save_path,
 )
 # conv_val_mod_dict, conv_val_errs = get_conv_val_results(conv_default_params, True)
 

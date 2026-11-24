@@ -60,7 +60,11 @@ fn check_deadlock(
     #[warn(clippy::mut_range_bound)]
     for (idx, train_disp) in train_disps.iter_mut().enumerate().skip(train_idx_begin) {
         if !train_disp.is_finished() {
-            if idx != train_idx_moved.idx() {
+            // Skipping trains the moved train cannot reach is what keeps this loop from
+            // being O(steps x trains) of real path-search work.
+            if idx != train_idx_moved.idx()
+                && train_disp.may_be_affected(train_idx_moved, &link_idxs_blocked)
+            {
                 match train_disp.update_free_path(
                     train_idx_moved,
                     &link_idxs_blocked,
@@ -125,18 +129,7 @@ pub fn run_dispatch<N: AsRef<[Link]>>(
         )?);
     }
 
-    let mut link_disp_auths = vec![
-        vec![DispAuth {
-            arrive_entry: f64::NEG_INFINITY * uc::S,
-            arrive_exit: f64::NEG_INFINITY * uc::S,
-            clear_entry: f64::NEG_INFINITY * uc::S,
-            clear_exit: f64::NEG_INFINITY * uc::S,
-            offset_front: f64::INFINITY * uc::M,
-            offset_back: f64::INFINITY * uc::M,
-            train_idx: None,
-        }];
-        network.len()
-    ];
+    let mut link_disp_auths = vec![vec![DispAuth::unoccupied()]; network.len()];
     let mut links_blocked = vec![None; network.len()];
     let mut train_idx_begin = 1usize;
 
@@ -251,10 +244,35 @@ pub fn run_dispatch<N: AsRef<[Link]>>(
         bail!("The following trains got stuck! {:?}", train_idxs_blocked);
     }
 
-    Ok(train_disps[1..]
+    let timed_paths = train_disps[1..]
         .iter()
         .map(|x| x.calc_timed_path())
-        .collect::<Vec<Vec<LinkIdxTime>>>())
+        .collect::<Vec<Vec<LinkIdxTime>>>();
+
+    // A pass time is only ever unset when a train never actually traversed the node, so a
+    // non-finite value here means the timetable is wrong rather than merely odd. Bailing
+    // keeps it from flowing silently into `walk_timed_path` and the metric calculator.
+    // Reachable only with multiple trains, since it requires meet-pass conflict resolution.
+    let mut trains_bad = vec![];
+    for (idx, timed_path) in timed_paths.iter().enumerate() {
+        let count = timed_path
+            .iter()
+            .filter(|x| !x.time.value.is_finite())
+            .count();
+        if count > 0 {
+            trains_bad.push((idx + 1, count));
+        }
+    }
+    if !trains_bad.is_empty() {
+        bail!(
+            "Dispatch produced non-finite pass times for {} of {} trains (train_idx, count): {:?}",
+            trains_bad.len(),
+            timed_paths.len(),
+            trains_bad,
+        );
+    }
+
+    Ok(timed_paths)
 }
 
 #[cfg(feature = "pyo3")]
@@ -303,7 +321,7 @@ mod test_dispatch {
     fn test_simple_dispatch() {
         let network_file_path = project_root::get_project_root()
             .unwrap()
-            .join("python/altrios/resources/networks/Taconite.yaml");
+            .join("python/altrios/resources/networks/Taconite.msgpack");
         let network = {
             let network = Network::from_file(network_file_path, false);
             if let Err(err) = &network {

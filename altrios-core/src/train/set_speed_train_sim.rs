@@ -3,7 +3,7 @@ use super::train_imports::*;
 
 #[serde_api]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct SpeedTrace {
     /// simulation time
     pub time: Vec<si::Time>,
@@ -32,7 +32,7 @@ impl SpeedTrace {
     #[staticmethod]
     #[pyo3(name = "from_csv_file")]
     fn from_csv_file_py(filepath: &Bound<PyAny>) -> anyhow::Result<Self> {
-        Self::from_csv_file(PathBuf::extract_bound(filepath)?)
+        Self::from_csv_file(filepath.extract::<PathBuf>()?)
     }
 
     fn __len__(&self) -> usize {
@@ -41,7 +41,7 @@ impl SpeedTrace {
 
     #[pyo3(name = "to_csv_file")]
     fn to_csv_file_py(&self, filepath: &Bound<PyAny>) -> anyhow::Result<()> {
-        self.to_csv_file(PathBuf::extract_bound(filepath)?)
+        self.to_csv_file(filepath.extract::<PathBuf>()?)
     }
 
     #[staticmethod]
@@ -200,7 +200,7 @@ pub struct SpeedTraceElement {
 
 #[serde_api]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Train simulation in which speed is prescribed.  Note that this is not guaranteed to
 /// produce identical results to [super::SpeedLimitTrainSim] because of differences in braking
 /// controls but should generally be very close (i.e. error in cumulative fuel/battery energy
@@ -344,10 +344,6 @@ impl SetSpeedTrainSim {
                     >= si::Velocity::ZERO
             )
         );
-        self.loco_con
-            .state
-            .pwr_cat_lim
-            .mark_fresh(|| format_dbg!())?;
         // not used in set_speed_train_sim
         self.state.speed_limit.mark_fresh(|| format_dbg!())?;
         // not used in set_speed_train_sim
@@ -360,11 +356,13 @@ impl SetSpeedTrainSim {
         self.state.mass_freight.mark_fresh(|| format_dbg!())?;
         // TODO: update this if length ever becomes dynamic
         self.state.length.mark_fresh(|| format_dbg!())?;
-        // set the catenary power limit.  I'm assuming it is 0 at this point.
-        // self.loco_con.set_cat_power_limit(
-        //     &self.path_tpc,
-        //     *self.state.offset.get_fresh(|| format_dbg!())?,
-        // )?;
+        // Set the catenary power limit from the position at the start of this
+        // step: `offset` is not incremented until later in `solve_step`, so no
+        // fresh value exists yet. Matches `SpeedLimitTrainSim::solve_step`.
+        self.loco_con.set_cat_power_limit_from_path(
+             &self.path_tpc,
+             *self.state.offset.get_stale(|| format_dbg!())?,
+        )?;
         // set aux power loads.  this will be calculated in the locomotive model and be loco type dependent.
         self.loco_con.set_pwr_aux(Some(true))?;
         let train_mass = Some(self.state.mass_compound().with_context(|| format_dbg!())?);

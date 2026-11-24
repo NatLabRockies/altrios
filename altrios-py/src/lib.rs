@@ -10,7 +10,6 @@ pub use pyo3::exceptions::{
 };
 pub use pyo3::prelude::*;
 pub use pyo3::types::PyType;
-pub use pyo3_polars::PyDataFrame;
 
 // TODO: look into making stuff that gets added below have some module hierarchy that emulates the Rust module structure
 
@@ -22,10 +21,14 @@ fn altrios_pyo3(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<ConsistState>()?;
     m.add_class::<ConsistStateHistoryVec>()?;
     m.add_class::<ConventionalLoco>()?;
+    m.add_class::<DualModeLoco>()?;
     m.add_class::<DummyLoco>()?;
     m.add_class::<ElectricDrivetrain>()?;
     m.add_class::<ElectricDrivetrainState>()?;
     m.add_class::<ElectricDrivetrainStateHistoryVec>()?;
+    m.add_class::<CatenaryInterface>()?;
+    m.add_class::<CatenaryInterfaceState>()?;
+    m.add_class::<CatenaryInterfaceStateHistoryVec>()?;
     m.add_class::<Elev>()?;
     m.add_class::<EstTimeNet>()?;
     m.add_class::<FuelConverter>()?;
@@ -77,6 +80,5 @@ fn altrios_pyo3(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(make_est_times_py, m)?)?;
     m.add_function(wrap_pyfunction!(run_dispatch_py, m)?)?;
     m.add_function(wrap_pyfunction!(check_od_pair_valid, m)?)?;
-    m.add_function(wrap_pyfunction!(run_speed_limit_train_sims, m)?)?;
     Ok(())
 }

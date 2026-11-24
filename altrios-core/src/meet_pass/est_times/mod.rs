@@ -63,7 +63,7 @@ impl Default for EstTime {
 
 #[serde_api]
 #[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct EstTimeNet {
     pub val: Vec<EstTime>,
 }
@@ -99,8 +99,92 @@ pub fn check_od_pair_valid(
     }
 }
 
-/// Get link indexes that lead to the destination (CURRENTLY ALLOWS LOOPS THAT
-/// ARE TOO SMALL TO FIT THE TRAIN!)
+/// Collect previous links needed to accommodate train length when placing train at origin.
+///
+/// When a train is placed at an origin link, the back of the train may extend beyond
+/// the beginning of that link. This function collects previous links until there is
+/// enough total length to contain the entire train, or returns an error if the train
+/// is too long to fit on the available track.
+///
+/// # Arguments
+/// * `origin_link_idx` - The link where the train's front will be placed
+/// * `train_length` - The total length of the train
+/// * `network` - The network of links
+///
+/// # Returns
+/// A vector of link indices starting from the furthest previous link and ending with
+/// the origin link, ordered so the train can be placed with its front at the origin.
+fn get_links_for_train_placement(
+    origin_link_idx: LinkIdx,
+    train_length: si::Length,
+    network: &[Link],
+) -> anyhow::Result<Vec<LinkIdx>> {
+    let origin_link = &network[origin_link_idx.idx()];
+
+    // If the train fits on the origin link alone, just return it
+    if origin_link.length >= train_length {
+        return Ok(vec![origin_link_idx]);
+    }
+
+    // We need to collect previous links to accommodate the train
+    let mut link_path = Vec::with_capacity(8);
+    link_path.push(origin_link_idx);
+
+    let mut total_length = origin_link.length;
+    let mut current_link_idx = origin_link_idx;
+
+    // Keep adding previous links until we have enough length
+    while total_length < train_length {
+        let current_link = &network[current_link_idx.idx()];
+
+        // Get the previous link (prefer idx_prev over idx_prev_alt)
+        let prev_link_idx = if current_link.idx_prev.is_real() {
+            current_link.idx_prev
+        } else if current_link.idx_prev_alt.is_real() {
+            current_link.idx_prev_alt
+        } else {
+            // No more previous links available
+            bail!(
+                "Train too long for initial route: train length ({:.2} m) exceeds available \
+                track length ({:.2} m). The origin link '{}' and its previous links do not \
+                provide enough length to place the train. Consider using a different origin \
+                or reducing train length.",
+                train_length.get::<si::meter>(),
+                total_length.get::<si::meter>(),
+                origin_link_idx
+            );
+        };
+
+        let prev_link = &network[prev_link_idx.idx()];
+        total_length += prev_link.length;
+        link_path.push(prev_link_idx);
+        current_link_idx = prev_link_idx;
+    }
+
+    // Reverse the path so it goes from previous links to origin
+    link_path.reverse();
+
+    Ok(link_path)
+}
+
+/// Build the set of links from which a destination is still reachable.
+///
+/// Performs a BACKWARD reachability flood starting from every destination link,
+/// walking `idx_prev`/`idx_prev_alt` and popping from a stack (traversal order is
+/// therefore depth-first, though only set membership matters). [`make_est_times`]
+/// uses the returned set to prune successor links that cannot reach a destination.
+/// NOTE: the set includes sidings/alternate routes that reach a destination — it does
+/// NOT distinguish mainline from siding.
+///
+/// # Arguments
+/// * `origs` - candidate origin locations (filtered/reordered on return).
+/// * `dests` - destination locations; their links seed the flood.
+/// * `links` - the rail network links.
+///
+/// # Returns
+/// `(reachable_link_idxs, origs_that_can_reach_a_dest)`.
+///
+/// CURRENTLY ALLOWS LOOPS THAT ARE TOO SMALL TO FIT THE TRAIN!
 pub fn get_link_idx_options(
     origs: &[Location],
     dests: &[Location],
@@ -163,8 +247,19 @@ pub fn get_link_idx_options(
     Ok((link_idx_set, origs))
 }
 
-/// Convert sequence of train states to sequence of estimated times
-/// that will be added to the estimated time network.
+/// Convert a segment of simulated train `movement` (states over time) into the sequence
+/// of `EstTime` nodes to append to the network.
+///
+/// Emits an Arrive event when the train's HEAD reaches each link point and a Clear event
+/// when its TAIL clears it (whichever boundary is passed next), interpolating the
+/// pass-through speed and time between movement samples. Output is written into
+/// `est_times_add` (cleared first).
+///
+/// # Arguments
+/// * `est_times_add` - output buffer of freshly built `EstTime` nodes.
+/// * `movement` - simulated states (offset/speed/time) for this path segment.
+/// * `link_pts` - link boundary points (offsets) that the head/tail cross.
+/// * `length` - train length, used to offset tail (Clear) events from head (Arrive) events.
 fn update_est_times_add(
     est_times_add: &mut Vec<EstTime>,
     movement: &[SimpleState],
@@ -242,9 +337,20 @@ fn update_est_times_add(
     Ok(())
 }
 
-/// Insert a new estimated time into the network.
-/// Insertion may not occur if the estimated time would be a duplicate.
-/// Returns true if insertion occurred.
+/// Insert one estimated-time node into the shared DAG, or reuse an existing equivalent one.
+///
+/// `est_alt` acts as the caller's INSERTION CURSOR: it records where the current sim is
+/// attaching into the DAG. Starting from `est_alt.idx_prev`, this walks the `idx_next` /
+/// `idx_next_alt` chain looking for a node with the same `link_event` and a matching speed
+/// (`|Δspeed| < SPEED_DIFF_JOIN`):
+/// * if the slot after the cursor is empty, `est_insert` is appended and linked in;
+/// * if an equivalent node already exists, it is REUSED (no insertion) and the cursor
+///   advances onto it — this is how divergent sims share common prefixes/suffixes;
+/// * otherwise a Fake alternate node is created so the new event can hang off an
+///   `idx_next_alt` branch.
+/// `link_event_map` indexes node idxs by `link_event` for later join lookups.
+///
+/// Returns true iff a NEW node was actually inserted (i.e. the path split here).
 fn insert_est_time(
     est_times: &mut Vec<EstTime>,
     est_alt: &mut EstTime,
@@ -533,6 +639,33 @@ fn add_new_join_paths(
 /// * The provided origins or next link options are invalid.
 /// * The path is unexpectedly truncated.
 /// * The simulation fails internally while updating movements or extending paths.
+///
+/// # Algorithm notes / gotchas
+///
+/// * This is PATH ENUMERATION, not a shortest-path search (no Dijkstra/A*). Every
+///   route from an origin to a destination is explored. `saved_sims` is used as a
+///   STACK (`pop`), so branches are walked depth-first.
+/// * At each link the two candidate successors come straight from the NETWORK topology
+///   (`Link::idx_next`, `Link::idx_next_alt`); they are NOT recomputed here. When both
+///   can still reach a destination, the current sim continues on `idx_next` and a CLONED
+///   sim is pushed onto `saved_sims` to explore `idx_next_alt` later. This is how every
+///   destination-reaching route — INCLUDING SIDINGS — ends up in the network. The
+///   "shortest path" wording on `EstTime::idx_next` is the intended through-route
+///   convention, not a guarantee, and does not exclude sidings.
+/// * The `idx_next`/`idx_next_alt`/`idx_prev`/`idx_prev_alt` fields on `EstTime` are
+///   `EstIdx` values indexing into the `est_times` Vec (i.e. NODE indices in the output
+///   DAG), NOT `LinkIdx`. The actual link is in `link_event.link_idx`.
+/// * Nodes 0 and 1 are Fake sentinels: node 0 is the global head and node 1 carries the
+///   departure time; the origin nodes hang off node 1 via an `idx_next_alt` chain.
+/// * `est_alt` is a per-sim INSERTION CURSOR tracking where this sim currently attaches
+///   into the shared DAG; `insert_est_time` walks/extends `idx_next_alt` chains from it.
+/// * `has_split` flips to true once this sim diverges from already-inserted nodes; only
+///   then are JOINs attempted. A join merges this sim back into an existing branch when
+///   both a "space match" (aligned link events) and a "speed match"
+///   (`|Δspeed| < SPEED_DIFF_JOIN`) hold, turning the tree into a reconverging DAG and
+///   ending that sim's `'path` loop early.
+/// * After enumeration, `update_times_forward`/`update_times_backward` fill `time_sched`,
+///   and a final pass asserts the DAG's prev/next links are consistent.
 pub fn make_est_times<N: AsRef<[Link]>>(
     mut speed_limit_train_sim: SpeedLimitTrainSim,
     network: N,
@@ -546,11 +679,20 @@ pub fn make_est_times<N: AsRef<[Link]>>(
         get_link_idx_options(&speed_limit_train_sim.origs, dests, network)
             .with_context(|| format_dbg!())?;
     // We'll store our estimated times and a map of link events here.
-    let mut est_times = Vec::with_capacity(network.len() * 10);
+    //
+    // Size these from the links this train can actually reach, not from the whole network.
+    // Only links in `link_idx_options` are ever traversed, and each contributes at most an
+    // Arrive and a Clear event, so twice that count bounds the distinct link events. Sizing
+    // from `network.len()` over-reserved badly on large networks: Winnipeg-Chicago (60,931
+    // links) reserved ~609k `EstTime` and a bucket array to match, per train, against tens
+    // of thousands actually used. Capacity is only a performance hint, so this cannot change
+    // results.
+    let link_event_bound = link_idx_options.len() * 2 + origs.len() * 2 + 2;
+    let mut est_times = Vec::with_capacity(link_event_bound * 4);
     let mut consist_out = None;
     let mut saved_sims: Vec<SavedSim> = vec![];
     let mut link_event_map =
-        LinkEventMap::with_capacity_and_hasher(est_times.capacity(), Default::default());
+        LinkEventMap::with_capacity_and_hasher(link_event_bound, Default::default());
     // The departure time for all initial events
     let time_depart = *speed_limit_train_sim
         .state
@@ -558,8 +700,10 @@ pub fn make_est_times<N: AsRef<[Link]>>(
         .get_fresh(|| format_dbg!())?;
 
     // -----------------------------------------------------------------------
-    // Push initial "fake" nodes.
-    // These help define the start of our `EstTime` sequence.
+    // Push initial "fake" (sentinel) nodes that bracket the start of the DAG.
+    // Node 0 = global head sentinel (points forward to node 1). Node 1 = departure
+    // sentinel carrying `time_depart`; each origin is attached off node 1 via an
+    // `idx_next_alt` chain below. All `EstIdx` references elsewhere index into this Vec.
     // -----------------------------------------------------------------------
     est_times.push(EstTime {
         idx_next: 1,
@@ -637,8 +781,12 @@ pub fn make_est_times<N: AsRef<[Link]>>(
         saved_sims.push(SavedSim {
             train_sim: {
                 let mut train_sim = Box::new(speed_limit_train_sim.clone());
+                // Get the links needed to place the train (may include previous links if train is longer than origin link)
+                let train_length = *train_sim.state.length.get_fresh(|| format_dbg!())?;
+                let link_path = get_links_for_train_placement(orig.link_idx, train_length, network)
+                    .with_context(|| format_dbg!())?;
                 train_sim
-                    .extend_path_tpc(network, &[orig.link_idx])
+                    .extend_path_tpc(network, &link_path)
                     .with_context(|| format_dbg!())?;
                 train_sim
             },
@@ -669,6 +817,9 @@ pub fn make_est_times<N: AsRef<[Link]>>(
     // Main loop: process each saved simulation until `saved_sims` is empty.
     // -----------------------------------------------------------------------
     while let Some(mut sim) = saved_sims.pop() {
+        // `has_split` becomes true once this sim's path diverges from nodes already in the
+        // shared DAG; only after splitting do we try to JOIN back into an existing branch
+        // (space + speed match). Popping the stack makes branch traversal depth-first.
         let mut has_split = false;
         ensure!(
             sim.train_sim.link_idx_last().unwrap().is_real(),
@@ -757,7 +908,12 @@ pub fn make_est_times<N: AsRef<[Link]>>(
                     "Link idx next cannot be fake when making est times! link_idx_prev={link_idx_prev:?}"
                 );
 
-                // Collect the valid links that will allow reaching destination
+                // Successors come from the NETWORK topology (idx_next, idx_next_alt);
+                // keep only those from which a destination is still reachable. A 2-way
+                // split below means BOTH branches (e.g. mainline AND a siding) can reach
+                // the destination: the current sim takes idx_next and a CLONED sim is
+                // pushed onto `saved_sims` for idx_next_alt. That is how sidings enter the
+                // est-time network — they are not filtered out here or anywhere else.
                 let link_idxs_next_valid = [link_idx_next, link_idx_next_alt]
                     .into_iter()
                     .filter(|link_idx| link_idx_options.contains(link_idx))
@@ -903,9 +1059,153 @@ pub fn make_est_times_py(
     };
 
     let path_for_failed_sim = match path_for_failed_sim {
-        Some(pffs) => Some(PathBuf::extract_bound(pffs)?),
+        Some(pffs) => Some(pffs.extract::<PathBuf>()?),
         None => None,
     };
 
     make_est_times(speed_limit_train_sim, network, path_for_failed_sim)
+}
+
+#[cfg(test)]
+mod test_train_placement {
+    use super::*;
+    use crate::track::link::network::Network;
+
+    /// Helper function to get the project resources path
+    fn get_resources_path() -> PathBuf {
+        project_root::get_project_root()
+            .unwrap()
+            .join("python/altrios/resources")
+    }
+
+    /// Test case 1: get_links_for_train_placement returns single link when train fits
+    /// Link 71 (Minneapolis origin) is ~2682m, train is 1800m - should return just the origin link.
+    #[test]
+    fn test_get_links_for_train_placement_fits_on_single_link() {
+        let resources = get_resources_path();
+
+        // Load network
+        let network = Network::from_file(resources.join("networks/Taconite-NoBalloon.yaml"), false)
+            .expect("Failed to load network");
+        let links = &network.1; // Get the Vec<Link> from the Network tuple
+
+        let origin_link_idx = LinkIdx::new(71); // Minneapolis
+        let train_length = 1800.0 * uc::M; // 100 cars * 18m
+
+        let result = get_links_for_train_placement(origin_link_idx, train_length, links);
+
+        assert!(
+            result.is_ok(),
+            "Should succeed when train fits on origin link"
+        );
+        let link_path = result.unwrap();
+        assert_eq!(link_path.len(), 1, "Should return just the origin link");
+        assert_eq!(
+            link_path[0], origin_link_idx,
+            "Should return the origin link"
+        );
+    }
+
+    /// Test case 2: Train longer than initial link with no previous links available
+    /// Link 71 (Minneapolis origin) has idx_prev: 0, so a train longer than 2682m should fail.
+    #[test]
+    fn test_get_links_for_train_placement_too_long_no_previous() {
+        let resources = get_resources_path();
+
+        // Load network
+        let network = Network::from_file(resources.join("networks/Taconite-NoBalloon.yaml"), false)
+            .expect("Failed to load network");
+        let links = &network.1;
+
+        let origin_link_idx = LinkIdx::new(71); // Minneapolis
+        let train_length = 3000.0 * uc::M; // Longer than the ~2682m link
+
+        let result = get_links_for_train_placement(origin_link_idx, train_length, links);
+
+        assert!(
+            result.is_err(),
+            "Should fail when train is too long and no previous links available"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Train too long"),
+            "Error should mention 'Train too long', got: {}",
+            err_msg
+        );
+    }
+
+    /// Test case 3: Very long train (500 cars = 9000m)
+    /// Should definitely fail as there's not enough track.
+    #[test]
+    fn test_get_links_for_train_placement_500_cars() {
+        let resources = get_resources_path();
+
+        // Load network
+        let network = Network::from_file(resources.join("networks/Taconite-NoBalloon.yaml"), false)
+            .expect("Failed to load network");
+        let links = &network.1;
+
+        let origin_link_idx = LinkIdx::new(71); // Minneapolis
+        let train_length = 9000.0 * uc::M; // 500 cars * 18m
+
+        let result = get_links_for_train_placement(origin_link_idx, train_length, links);
+
+        assert!(result.is_err(), "500-car train should fail");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Train too long"),
+            "Error should mention 'Train too long', got: {}",
+            err_msg
+        );
+    }
+
+    /// Test case 4: Train that needs previous links should collect them correctly
+    /// Find a link in the network that has previous links and test that it collects them.
+    #[test]
+    fn test_get_links_for_train_placement_uses_previous_links() {
+        let resources = get_resources_path();
+
+        // Load network
+        let network = Network::from_file(resources.join("networks/Taconite-NoBalloon.yaml"), false)
+            .expect("Failed to load network");
+        let links = &network.1;
+
+        // Link 70 has idx_prev: 71 (based on the network structure)
+        // Let's check if we can find a link with previous links
+        let origin_link_idx = LinkIdx::new(70);
+        let origin_link = &links[origin_link_idx.idx()];
+
+        // Skip this test if link 70 doesn't have a valid previous link
+        if !origin_link.idx_prev.is_real() {
+            println!("Skipping test: Link 70 has no previous links");
+            return;
+        }
+
+        // Create a train that's longer than link 70 but shorter than link 70 + its previous links
+        let train_length = origin_link.length + 100.0 * uc::M;
+
+        let result = get_links_for_train_placement(origin_link_idx, train_length, links);
+
+        // If the previous links have enough length, this should succeed and return multiple links
+        if result.is_ok() {
+            let link_path = result.unwrap();
+            assert!(
+                link_path.len() >= 2,
+                "Should return at least 2 links when train is longer than origin"
+            );
+            assert_eq!(
+                *link_path.last().unwrap(),
+                origin_link_idx,
+                "Last link should be origin"
+            );
+        } else {
+            // If it fails, it should be because of insufficient track length
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("Train too long"),
+                "If it fails, error should mention 'Train too long', got: {}",
+                err_msg
+            );
+        }
+    }
 }

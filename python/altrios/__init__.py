@@ -1,6 +1,9 @@
-from importlib.metadata import version
+from importlib.metadata import version, PackageNotFoundError
 
-__version__ = version("altrios")
+try:
+    __version__ = version("altrios")
+except PackageNotFoundError:
+    __version__ = "0.0.0-dev"
 
 import numpy as np
 from pathlib import Path
@@ -14,6 +17,7 @@ from altrios.loaders.powertrain_components import _res_from_excel
 from altrios.utilities import copy_demo_files  # noqa: F401
 from altrios.utilities import package_root, resources_root  # noqa: F401
 from altrios import utilities as utils  # noqa: F401
+from altrios import energization  # noqa: F401
 
 # make everything in altrios_pyo3 available here
 from altrios.altrios_pyo3 import *  # noqa: F403
@@ -43,11 +47,11 @@ data_formats = [
 
 
 def to_pydict(self, data_fmt: str = "msg_pack", flatten: bool = False) -> Dict:
-    """
-    Returns self converted to pure python dictionary with no nested Rust objects
-    # Arguments
-    - `flatten`: if True, returns dict without any hierarchy
-    - `data_fmt`: data format for intermediate conversion step
+    """Returns self converted to pure python dictionary with no nested Rust objects.
+
+    Args:
+        data_fmt: data format for intermediate conversion step
+        flatten: if True, returns dict without any hierarchy
     """
     data_fmt = data_fmt.lower()
     assert data_fmt in data_formats, f"`data_fmt` must be one of {data_formats}"
@@ -80,31 +84,35 @@ def to_pydict(self, data_fmt: str = "msg_pack", flatten: bool = False) -> Dict:
 
 def get_hist_len(obj: Dict) -> Optional[int]:
     """
-    Finds nested `history` and gets lenth of first element
+    Finds nested `history` and gets the number of recorded time steps
     """
     # TODO: check if this is sufficiently recursive and if it's not, make it recursive all the way down
 
+    # The longest series, not the first one. Individual series can now be
+    # switched off (see `altrios.history`), which leaves them empty while the
+    # rest of the component records normally -- so the first key in the dict
+    # says nothing about how many time steps were saved. A component recording
+    # nothing at all yields 0 and falls through to the recursive search below,
+    # so a sim that saves only, say, consist history still flattens.
     if "history" in obj.keys():
-        return len(next(iter(obj["history"].values())))
+        lengths = [
+            len(v)
+            for k, v in obj["history"].items()
+            if isinstance(v, list) and k != "save_fields"
+        ]
+        if lengths and max(lengths) > 0:
+            return max(lengths)
 
-    elif (
-        next(
-            iter(
-                k for k in obj.keys() if re.search("(history\\.\\w+)$", k) is not None
-            ),
-            None,
-        )
-        is not None
-    ):
-        return len(
-            next(
-                (
-                    v
-                    for (k, v) in obj.items()
-                    if re.search("(history\\.\\w+)$", k) is not None
-                )
-            )
-        )
+    else:
+        flat_lengths = [
+            len(v)
+            for (k, v) in obj.items()
+            if re.search("(history\\.\\w+)$", k) is not None
+            and not k.endswith(".save_fields")
+            and isinstance(v, list)
+        ]
+        if flat_lengths and max(flat_lengths) > 0:
+            return max(flat_lengths)
 
     for k, v in obj.items():
         if isinstance(v, dict):
@@ -115,12 +123,12 @@ def get_hist_len(obj: Dict) -> Optional[int]:
 
 
 def get_flattened(obj: Dict | List, hist_len: int, prepend_str: str = "") -> Dict:
-    """
-    Flattens and returns dictionary, separating keys and indices with a `"."`
-    # Arguments
-    # - `obj`: object to flatten
-    # -  hist_len: length of any lists storing history data
-    # - `prepend_str`: prepend this to all keys in the returned `flat` dict
+    """Flattens and returns dictionary, separating keys and indices with a `"."`.
+
+    Args:
+        obj: object to flatten
+        hist_len: length of any lists storing history data
+        prepend_str: prepend this to all keys in the returned `flat` dict
     """
     flat: Dict = {}
     if isinstance(obj, dict):
@@ -147,13 +155,13 @@ def get_flattened(obj: Dict | List, hist_len: int, prepend_str: str = "") -> Dic
 def from_pydict(
     cls, pydict: Dict, data_fmt: str = "msg_pack", skip_init: bool = False
 ) -> Self:  # type: ignore[misc]
-    """
-    Instantiates Self from pure python dictionary
-    # Arguments
-    - `pydict`: dictionary to be converted to ALTRIOS object
-    - `data_fmt`: data format for intermediate conversion step
-    - `skip_init`: passed to `SerdeAPI` methods to control whether initialization
-      is skipped
+    """Instantiates Self from pure python dictionary.
+
+    Args:
+        pydict: dictionary to be converted to ALTRIOS object
+        data_fmt: data format for intermediate conversion step
+        skip_init: passed to `SerdeAPI` methods to control whether initialization is
+            skipped
     """
     data_fmt = data_fmt.lower()
     assert data_fmt in data_formats, f"`data_fmt` must be one of {data_formats}"
@@ -177,12 +185,13 @@ def from_pydict(
 def to_dataframe(
     self, pandas: bool = False, allow_partial: bool = False
 ) -> Union[pd.DataFrame, pl.DataFrame]:
-    """
-    Returns time series results from ALTRIOS object as a Polars or Pandas dataframe.
+    """Returns time series results from ALTRIOS object as a Polars or Pandas dataframe.
 
-    # Arguments
-    - `pandas`: returns pandas dataframe if True; otherwise, returns polars dataframe by default
-    - `allow_partial`: tries to return dataframe of length equal to solved time steps if simulation fails early
+    Args:
+        pandas: returns pandas dataframe if True; otherwise, returns polars dataframe by
+            default
+        allow_partial: tries to return dataframe of length equal to solved time steps if
+            simulation fails early
     """
     obj_dict = self.to_pydict(flatten=True)
     history_keys = ["history.", "cyc."]
@@ -240,3 +249,7 @@ for item in ACCEPTED_RUST_STRUCTS:
     setattr(getattr(altrios_pyo3, item), "to_dataframe", to_dataframe)  # noqa: F405
 
 setattr(ReversibleEnergyStorage, "from_excel", classmethod(_res_from_excel))  # noqa: F405
+
+# Python implementation of `run_speed_limit_train_sims` (replaces the former Rust
+# function); imported last so the dynamically attached serde helpers above are ready.
+from altrios.speed_limit_train_sim import run_speed_limit_train_sims  # noqa: E402,F401

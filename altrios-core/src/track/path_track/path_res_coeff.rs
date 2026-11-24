@@ -2,7 +2,7 @@ use crate::imports::*;
 
 #[serde_api]
 #[derive(Clone, Copy, Default, Debug, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Struct containing linear resistance coefficients for a particular offset with respect to start
 /// of `PathTpc`
 pub struct PathResCoeff {
@@ -43,8 +43,10 @@ impl LinSearchHint for &[PathResCoeff] {
         if dir != &Dir::Bwd {
             ensure!(
                 offset <= self.last().unwrap().get_offset(),
-                "{}\nOffset in forward direction larger than last slice offset at idx: {}!",
+                "{}\nOffset in forward direction ({:.2} m) is larger than last slice offset ({:.2} m) at idx: {}!",
                 format_dbg!(),
+                offset.get::<si::meter>(),
+                self.last().unwrap().get_offset().get::<si::meter>(),
                 idx
             );
             while self[idx + 1].get_offset() < offset {
@@ -53,8 +55,12 @@ impl LinSearchHint for &[PathResCoeff] {
         } else if dir != &Dir::Fwd {
             ensure!(
                 self.first().unwrap().get_offset() <= offset,
-                "{}\nOffset in reverse direction smaller than first slice offset at idx: {}!",
+                "{}\nOffset in reverse direction ({:.2} m) is smaller than first slice offset ({:.2} m) at idx: {}! \
+                This usually means the train's back end extends beyond the beginning of the path. \
+                Ensure the initial link(s) provide enough length for the train.",
                 format_dbg!(),
+                offset.get::<si::meter>(),
+                self.first().unwrap().get_offset().get::<si::meter>(),
                 idx
             );
             while offset < self[idx].get_offset() {

@@ -2,7 +2,7 @@ use super::*;
 
 #[serde_api]
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, SetCumulative, StateMethods)]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 /// Struct for simulating power distribution controls and energy usage of locomotive consist.
 pub struct Consist {
     // pretty sure these won't get automatically generated correctly
@@ -257,26 +257,35 @@ impl Consist {
         }
     }
 
-    /// Set catenary charging/discharging power limit
-    pub fn set_cat_power_limit(
+    /// Look up the catenary power limit at `offset` along `path_tpc` and apply
+    /// it to this consist and its locomotives.
+    pub fn set_cat_power_limit_from_path(
         &mut self,
         path_tpc: &crate::track::PathTpc,
         offset: si::Length,
     ) -> anyhow::Result<()> {
-        for cpl in path_tpc.cat_power_limits() {
-            if offset < cpl.offset_start {
-                break;
-            } else if offset <= cpl.offset_end {
-                self.state
-                    .pwr_cat_lim
-                    .update(cpl.power_limit, || format_dbg!())?;
-                return Ok(());
+        let (limit, loss_factor) = {
+            let mut limit = si::Power::ZERO;
+            let mut loss_factor = 0.0_f64;
+            for cpl in path_tpc.cat_power_limits() {
+                if offset < cpl.offset_start {
+                    break;
+                } else if offset <= cpl.offset_end {
+                    limit = cpl.power_limit;
+                    // Resistive line-loss factor k = resistance_to_source / voltage^2
+                    // (units of 1/W); loss = k * pwr_elec_in^2. A non-positive
+                    // voltage disables loss.
+                    let voltage = cpl.voltage.get::<si::volt>();
+                    if voltage > 0.0 {
+                        loss_factor =
+                            cpl.resistance_to_source.get::<si::ohm>() / (voltage * voltage);
+                    }
+                    break;
+                }
             }
-        }
-        self.state
-            .pwr_cat_lim
-            .update(si::Power::ZERO, || format_dbg!())?;
-        Ok(())
+            (limit, loss_factor)
+        };
+        self.set_cat_power_limit(Some(limit), Some(loss_factor))
     }
 
     pub fn get_energy_fuel(&self) -> anyhow::Result<si::Energy> {
@@ -326,6 +335,35 @@ impl Consist {
             .iter_mut()
             .try_for_each(|l| l.set_pwr_aux(engine_on))?;
         Ok(())
+    }
+
+    /// Mass assigned to each locomotive such that the buffer calculations can
+    /// be based on mass weighted proportionally to the relative battery
+    /// capacity; `None` for every locomotive if none has a battery. Used for
+    /// both the power limits and the energy solve, so the two agree.
+    fn mass_for_each_loco(&self, train_mass: Option<si::Mass>) -> Vec<Option<si::Mass>> {
+        let res_total_usable_energy = self.loco_vec.iter().fold(si::Energy::ZERO, |m_tot, l| {
+            m_tot
+                + l.reversible_energy_storage()
+                    .map(|res| res.energy_capacity_usable())
+                    .unwrap_or(si::Energy::ZERO)
+        });
+        self.loco_vec
+            .iter()
+            .map(|loco| {
+                if res_total_usable_energy > si::Energy::ZERO {
+                    train_mass.map(|tm| {
+                        loco.reversible_energy_storage()
+                            .map(|res| res.energy_capacity_usable())
+                            .unwrap_or(si::Energy::ZERO)
+                            / res_total_usable_energy
+                            * tm
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     pub fn solve_energy_consumption(
@@ -440,8 +478,16 @@ impl Consist {
 
         // maybe put logic for toggling `engine_on` here
 
-        for (i, (loco, pwr_out)) in self.loco_vec.iter_mut().zip(pwr_out_vec.iter()).enumerate() {
-            loco.solve_energy_consumption(*pwr_out, dt, engine_on, train_mass, train_speed)
+        // the same locomotive-specific mass as in `set_curr_pwr_max_out`
+        let mass_for_each_loco = self.mass_for_each_loco(train_mass);
+        for (i, ((loco, pwr_out), mass)) in self
+            .loco_vec
+            .iter_mut()
+            .zip(pwr_out_vec.iter())
+            .zip(mass_for_each_loco)
+            .enumerate()
+        {
+            loco.solve_energy_consumption(*pwr_out, dt, engine_on, mass, train_speed)
                 .with_context(|| {
                     format!(
                         "{}\nloco idx: {}, loco type: {}",
@@ -452,6 +498,13 @@ impl Consist {
                 })?;
         }
 
+        // Catenary resistive line loss is an I^2*R effect on the SHARED contact
+        // wire, governed by the aggregate consist current -- recompute it here
+        // from the summed pantograph power (the per-loco solve above set only the
+        // naive per-loco term).
+        self.set_aggregate_cat_line_loss()
+            .with_context(|| format_dbg!())?;
+
         self.state.pwr_fuel.update(
             {
                 let pwr_fuel = self
@@ -461,6 +514,9 @@ impl Consist {
                         let new = match &loco.loco_type {
                             PowertrainType::ConventionalLoco(cl) => {
                                 *cl.fc.state.pwr_fuel.get_fresh(|| format_dbg!())?
+                            }
+                            PowertrainType::DualModeLoco(dml) => {
+                                *dml.fc.state.pwr_fuel.get_fresh(|| format_dbg!())?
                             }
                             PowertrainType::HybridLoco(hel) => {
                                 *hel.fc.state.pwr_fuel.get_fresh(|| format_dbg!())?
@@ -484,6 +540,7 @@ impl Consist {
                     .try_fold(si::Power::ZERO, |acc, loco| -> anyhow::Result<si::Power> {
                         let new = match &loco.loco_type {
                             PowertrainType::ConventionalLoco(_cl) => si::Power::ZERO,
+                            PowertrainType::DualModeLoco(_dml) => si::Power::ZERO,
                             PowertrainType::HybridLoco(hel) => {
                                 *hel.res.state.pwr_out_chemical.get_fresh(|| format_dbg!())?
                             }
@@ -526,6 +583,7 @@ impl Consist {
                 .iter()
                 .map(|loco| match &loco.loco_type {
                     PowertrainType::ConventionalLoco(conv) => conv.edrv.pwr_out_max,
+                    PowertrainType::DualModeLoco(dml) => dml.edrv.pwr_out_max,
                     PowertrainType::HybridLoco(hel) => hel.edrv.pwr_out_max,
                     PowertrainType::BatteryElectricLoco(bel) => bel.edrv.pwr_out_max,
                     // really big number that is not inf to avoid null in json
@@ -534,6 +592,40 @@ impl Consist {
                 .sum(),
             || format_dbg!(),
         )?;
+        Ok(())
+    }
+
+    /// Re-attribute catenary resistive line loss across the consist as a
+    /// shared-conductor aggregate. All cat-equipped locomotives on the consist
+    /// occupy the same energized zone and draw from the same feeder, so the loss
+    /// is governed by the AGGREGATE pantograph current: `k * (sum_i P_i)^2`, not
+    /// the per-loco sum `k * sum_i P_i^2` that each [CatenaryInterface] computes
+    /// in isolation. This splits the aggregate per loco as `k * P_i * P_train`
+    /// (the parts sum to `k * P_train^2`) so per-loco reporting is preserved. The
+    /// loss factor `k` is identical across the consist (same track position); for
+    /// a single cat-equipped locomotive this reduces to the original `k * P_i^2`.
+    fn set_aggregate_cat_line_loss(&mut self) -> anyhow::Result<()> {
+        let mut pwr_cat_in_total = si::Power::ZERO;
+        for loco in self.loco_vec.iter() {
+            if let Some(cat_int) = loco.catenary_interface() {
+                pwr_cat_in_total += *cat_int.state.pwr_elec_in.get_fresh(|| format_dbg!())?;
+            }
+        }
+        let p_train_watts = pwr_cat_in_total.get::<si::watt>();
+        for loco in self.loco_vec.iter_mut() {
+            if let Some(cat_int) = loco.catenary_interface_mut() {
+                let k = cat_int.loss_factor;
+                let p_i_watts = cat_int
+                    .state
+                    .pwr_elec_in
+                    .get_fresh(|| format_dbg!())?
+                    .get::<si::watt>();
+                cat_int.state.pwr_line_loss.update_unchecked(
+                    uc::W * (k * p_i_watts * p_train_watts),
+                    || format_dbg!(),
+                )?;
+            }
+        }
         Ok(())
     }
 }
@@ -565,6 +657,21 @@ impl Default for Consist {
 }
 
 impl LocoTrait for Consist {
+    /// Apply a catenary power limit to this consist and propagate it to every
+    /// locomotive. `None` de-energizes the catenary: the limit becomes zero.
+    fn set_cat_power_limit(
+        &mut self,
+        pwr_cat_lim: Option<si::Power>,
+        loss_factor: Option<f64>,
+    ) -> anyhow::Result<()> {
+        let limit = pwr_cat_lim.unwrap_or(si::Power::ZERO);
+        self.state.pwr_cat_lim.update(limit, || format_dbg!())?;
+        for loco in self.loco_vec.iter_mut() {
+            loco.set_cat_power_limit(Some(limit), loss_factor)?;
+        }
+        Ok(())
+    }
+
     fn set_curr_pwr_max_out(
         &mut self,
         pwr_aux: Option<si::Power>,
@@ -580,28 +687,9 @@ impl LocoTrait for Consist {
         // method is called
         ensure!(pwr_aux.is_none(), format_dbg!(pwr_aux.is_none()));
 
-        // calculate mass assigned to each locomotive such that the buffer
-        // calculations can be based on mass weighted proportionally to the
-        // relative battery capacity
-        let res_total_usable_energy = self.loco_vec.iter().fold(si::Energy::ZERO, |m_tot, l| {
-            m_tot
-                + l.reversible_energy_storage()
-                    .map(|res| res.energy_capacity_usable())
-                    .unwrap_or(si::Energy::ZERO)
-        });
-        for (i, loco) in self.loco_vec.iter_mut().enumerate() {
-            // assign locomotive-specific mass for hybrid controls
-            let mass: Option<si::Mass> = if res_total_usable_energy > si::Energy::ZERO {
-                train_mass.map(|tm| {
-                    loco.reversible_energy_storage()
-                        .map(|res| res.energy_capacity_usable())
-                        .unwrap_or(si::Energy::ZERO)
-                        / res_total_usable_energy
-                        * tm
-                })
-            } else {
-                None
-            };
+        // assign locomotive-specific mass for hybrid controls
+        let mass_for_each_loco = self.mass_for_each_loco(train_mass);
+        for (i, (loco, mass)) in self.loco_vec.iter_mut().zip(mass_for_each_loco).enumerate() {
             loco.set_curr_pwr_max_out(None, elev_and_temp, mass, train_speed, dt)
                 .map_err(|err| {
                     err.context(format!(
@@ -660,6 +748,7 @@ impl LocoTrait for Consist {
                     .try_fold(si::Power::ZERO, |acc, loco| -> anyhow::Result<si::Power> {
                         let new = match &loco.loco_type {
                             PowertrainType::ConventionalLoco(_) => si::Power::ZERO,
+                            PowertrainType::DualModeLoco(_) => si::Power::ZERO,
                             PowertrainType::HybridLoco(_) => {
                                 *loco.state.pwr_out_max.get_fresh(|| format_dbg!())?
                             }
@@ -774,7 +863,7 @@ impl Mass for Consist {
     StateMethods,
     SetCumulative,
 )]
-#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq))]
+#[cfg_attr(feature = "pyo3", pyclass(module = "altrios", subclass, eq, from_py_object))]
 pub struct ConsistState {
     /// current time index
     pub i: TrackedState<usize>,
@@ -834,3 +923,79 @@ impl ConsistState {}
 
 impl Init for ConsistState {}
 impl SerdeAPI for ConsistState {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_aggregate_cat_line_loss_scales_with_consist() {
+        // Two identical cat-equipped locomotives sharing one energized zone.
+        let k = 1.0e-8_f64; // loss factor R / V^2 (1/W)
+        let p_watts = 3.0e6_f64; // per-loco pantograph power
+
+        let mut consist = Consist::new(
+            vec![
+                Locomotive::default_dual_mode_loco(),
+                Locomotive::default_dual_mode_loco(),
+            ],
+            Some(1),
+            PowerDistributionControlType::default(),
+        );
+        for loco in consist.loco_vec.iter_mut() {
+            let cat_int = loco.catenary_interface_mut().unwrap();
+            cat_int.loss_factor = k;
+            cat_int
+                .state
+                .pwr_elec_in
+                .update_unchecked(uc::W * p_watts, || format_dbg!())
+                .unwrap();
+        }
+
+        consist.set_aggregate_cat_line_loss().unwrap();
+
+        // Each loco carries k * P_i * P_train; the consist sum is k * (2P)^2,
+        // i.e. 2x the naive per-loco k * P^2.
+        let p_train = 2.0 * p_watts;
+        let mut total = 0.0;
+        for loco in consist.loco_vec.iter() {
+            let loss = loco
+                .catenary_interface()
+                .unwrap()
+                .state
+                .pwr_line_loss
+                .get_fresh(|| format_dbg!())
+                .unwrap()
+                .get::<si::watt>();
+            assert!((loss - k * p_watts * p_train).abs() < 1.0e-3);
+            total += loss;
+        }
+        assert!((total - k * p_train * p_train).abs() < 1.0e-3);
+
+        // A single-loco consist reduces to the naive k * P^2.
+        let mut solo = Consist::new(
+            vec![Locomotive::default_dual_mode_loco()],
+            Some(1),
+            PowerDistributionControlType::default(),
+        );
+        {
+            let cat_int = solo.loco_vec[0].catenary_interface_mut().unwrap();
+            cat_int.loss_factor = k;
+            cat_int
+                .state
+                .pwr_elec_in
+                .update_unchecked(uc::W * p_watts, || format_dbg!())
+                .unwrap();
+        }
+        solo.set_aggregate_cat_line_loss().unwrap();
+        let solo_loss = solo.loco_vec[0]
+            .catenary_interface()
+            .unwrap()
+            .state
+            .pwr_line_loss
+            .get_fresh(|| format_dbg!())
+            .unwrap()
+            .get::<si::watt>();
+        assert!((solo_loss - k * p_watts * p_watts).abs() < 1.0e-3);
+    }
+}
